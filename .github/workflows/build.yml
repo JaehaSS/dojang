@@ -27,8 +27,11 @@ jobs:
               src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
     runs-on: ${{ matrix.os }}
     env:
-      # 저장소 루트 기준 target/ — 로컬의 shared-target 설정은 CI에 없다.
-      CARGO_TARGET_DIR: src-tauri/target
+      # 로컬의 shared-target 설정은 CI에 없다. 상대 경로로 두면 tauri가 cargo를 src-tauri/에서
+      # 부르므로 src-tauri/src-tauri/target이 되어 아래 artifacts 경로와 어긋난다.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+      # macos-latest(7GB)에서 Node 기본 힙(~2GB)으로는 vite build가 OOM으로 죽는다.
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@v4
 
