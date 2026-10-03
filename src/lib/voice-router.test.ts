@@ -4,25 +4,28 @@ import { routeTranscript } from "./voice-router";
 describe("voice router", () => {
   it("화면 이름 한 마디를 해당 화면으로 보낸다", () => {
     expect(routeTranscript("설정")).toEqual({ type: "view", view: "settings" });
-    // 메모리 채널은 Wiki 공간의 필터가 됐다.
-    expect(routeTranscript("메모리")).toEqual({ type: "view", view: "wiki" });
     expect(routeTranscript("앙상블")).toEqual({ type: "view", view: "ensemble" });
   });
 
   it("조사·서술어가 붙어도 같은 화면으로 보낸다", () => {
-    expect(routeTranscript("위키 화면")).toEqual({ type: "view", view: "wiki" });
-    expect(routeTranscript("위키로 가")).toEqual({ type: "view", view: "wiki" });
+    expect(routeTranscript("설정 화면")).toEqual({ type: "view", view: "settings" });
+    expect(routeTranscript("홈으로 가")).toEqual({ type: "view", view: "home" });
     expect(routeTranscript("인사이트 열어줘")).toEqual({ type: "view", view: "insights" });
   });
 
   it("전사에 섞여 오는 문장부호와 공백을 무시한다", () => {
-    expect(routeTranscript(" 위키. ")).toEqual({ type: "view", view: "wiki" });
+    expect(routeTranscript(" 앙상블. ")).toEqual({ type: "view", view: "ensemble" });
     expect(routeTranscript("설정!")).toEqual({ type: "view", view: "settings" });
   });
 
   it("영문 화면 이름도 받는다", () => {
     expect(routeTranscript("home")).toEqual({ type: "view", view: "home" });
-    expect(routeTranscript("Wiki")).toEqual({ type: "view", view: "wiki" });
+    expect(routeTranscript("Settings")).toEqual({ type: "view", view: "settings" });
+  });
+
+  it("지운 Wiki 화면의 옛 별칭은 화면을 바꾸지 않는다", () => {
+    expect(routeTranscript("위키")).toBeNull();
+    expect(routeTranscript("메모리")).toBeNull();
   });
 
   it("커맨드가 화면 별칭보다 먼저 매칭된다", () => {

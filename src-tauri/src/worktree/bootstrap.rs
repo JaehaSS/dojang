@@ -165,7 +165,7 @@ fn run_setup_script(target: &Path, transcript: &mut Transcript) {
     if !script.is_file() {
         return;
     }
-    let output = std::process::Command::new("sh")
+    let output = std::process::Command::new(posix_shell())
         .arg(&script)
         .current_dir(target)
         .output();
@@ -178,6 +178,25 @@ fn run_setup_script(target: &Path, transcript: &mut Transcript) {
         ),
         Err(error) => format!("{SETUP_SCRIPT} 를 실행하지 못했습니다: {error}"),
     });
+}
+
+#[cfg(not(windows))]
+fn posix_shell() -> std::path::PathBuf {
+    "sh".into()
+}
+
+/// Windows에는 `sh`가 PATH에 없는 것이 보통이다. Git for Windows는 `<Git>\cmd\git.exe`만
+/// PATH에 올리고 `sh.exe`는 `<Git>\bin`에 두므로, git 위치에서 거슬러 찾는다.
+#[cfg(windows)]
+fn posix_shell() -> std::path::PathBuf {
+    if let Some(sh) = crate::reviewer::which("sh") {
+        return sh.into();
+    }
+    crate::reviewer::which("git")
+        .map(std::path::PathBuf::from)
+        .and_then(|git| Some(git.parent()?.parent()?.join("bin").join("sh.exe")))
+        .filter(|sh| sh.is_file())
+        .unwrap_or_else(|| "sh".into())
 }
 
 #[cfg(test)]

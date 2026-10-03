@@ -44,6 +44,10 @@ async fn queued_task_carries_the_memory_file_into_its_worktree() {
         std::fs::read_to_string(std::path::Path::new(&task.worktree_path).join("AGENTS.md"))
             .unwrap();
     assert!(projected.contains("- ship runner parity"), "{projected}");
+    assert!(
+        projected.contains("# Dojang Memory (파일 정본:"),
+        "{projected}"
+    );
     assert!(projected.contains("# owner"), "{projected}");
     // 원장 대신 파일 상태만 남는다(R8).
     let rows = memory::file::list(&pool, &repo).await.unwrap();
@@ -52,11 +56,6 @@ async fn queued_task_carries_the_memory_file_into_its_worktree() {
         .find(|row| row.repo_key.as_deref() == Some(key.as_str()))
         .unwrap();
     assert_eq!(repo_row.last_task_id, Some(task.id));
-    let journals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_projection_journal")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(journals, 0);
     let _ = std::fs::remove_dir_all(memory_root);
     cleanup(db_path, repo);
 }
@@ -147,6 +146,7 @@ fn request(repo: &std::path::Path, instruction: &str) -> QueuedTaskRequest {
         mode: "terminal".to_string(),
         goal_contract: None,
         resume_session: None,
+        resume_vendor: None,
     }
 }
 

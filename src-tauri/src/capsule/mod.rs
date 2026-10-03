@@ -28,7 +28,7 @@ pub const CAP_END: &str = "<!-- praxis:capsule end -->";
 
 /// 캡슐을 컨텍스트 파일용 managed block 텍스트로 렌더 (다음 세션 주입).
 pub fn render_capsule_block(c: &Capsule) -> String {
-    let mut body = String::from("# Praxis Capsule (작업 핸드오프)\n\n");
+    let mut body = String::from("# Dojang Capsule (작업 핸드오프)\n\n");
     if c.goal_contract.is_some() {
         body.push_str(&crate::goal_contract::execution_prompt(
             &c.instruction,

@@ -34,6 +34,7 @@ const DOC_LINK: Record<string, string> = {
   "docs/bad.md": "/etc/passwd",
   "docs/abs.md": "/work/root/docs/target.md",
   "docs/fragment.md": "#소제목",
+  "/Users/test/notes/README.md": "GLOSSARY.md",
   "docs/left.md": "../x.ts",
   "docs/right.md": "../y.ts",
   "docs/same-left.md": "../shared.ts",
@@ -1084,6 +1085,17 @@ describe("문서 링크 클릭", () => {
 
     expect(h.openUrl).toHaveBeenCalledWith("https://example.com/%EB%AC%B8%EC%84%9C");
     expect(tabsOf(panes()[0])).toEqual(["docs/url.md"]);
+  });
+
+  it("루트 밖에서 열린 문서의 상대 링크는 그 문서 옆의 파일을 같은 칸에 연다", async () => {
+    await render({ initial: ["a.ts", "/Users/test/notes/README.md"], rootPath: "/work/root" });
+
+    const event = await clickLink(panes()[0]);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(navigationError).not.toHaveBeenCalled();
+    expect(tabsOf(panes()[0])).toEqual(["a.ts", "/Users/test/notes/README.md", "/Users/test/notes/GLOSSARY.md"]);
+    expect(activeTabOf(panes()[0])).toBe("/Users/test/notes/GLOSSARY.md");
   });
 
   it("열 수 없는 링크는 알리기만 한다", async () => {

@@ -1,14 +1,16 @@
 //! 파일형 메모리의 IPC 표면 — 설정(루트·상한), 목록, 열기, 정리 세션.
 //!
 //! 설계: `docs/designs/2026-09-13-memory-is-a-file-in-the-vault.md` §5·§6.
-//! 본문을 읽고 쓰는 커맨드는 **없다** — 정본이 파일이라 에디터 창이 곧 편집기다(R4).
+//! 본문을 자유롭게 읽고 쓰는 커맨드는 **없다** — 정본이 파일이라 에디터 창이 곧
+//! 편집기다(R4). 예외 하나는 `insight_memory_append`(발견 공간 설계 §8, T4)로,
+//! 한 줄만 append하는 좁은 쓰기다.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime, State, WebviewWindow};
 
-use crate::memory::file::{self, Caps, MemoryFileInfo};
+use crate::memory::file::{self, AppendOutcome, Caps, MemoryFileInfo, MemoryTarget};
 use crate::project_editor::{self, ProjectEditorState, ProjectLaunch};
 
 use super::knowledge_vault_session::SessionOpenDto;
@@ -160,6 +162,25 @@ pub async fn memory_file_open<R: Runtime>(
     Ok(())
 }
 
+/// 발견 카드 한 문장을 메모리에 남긴다(설계 §8 "메모리에 남기기", T4).
+///
+/// 경로는 여기서 만들지 않는다 — `target`이 `User`/`Repo{repo}`로만 고르고, 실제 파일
+/// 경로는 `memory::file::append`가 `memory_root` + 그 모듈의 경로 규칙으로 조립한다.
+/// 상한을 넘기면 쓰지 않고 `Full{path}`를 돌려주므로, 화면은 그 경로를
+/// `memory_file_open`으로 열어 사람이 합치게 한다.
+#[tauri::command]
+pub async fn insight_memory_append(
+    state: State<'_, AppState>,
+    target: MemoryTarget,
+    text: String,
+) -> Result<AppendOutcome, String> {
+    let pool = pool_of(&state)?;
+    let data_dir = file::data_dir(&pool);
+    file::append(&pool, &data_dir, &target, &text)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// 열기 대상은 메모리 루트 안이어야 한다. 목록이 준 경로를 그대로 받지만, IPC는
 /// 화면만 부르는 것이 아니므로 경계를 여기서 다시 본다.
 fn resolve_inside(root: &Path, path: &str) -> Result<PathBuf, String> {
@@ -222,7 +243,7 @@ pub async fn memory_session_open<R: Runtime>(
 /// 화면과 블록이 말하는 상한이 서로 다르면 에이전트가 어느 쪽을 믿을지 알 수 없다.
 fn session_seed(agent: &str, caps: &Caps, user_caps: &Caps) -> String {
     let body = format!(
-        "이 폴더는 Praxis 메모리 정본이다. USER.md(전역, 상한 {}줄/{}KB)와 \
+        "이 폴더는 Dojang 메모리 정본이다. USER.md(전역, 상한 {}줄/{}KB)와 \
          <repo-key>/MEMORY.md(저장소별, 상한 {}줄/{}KB)를 읽고, 중복을 합치고 낡은 항목을 지워 \
          상한 안으로 줄여라. 코드에서 다시 얻을 수 있는 것·로그·임시 경로는 지운다. \
          이 폴더 밖은 쓰지 않는다.",
@@ -266,7 +287,7 @@ mod tests {
         let claude = session_seed("claude", &caps, &user_caps);
         // 슬래시로 시작하면 안 된다 — `/memory`는 Claude Code 내장 명령이라 지시문을 삼킨다.
         assert!(!claude.starts_with('/'), "{claude}");
-        assert!(claude.starts_with("이 폴더는 Praxis 메모리 정본이다."));
+        assert!(claude.starts_with("이 폴더는 Dojang 메모리 정본이다."));
         assert!(claude.contains("USER.md(전역, 상한 40줄/3KB)"));
         assert!(claude.contains("MEMORY.md(저장소별, 상한 100줄/8KB)"));
         assert!(claude.contains("이 폴더 밖은 쓰지 않는다."));

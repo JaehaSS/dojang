@@ -72,19 +72,21 @@ describe("taskAgentSet", () => {
 
 describe("debateStart", () => {
   it("로컬 좌표는 로컬 command로 간다", async () => {
-    await debateStart({ host: "local", id: 42 }, "codex");
+    await debateStart({ host: "local", id: 42 }, [{ agent: "codex" }, { agent: "agy", model: "gemini-3" }]);
 
     expect(invoke).toHaveBeenCalledWith("debate_start", {
       taskId: 42,
-      opponentAgent: "codex",
-      model: null,
+      opponents: [
+        { agent: "codex", model: null },
+        { agent: "agy", model: "gemini-3" },
+      ],
     });
   });
 
   it("원격은 자리를 만들기 전에 거부한다 — 만들면 그 세션이 다음 턴부터 실행 불가가 된다", async () => {
     remote();
 
-    await expect(debateStart({ host: REMOTE_HOST, id: 42 }, "codex")).rejects.toThrow(
+    await expect(debateStart({ host: REMOTE_HOST, id: 42 }, [{ agent: "codex" }])).rejects.toThrow(
       "원격 세션에서는 토론을 시작할 수 없습니다",
     );
     expect(invoke).not.toHaveBeenCalled();

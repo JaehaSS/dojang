@@ -15,6 +15,7 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 import { SkillsView } from "./SkillsView";
+import { resetExperimentalFeaturesForTest } from "../lib/experimental-features";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -72,6 +73,7 @@ const typeSearch = async (value: string) => {
 };
 
 beforeEach(() => {
+  resetExperimentalFeaturesForTest(false);
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -131,7 +133,7 @@ describe("SkillsView — 뷰어", () => {
     expect(segmentLabels()).not.toContain("Agy");
   });
 
-  it("렌즈를 고르면 발동 방식이 붙는다 — 다리로 도는 것은 Praxis 확장", async () => {
+  it("렌즈를 고르면 발동 방식이 붙는다 — 다리로 도는 것은 Dojang 확장", async () => {
     mocks.list.mockResolvedValue([
       skill("owned", [{ vendor: "codex" }]),
       skill("borrowed", [{ vendor: "claude" }]),
@@ -142,7 +144,7 @@ describe("SkillsView — 뷰어", () => {
     await act(async () => codex.click());
 
     expect(container.textContent).toContain("네이티브");
-    expect(container.textContent).not.toContain("Praxis 확장");
+    expect(container.textContent).not.toContain("Dojang 확장");
   });
 
   it("검색은 이름과 설명을 대소문자 무시로 훑는다", async () => {
@@ -220,5 +222,20 @@ describe("SkillsView — 뷰어", () => {
 
     expect(container.textContent).toContain("스킬 본문입니다");
     expect(mocks.read).toHaveBeenCalledWith("/repo", "alpha");
+  });
+
+  it("고급·실험 기능이 꺼져 있으면(기본값) 경험 패널을 렌더하지 않는다", async () => {
+    mocks.list.mockResolvedValue([skill("alpha", [{ vendor: "claude" }])]);
+    await mount();
+
+    expect(container.querySelector('[aria-label="하네스 선택"]')).toBeNull();
+  });
+
+  it("고급·실험 기능을 켜면 경험 패널이 나타난다", async () => {
+    resetExperimentalFeaturesForTest(true);
+    mocks.list.mockResolvedValue([skill("alpha", [{ vendor: "claude" }])]);
+    await mount();
+
+    expect(container.querySelector('[aria-label="하네스 선택"]')).not.toBeNull();
   });
 });

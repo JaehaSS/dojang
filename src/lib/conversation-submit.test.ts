@@ -56,3 +56,13 @@ describe("main conversation admission", () => {
     expect(api.submit).toHaveBeenCalledOnce();
   });
 });
+
+it("does not reuse an uncertain request with a new wiki draft generation after navigation", async () => {
+  const submit = vi.fn(async (id: string) => receipt(id, "unknown"));
+  const api: ConversationAdmission = { submit, receipt: vi.fn(async id => receipt(id, "unknown")) };
+  const owner = new ConversationSubmitter();
+  await expect(owner.send("local:7", api, "same text", [], "draft-old")).rejects.toThrow();
+  await expect(owner.send("local:7", api, "same text", [], "draft-new")).rejects.toThrow("이전 요청");
+  expect(submit).toHaveBeenCalledOnce();
+  expect(owner.inspect("local:7")?.contextKey).toBe("draft-old");
+});

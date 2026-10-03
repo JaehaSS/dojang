@@ -32,7 +32,13 @@ const isUnder = (cwd: string, root: string): boolean => cwd === root || cwd.star
 const sessionCwd = (session: SessionHomeSession): string | null =>
   session.cwd ?? session.last_cwd ?? null;
 
-export function sessionLabel(session: SessionHomeSession): string {
+export const sessionVendor = (session: Pick<SessionHomeSession, "vendor">): "claude" | "codex" =>
+  session.vendor === "codex" ? "codex" : "claude";
+
+export const sessionHomeKey = (session: Pick<SessionHomeSession, "host" | "vendor" | "session_id">): string =>
+  `${session.host}:${sessionVendor(session)}:${session.session_id}`;
+
+export function sessionLabel(session: Pick<SessionHomeSession, "title" | "first_message">): string {
   return session.title?.trim() || session.first_message?.trim() || "(제목 없음)";
 }
 
@@ -56,7 +62,7 @@ export function projectOf(session: SessionHomeSession, projects: readonly string
 }
 
 /**
- * 저장소 접두 조회와 전체 조회를 `session_id`로 합친다(결정 4). 앞쪽 배열이 우선이고
+ * 저장소 접두 조회와 전체 조회를 host/vendor/session id로 합친다. 앞쪽 배열이 우선이고
  * 순서는 첫 등장 순을 지킨다 — 서버가 준 최근순이 곧 프로젝트 안의 세션 순서다.
  */
 export function mergeSessionHomeResults(
@@ -66,8 +72,9 @@ export function mergeSessionHomeResults(
   const out: SessionHomeSession[] = [];
   for (const list of lists) {
     for (const session of list) {
-      if (seen.has(session.session_id)) continue;
-      seen.add(session.session_id);
+      const key = sessionHomeKey(session);
+      if (seen.has(key)) continue;
+      seen.add(key);
       out.push(session);
     }
   }
@@ -103,7 +110,7 @@ export function buildSessionHomeTree(
           ? stripTrailingSlash(cwd).slice(root.length + 1)
           : null;
       return {
-        id: `session:${session.session_id}`,
+        id: `session:${sessionHomeKey(session)}`,
         kind: "session",
         label: sessionLabel(session),
         detail: relative,

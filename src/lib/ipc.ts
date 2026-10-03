@@ -274,7 +274,6 @@ export interface CandidateBenchmarkMetrics {
   tokens_in: number;
   tokens_out: number;
   cost_usd: number;
-  memory_count: number;
 }
 
 export type EnsembleSelectionStatus = "pending" | "selected" | "ambiguous";
@@ -288,8 +287,6 @@ export interface EnsembleFeedbackEntry {
   selected_agent: string | null;
   requested_model: string | null;
   resolved_model: string | null;
-  selected_memory_count: number;
-  selected_approved_memory_count: number;
 }
 
 export interface EnsembleFeedbackHistory {
@@ -297,8 +294,6 @@ export interface EnsembleFeedbackHistory {
   selected_count: number;
   pending_count: number;
   ambiguous_count: number;
-  selected_with_memory: number;
-  selected_without_memory: number;
 }
 
 export const ensembleList = (ensemble: string) =>
@@ -313,11 +308,22 @@ export const ensembleFeedbackHistory = () =>
 export const ensembleJudge = (ensemble: string, judgePref = "") =>
   invoke<Judgment>("ensemble_judge", { ensemble, judgePref });
 
-/** 토론 발화자 — 이벤트에 없으면 "미상"이다. 좌측으로 접지 않는다(설계 §4-4). */
-export type DebateSpeaker = "left" | "right";
+/** 토론 발화자 — 이벤트에 없으면 "미상"이다. 좌측으로 접지 않는다(설계 §4-4).
+ *  값은 위치가 아니라 이름이다 — 저장 이벤트가 이 문자열을 영구히 담는다(설계 2026-09-23 D1). */
+export type DebateSpeaker = "left" | "right" | "third";
+
+/** 자리 순서 — 발화 순서이자 면의 좌→우 배치다. 2자 토론은 앞의 둘만 쓴다. */
+export const DEBATE_SEATS: readonly DebateSpeaker[] = ["left", "right", "third"];
 
 /** 토론이 끝난 이유. 화면 상태는 `running | ended(reason)` 둘뿐이고 배너 문자열만 이것이 가른다. */
 export type DebateEndReason = "consensus" | "round_cap" | "aborted" | "error";
+
+/** Persisted structured output from a Code-mode or connector tool. */
+export type ToolOutputContent =
+  | { type: "text"; text: string }
+  | { type: "image"; url: string }
+  | { type: "audio"; url: string }
+  | { type: "resource"; uri: string; title: string };
 
 /** 대화 모드(Phase 2) 스트리밍 이벤트 — `convo://event` 페이로드(flatten).
  *  `speaker`는 variant가 아니라 **직렬화 지점의 형제 필드**라 유니온 바깥에서 교차로 붙인다. */
@@ -328,6 +334,7 @@ export type ConvoEvent = (
   | { id: number; kind: "text"; text: string; parent_id?: string }
   | { id: number; kind: "tool_use"; name: string; summary: string; tool_id?: string; parent_id?: string }
   | { id: number; kind: "tool_result"; summary: string; is_error: boolean; tool_use_id?: string; parent_id?: string }
+  | { id: number; kind: "tool_output"; tool_use_id: string; contents: ToolOutputContent[]; parent_id?: string }
   /** 서브 에이전트가 실제로 돈 모델 — 세션 칩을 오염시키지 않도록 model_snapshot과 분리돼 있다. */
   | { id: number; kind: "subagent_model"; parent_id: string; model: string }
   | {
@@ -538,29 +545,40 @@ export const quizPending = (limit?: number) =>
 /** 실행 중인 대화 턴 중단 (자식 프로세스 그룹 kill). 합성 중단 result 이벤트가 뒤따른다. */
 export const convoInterrupt = (id: number) => invoke("convo_interrupt", { id });
 
-/** 토론의 우측 자리 — 있으면 그 작업은 토론 중이다. 좌측은 여전히 `tasks`가 원천이다. */
+/** 토론의 비좌측 자리 하나 — 있으면 그 작업은 토론 중이다. 좌측은 여전히 `tasks`가 원천이다. */
 export interface DebateSide {
+  side: Exclude<DebateSpeaker, "left">;
   agent: string;
   model: string | null;
 }
 
-/** 우측 자리 조회. `null`이면 토론이 아니다 — "토론 중"은 컬럼이 아니라 이 행의 존재로 파생한다. */
-export const debateSide = (taskId: number) =>
-  invoke<DebateSide | null>("debate_side", { taskId });
+/** 비좌측 자리 조회, 자리 순서. 빈 배열이면 토론이 아니다 — "토론 중"은 컬럼이 아니라 행의 존재로 파생한다. */
+export const debateSides = (taskId: number) =>
+  invoke<DebateSide[]>("debate_sides", { taskId });
 
-/** 토론 시작 — 현재 에이전트가 좌측이 되고 고른 상대가 우측이다. 라운드 상한은 설정에서만 바꾼다.
+/** 토론 상대 한 명. 모델이 없으면 설정의 벤더 기본을 쓴다. */
+export interface DebateOpponent {
+  agent: string;
+  model?: string | null;
+}
+
+/** 토론 시작 — 현재 에이전트가 좌측이 되고 고른 상대들이 순서대로 우측·셋째가 된다(1~2명).
+ *  라운드 상한은 설정에서만 바꾼다.
  *
  *  **로컬 전용이다.** Runner의 대화 어댑터가 우측 자리가 있는 작업을 아예 거절한다
  *  (`consume_conversation_events`) — 원격에서 자리만 만들면 그 세션은 다음 턴부터 실행 불가가
  *  되고, 화면은 토론이 시작된 것처럼 보인다. 그래서 자리를 만들기 전에 여기서 막는다. */
-export const debateStart = (ref: TaskRef, opponentAgent: string, model: string | null = null) => {
+export const debateStart = (ref: TaskRef, opponents: readonly DebateOpponent[]) => {
   if (getTransport(ref.host).kind !== "local") {
     return Promise.reject(new Error("원격 세션에서는 토론을 시작할 수 없습니다"));
   }
-  return invoke("debate_start", { taskId: ref.id, opponentAgent, model });
+  return invoke("debate_start", {
+    taskId: ref.id,
+    opponents: opponents.map(({ agent, model }) => ({ agent, model: model ?? null })),
+  });
 };
 
-/** 토론 끝내기 — 우측 벤더 세션만 버리고 좌측(메인) 세션이 남는다. 이벤트는 지우지 않는다. */
+/** 토론 끝내기 — 비좌측 벤더 세션만 버리고 좌측(메인) 세션이 남는다. 이벤트는 지우지 않는다. */
 export const debateEnd = (taskId: number) => invoke("debate_end", { taskId });
 
 /** 전체 Task 이력 (한 호스트) */
@@ -606,8 +624,8 @@ export interface FileDiff {
 }
 
 /** 특정 작업 파일 단위 상세 diff (변경 목록·diff 탭 S-13) */
-export const taskDiff = (ref: TaskRef, range?: DiffRange) =>
-  getTransport(ref.host).taskDiff(ref.id, range);
+export const taskDiff = (ref: TaskRef, range?: DiffRange, includeReview?: boolean) =>
+  getTransport(ref.host).taskDiff(ref.id, range, includeReview);
 
 export interface FsNode {
   name: string;
@@ -695,6 +713,10 @@ export interface BranchList {
 
 /** 레포의 로컬 브랜치 목록 — 홈 컴포저의 base 브랜치 선택용. */
 export const gitBranches = (path: string) => getTransport(LOCAL_HOST).gitBranches(path);
+
+/** 브랜치 피커에서 고른 브랜치로 메인 체크아웃을 전환한다 — 변경 사항은 stash에 보관된다. */
+export const gitCheckoutBranch = (path: string, branch: string) =>
+  getTransport(LOCAL_HOST).gitCheckoutBranch(path, branch);
 
 /** FsNode 트리를 파일 상대경로 목록으로 평탄화 (@멘션용). */
 export const flattenFiles = (nodes: FsNode[]): string[] =>
@@ -802,9 +824,6 @@ export const lspSemanticTokens = (id: number, path: string, text: string) =>
 export const lspStatus = (id: number, path: string) =>
   invoke<LspStatusInfo>("lsp_status", { id, path });
 
-/** IDE: 작업의 언어 서버 종료 (작업 닫기/폐기 시) */
-export const lspShutdown = (id: number) => invoke("lsp_shutdown", { id });
-
 // 검증 게이트 (evidence)
 export interface ValidateSpec {
   build: string | null;
@@ -862,9 +881,6 @@ export const taskVerify = (
   previewToken: string,
   session: ReviewTransportSession,
 ) => runReviewOperation(session, () => session.transport.taskVerify(id, previewToken));
-/** 저장된 최신 증거 */
-export const evidenceGet = (id: number, session: ReviewTransportSession) =>
-  runReviewOperation(session, () => session.transport.evidenceGet(id));
 
 // Capsule (핸드오프/브리핑)
 export interface Capsule {
@@ -1020,169 +1036,6 @@ export const checkpointList = (id: number) =>
 export const convoRewind = (id: number, checkpointId: number) =>
   invoke<RewindSummary>("convo_rewind", { id, checkpointId });
 
-/** 코드 그래프 인덱싱 한 판의 결과. */
-export interface CodeGraphReport {
-  runId: number;
-  state: "ready";
-  filesSeen: number;
-  filesIndexed: number;
-  filesUnchanged: number;
-  filesSkipped: number;
-  symbols: number;
-  edges: number;
-}
-
-export type CodeGraphActiveState = "absent" | "ready" | "stale";
-export type CodeGraphBuildState =
-  | "idle"
-  | "indexing_symbols"
-  | "waiting_semantic"
-  | "indexing_edges"
-  | "degraded"
-  | "failed"
-  | "cancelled";
-
-/**
- * 완결성은 신선도와 **직교하는 축**이다(설계 0065 DR-6) — `activeState`는 "인덱스가 현재
- * 소스와 일치하는가"만 답하므로, 최신이면서 불완전한 그래프가 정상 상태다.
- */
-export interface CodeGraphIncompleteness {
-  /** 심볼조차 만들지 못한 파일 수. */
-  filesSkipped: number;
-  /** 심볼은 있으나 엣지를 만들지 않은 파일 수. */
-  filesWithoutEdges: number;
-  /** 엣지가 빠진 languageId들. */
-  languagesWithoutEdges: string[];
-  /** 언어별 사유. */
-  detail: string;
-}
-
-export interface CodeGraphStatus {
-  activeState: CodeGraphActiveState;
-  activeRunId: number | null;
-  indexedAt: number | null;
-  files: number;
-  symbols: number;
-  edges: number;
-  buildState: CodeGraphBuildState;
-  buildRunId: number | null;
-  detail: string | null;
-  /** 그래프가 온전하면 null. */
-  incomplete: CodeGraphIncompleteness | null;
-}
-
-/** 영향 범위에 들어온 심볼 하나. 좌표는 LSP 원본 0-based다 — 표시할 때만 +1 한다. */
-export interface ImpactedSymbol {
-  id: number;
-  name: string;
-  container: string | null;
-  relPath: string;
-  line: number;
-  character: number;
-  /** 대상에서 몇 홉 떨어져 있는가. 1이 직접 참조다. */
-  depth: number;
-}
-
-export interface CodeGraphImpact {
-  runId: number;
-  indexedAt: number;
-  freshness: CodeGraphActiveState;
-  items: ImpactedSymbol[];
-  /** 상한에 걸려 잘렸는가. 참이면 이 목록은 영향 범위의 일부다. */
-  truncated: boolean;
-  /**
-   * null이 아니면 이 파일의 엣지를 만들지 않았다 — 빈 `items`는 "영향 없음"이 아니라
-   * **"참조를 알 수 없음"**이다(설계 0065 DR-6).
-   */
-  edgesUnavailable: string | null;
-}
-
-export type CodeGraphDirection = "incoming" | "outgoing";
-
-export interface CodeGraphNeighborhoodNode {
-  id: number;
-  name: string;
-  relPath: string;
-  line: number;
-  character: number;
-}
-
-export interface CodeGraphNeighborhoodEdge {
-  sourceId: number;
-  targetId: number;
-  relation: "references";
-}
-
-export interface CodeGraphEncounteredIncomplete {
-  relPath: string;
-  reason: string;
-}
-
-export interface CodeGraphNeighborhood {
-  runId: number;
-  indexedAt: number;
-  freshness: CodeGraphActiveState;
-  rootId: number;
-  nodes: CodeGraphNeighborhoodNode[];
-  edges: CodeGraphNeighborhoodEdge[];
-  truncated: boolean;
-  incomplete: CodeGraphIncompleteness | null;
-  edgesUnavailable: string | null;
-  encounteredIncomplete: CodeGraphEncounteredIncomplete[];
-}
-
-interface LegacyCodeGraphImpact {
-  items: Array<{
-    id: number;
-    name: string;
-    container: string | null;
-    rel_path: string;
-    sel_line: number;
-    depth: number;
-  }>;
-  truncated: boolean;
-}
-
-/** 이 작업의 Rust 워크트리를 새 세대 스냅샷으로 인덱싱한다. */
-export const codegraphIndex = (id: number) => invoke<CodeGraphReport>("codegraph_index", { id });
-
-export const codegraphStatus = (id: number) =>
-  invoke<CodeGraphStatus>("codegraph_status", { id });
-
-export const codegraphCancel = (id: number) => invoke<void>("codegraph_cancel", { id });
-
-export const codegraphImpactAt = (
-  id: number,
-  path: string,
-  line: number,
-  column: number,
-  depth?: number,
-) => invoke<CodeGraphImpact>("codegraph_impact_at", { id, path, line, column, depth });
-
-export const codegraphNeighborhoodAt = (
-  id: number,
-  path: string,
-  line: number,
-  column: number,
-  direction?: CodeGraphDirection,
-  depth?: number,
-) =>
-  invoke<CodeGraphNeighborhood>("codegraph_neighborhood_at", {
-    id,
-    path,
-    line,
-    column,
-    direction,
-    depth,
-  });
-
-/**
- * "이 심볼을 고치면 무엇이 깨지나". 인덱싱된 적이 없으면 **에러**다 —
- * 빈 목록으로 답하면 "영향 없음"과 "아직 모른다"가 구분되지 않는다.
- */
-export const codegraphImpactOf = (id: number, symbol: string, depth?: number) =>
-  invoke<LegacyCodeGraphImpact>("codegraph_impact_of", { id, symbol, depth });
-
 /** 고아 일괄 종결 결과 — 무엇이 정리됐고 무엇이 왜 남았는지. */
 export interface OrphanCleanup {
   retired: number[];
@@ -1221,7 +1074,6 @@ export const shellOpen = (id: number, cols: number, rows: number) =>
 export const shellWrite = (id: number, data: string) => invoke("shell_write", { id, data });
 export const shellResize = (id: number, cols: number, rows: number) =>
   invoke("shell_resize", { id, cols, rows });
-export const shellClose = (id: number) => invoke("shell_close", { id });
 /** 화면이 셸에서 떨어졌음을 알린다 — 셸은 그대로 살아 있고, 유휴 회수의 첫 조건만 켠다.
  *  이 신호가 없으면 셸은 영원히 회수되지 않는다(ADR 0163 결정 4). */
 export const shellDetach = (id: number) => invoke("shell_detach", { id });
@@ -1346,272 +1198,6 @@ export const voiceServerStart = (settings: VoiceSettings) =>
 /** 앱이 띄운 서버만 내린다 — 밖에서 돌던 프로세스는 건드리지 않는다. */
 export const voiceServerStop = () => invoke<VoiceServerStatus>("voice_server_stop");
 
-/**
- * 메모리가 컨텍스트에 들어가는 방식.
- * `relevance`는 검색 순위를 따르고, `must_apply`는 순위와 무관하게 항상 투영된다.
- */
-export type ApplicationPolicy = "relevance" | "must_apply";
-
-export type MemoryStatus =
-  | "candidate"
-  | "pending_review"
-  | "verified"
-  | "stale"
-  | "rejected"
-  | "archived"
-  | "legacy_unverified";
-
-export interface Memory {
-  id: number;
-  tier: string;
-  scope_key: string | null;
-  kind: string;
-  content: string;
-  source_session: string | null;
-  /** 과거 L4 실험의 보존 값. 주입 후보 선정에는 사용하지 않는다. */
-  confidence: number;
-  usage_count: number;
-  last_used: number | null;
-  created_at: number;
-  knowledge_type:
-    | "claim"
-    | "observation"
-    | "decision"
-    | "convention"
-    | "abandoned"
-    | "pitfall";
-  status: MemoryStatus;
-  current_version: number;
-  utility_score: number;
-  review_due_at: number | null;
-  verified_at: number | null;
-  stale_at: number | null;
-  archived_at: number | null;
-  /** 컨텍스트 주입 방식. 구버전 Runner 응답에서는 생략될 수 있다. */
-  application_policy?: ApplicationPolicy;
-  /** 휴면(생성 30일 경과 && 미사용) — 주입 후보 제외, 목록엔 계속 표시(삭제 아님). */
-  dormant: boolean;
-  /** 현재 version의 evidence 수. 구버전 Runner 응답에서는 생략될 수 있다. */
-  evidence_count?: number;
-  /** 현재 version에서 invalid 또는 만료되어 승인·주입을 막는 evidence 수. */
-  blocking_evidence_count?: number;
-}
-
-export interface MemoryVersion {
-  memory_id: number;
-  version: number;
-  content: string;
-  knowledge_type: Memory["knowledge_type"];
-  scope_snapshot: string | null;
-  created_at: number;
-  editor_kind: string;
-  evidence_count: number;
-}
-
-export interface CodeLocationInput {
-  relative_path: string;
-  line_start: number;
-  line_end: number;
-}
-
-export interface LocalDocumentInput {
-  relative_path: string;
-  expires_at?: number | null;
-}
-
-export interface ExternalDocumentInput {
-  url: string;
-  expires_at: number;
-}
-
-export interface MemoryEvidence {
-  id: number;
-  memory_id: number;
-  version: number;
-  kind: string;
-  locator_json: string;
-  snapshot_hash: string | null;
-  status: "valid" | "changed" | "missing" | "expired" | "unknown";
-  observed_at: number;
-  checked_at: number | null;
-  expires_at: number | null;
-}
-
-export interface RevalidationReport {
-  memory_id: number;
-  version: number;
-  statuses: MemoryEvidence["status"][];
-  check_ids: number[];
-  stale: boolean;
-}
-
-export interface ConfirmedApproval {
-  version: number;
-  receipt_id: number;
-  already_approved: boolean;
-}
-
-export const memoryList = (host: HostId) => getTransport(host).memoryList();
-/** 물리 삭제 대신 감사 가능한 archive 전환. */
-export const memoryArchive = (host: HostId, id: number) => getTransport(host).memoryArchive(id);
-
-/**
- * 보관된 메모리의 영구 삭제. 되돌릴 수 없다 — 본문이 사라지고 감사 행만 남는다.
- * 보관을 거치지 않은 항목은 backend가 거부한다.
- */
-export const memoryPurge = (host: HostId, id: number) => getTransport(host).memoryPurge(id);
-
-/** 메모리 수동 추가 (repo 비면 global tier). 생성된 id 반환. */
-export const memoryAdd = (host: HostId, repo: string, kind: string, content: string) =>
-  getTransport(host).memoryAdd(repo, kind, content);
-/** 메모리 내용/종류 수정. */
-export const memoryUpdate = (host: HostId, id: number, content: string, kind: string) =>
-  getTransport(host).memoryUpdate(id, content, kind);
-export const memoryVersions = (host: HostId, id: number) => getTransport(host).memoryVersions(id);
-export const memoryRestoreVersion = (
-  host: HostId,
-  id: number,
-  sourceVersion: number,
-  expectedCurrentVersion: number,
-  expectedStatus: MemoryStatus,
-) =>
-  getTransport(host).memoryRestoreVersion(
-    id,
-    sourceVersion,
-    expectedCurrentVersion,
-    expectedStatus,
-  );
-export const memoryConfirm = (host: HostId, id: number, expiresAt?: number) =>
-  getTransport(host).memoryConfirm(id, expiresAt);
-export const memoryConfirmAndApprove = (host: HostId, id: number, expectedVersion: number) =>
-  getTransport(host).memoryConfirmAndApprove(id, expectedVersion);
-export const memoryAddCodeEvidence = (host: HostId, id: number, input: CodeLocationInput) =>
-  getTransport(host).memoryAddCodeEvidence(id, input);
-export const memoryAddLocalDocumentEvidence = (host: HostId, id: number, input: LocalDocumentInput) =>
-  getTransport(host).memoryAddLocalDocumentEvidence(id, input);
-export const memoryAddExternalDocumentEvidence = (
-  host: HostId,
-  id: number,
-  input: ExternalDocumentInput,
-) => getTransport(host).memoryAddExternalDocumentEvidence(id, input);
-export const memoryEvidence = (host: HostId, id: number) => getTransport(host).memoryEvidence(id);
-export const memoryRevalidate = (host: HostId, id: number) => getTransport(host).memoryRevalidate(id);
-export const knowledgeSubmitReview = (host: HostId, id: number) =>
-  getTransport(host).knowledgeSubmitReview(id);
-export const knowledgeApprove = (host: HostId, id: number) => getTransport(host).knowledgeApprove(id);
-
-/** 특정 메모리가 주입된 작업 이력 (사용처). */
-export interface MemoryUsageRow {
-  task_id: number;
-  instruction: string;
-  state: string;
-  injected_at: number;
-  outcome: string | null; // "approved" | "discarded" | null(미결정), 기존 success/failure도 읽기 호환
-}
-export const memoryUsages = (host: HostId, id: number) => getTransport(host).memoryUsages(id);
-
-/** 주입 프리뷰(드라이런) — 이 지시문이면 어떤 메모리가 세션에 들어갈지. */
-export const memoryPreview = (host: HostId, repo: string, instruction: string) =>
-  getTransport(host).memoryPreview(repo, instruction);
-
-/**
- * 항상-적용 지정/해제. 반환값은 "실제로 바뀌었는가" — `false`는 이미 목표 상태였다는 뜻이다.
- * `expectedVersion`/`expectedPolicy`는 CAS 기대값으로, 다른 곳에서 먼저 바뀌었으면 거부된다.
- */
-export const memorySetApplicationPolicy = (
-  host: HostId,
-  id: number,
-  policy: ApplicationPolicy,
-  expectedVersion: number,
-  expectedPolicy: ApplicationPolicy,
-) => getTransport(host).memorySetApplicationPolicy(id, policy, expectedVersion, expectedPolicy);
-
-/** 작업 세션에 주입된 메모리 한 건 (검증 리포트). */
-export interface InjectedMemory {
-  memory_id: number;
-  version: number | null;
-  kind: string | null;
-  content: string | null;
-  confidence: number | null;
-  evidence_count: number;
-  evidence_status: string | null;
-  target_hash: string | null;
-  target_paths: string[];
-  renderer_version: number | null;
-  injected_at: number;
-  outcome: string | null;
-  exists: boolean; // 원본 메모리가 아직 존재하는지
-}
-/** "메모리가 실제로 이 세션에 들어갔는가" 검증 — DB 기록 + 파일 실측. */
-export interface InjectionReport {
-  task_id: number;
-  injected: InjectedMemory[];
-  targets_present: string[]; // 블록이 실재하는 파일들 (AGENTS.md, 옛 투영이 남긴 CLAUDE.md 등)
-  block_text: string | null; // 컨텍스트 파일에서 추출한 실제 주입 블록
-}
-export const memoryInjectionReport = (id: number) =>
-  invoke<InjectionReport>("memory_injection_report", { id });
-
-/** 컨텍스트 파일 1건 실측 결과 — 벤더별 글로벌/프로젝트 경로 존재·크기·PRAXIS 블록 유무. */
-export interface ContextFile {
-  role: "global" | "project";
-  path: string;
-  exists: boolean;
-  size: number;
-  has_praxis_block: boolean;
-}
-
-/** 벤더 1건의 컨텍스트 파일들. uncertain=true면 경로 근거가 1차 출처가 아님(agy). */
-export interface VendorContext {
-  vendor: string;
-  uncertain: boolean;
-  files: ContextFile[];
-}
-
-export interface MemoryContextCounts {
-  scope_total: number;
-  actionable: number;
-  verified: number;
-  eligible: number;
-}
-
-export interface MemoryProjectionSummary {
-  state: string;
-  selected_count: number;
-}
-
-/** 인용 관측 분리 집계(설계 0048) — 규칙형은 인용 부재가 미사용을 뜻하지 않아 갈라 센다. */
-export interface CitationCounts {
-  must_apply_injected: number;
-  must_apply_cited: number;
-  relevance_injected: number;
-  relevance_cited: number;
-}
-
-/** 벤더 4종 × {글로벌, 프로젝트} 컨텍스트 파일 실측 + 이 작업의 주입 이력 + 빈 상태 원인 판별용 필드. */
-export interface ContextReport {
-  vendors: VendorContext[];
-  injected: InjectedMemory[];
-  capture_enabled: boolean;
-  /** 회고는 추출과 독립 스위치다. 구 Runner에서는 생략될 수 있다. */
-  reflect_enabled?: boolean;
-  /** 이 작업 레포에 축적된 project tier 메모리 수. */
-  memory_count: number;
-  /** 현재 project+global scope의 상태별 수. 구 Runner에서는 생략될 수 있다. */
-  memory_counts?: MemoryContextCounts;
-  /** 이 작업의 immutable projection receipt. null은 구버전 작업, undefined는 구 Runner 응답. */
-  projection?: MemoryProjectionSummary | null;
-  /** 인용 관측 집계. null은 주입 없던 작업, undefined는 구 Runner 응답. read-only. */
-  citations?: CitationCounts | null;
-}
-
-/** 컨텍스트 가시성(설계 0008 §A) — 벤더별로 실제 읽히는 컨텍스트 파일을 실측 표시. */
-export const contextReport = (ref: TaskRef) => getTransport(ref.host).contextReport(ref.id);
-
-/** 컨텍스트 파일 내용 지연 로드 — context_report(taskId)가 나열한 경로만 허용(임의 경로 읽기 차단). */
-export const contextFileRead = (ref: TaskRef, path: string) =>
-  getTransport(ref.host).contextFileRead(ref.id, path);
-
 /** Quick Open(⌘K) 백엔드 후보 한 건 — `db::QuickOpenCandidate`(Rust) 미러.
  *  task|session만 백엔드 소스, 파일/스킬/커맨드는 프론트가 로컬로 조회해 quickopen.ts에서 병합. */
 export interface QuickOpenTaskCandidate {
@@ -1641,6 +1227,16 @@ export interface SessionHomeEntry {
   last_active: number;
   messages: number;
   vendor_version: string | null;
+  /** 구형 응답은 Claude 세션만 담았으므로 vendor 누락은 claude로 정규화한다. */
+  vendor?: "claude" | "codex";
+  /** 목록 스캔에서 얻은 마지막 실제 사용자 발언. */
+  recent_user_message?: string | null;
+}
+
+export interface SessionHomePreview {
+  meta: SessionHomeEntry;
+  messages: { role: string; text: string }[];
+  truncated: boolean;
 }
 
 /** 세션홈 목록 조회 — 세션홈 이어받기 화면의 데이터 소스. `all=false`(기본)는 `repo`를 접두로
@@ -1648,6 +1244,9 @@ export interface SessionHomeEntry {
  *  검색이다. 로컬·원격 모두 지원한다(설계 2026-09-17). */
 export const sessionHomeIndex = (host: HostId, repo: string, all: boolean, query?: string) =>
   getTransport(host).sessionHomeIndex(repo, all, query);
+
+export const sessionHomePreview = (host: HostId, repo: string, vendor: "claude" | "codex", sessionId: string) =>
+  getTransport(host).sessionHomePreview(repo, vendor, sessionId);
 
 /** 기존 risk::assess_blast 3단계 분류를 hunk가 상속한다(`diffmodel::RiskLevel` 미러). */
 export type RiskLevel = "high" | "medium" | "low";
@@ -1766,81 +1365,6 @@ export const ensembleCompose = (
   selections: HunkRef[],
 ) => getTransport(host).ensembleCompose(ensemble, winnerTaskId, selections);
 
-export interface Proposal {
-  id: number;
-  repo: string;
-  kind: string;
-  content: string;
-  status: string;
-  source_session: string | null;
-  created_at: number;
-  decided_at: number | null;
-  /** 적용이 만든 후보 지식의 id. 없으면 철회할 수 없다(링크 도입 전 적용분). */
-  applied_memory_id: number | null;
-}
-
-export const proposalList = (pendingOnly: boolean) =>
-  invoke<Proposal[]>("proposal_list", { pendingOnly });
-export const proposalApply = (id: number) => invoke("proposal_apply", { id });
-export const proposalReject = (id: number) => invoke("proposal_reject", { id });
-/** 적용 철회 — 연결된 후보 지식을 보관으로 되돌린다. */
-export const proposalWithdraw = (id: number) => invoke("proposal_withdraw", { id });
-/** 지금 이 작업을 회고해 제안을 만든다. 캡처 opt-in과 무관. 회고할 내용이 없으면 null. */
-export const proposalRefine = (taskId: number) =>
-  invoke<number | null>("proposal_refine", { taskId });
-
-/** 예산 항목. 0은 **무제한**을 뜻한다 — 넷 다 0인 예산은 백엔드가 거부한다. */
-export interface GoalBudget {
-  max_attempts: number;
-  max_tokens: number;
-  /** codex는 비용을 보고하지 않아 항상 0이다. UI에서 0과 "미측정"을 구분해 그릴 것. */
-  max_cost_usd: number;
-  max_wall_secs: number;
-}
-
-export interface GoalRun {
-  id: number;
-  repo: string;
-  agent: string;
-  instruction: string;
-  goal_contract: GoalContract;
-  budget: GoalBudget;
-  /** running | satisfied | exhausted | stopped */
-  status: string;
-  created_at: number;
-  ended_at: number | null;
-  end_reason: string | null;
-}
-
-/** 지금까지 쓴 양. 전부 실측이고 추정값이 섞이지 않는다. */
-export interface GoalSpent {
-  attempts: number;
-  tokens: number;
-  cost_usd: number;
-  elapsed_secs: number;
-}
-
-export interface GoalRunView {
-  run: GoalRun;
-  spent: GoalSpent;
-  attempt_task_ids: number[];
-}
-
-/** Goal Run 생성. 첫 시도는 다음 크론 틱(최대 60초)이 만든다 — 즉시 뜨지 않는다. */
-export const goalRunCreate = (run: {
-  repo: string;
-  agent: string;
-  instruction: string;
-  goal_contract: GoalContract;
-  budget: GoalBudget;
-}) => invoke<number>("goal_run_create", { run });
-export const goalRunList = (repo?: string) =>
-  invoke<GoalRunView[]>("goal_run_list", { repo: repo ?? null });
-export const goalRunDetail = (id: number) =>
-  invoke<GoalRunView | null>("goal_run_detail", { id });
-/** 중단 — 다음 틱부터 재진입하지 않는다. 이미 도는 시도는 그대로 둔다. */
-export const goalRunStop = (id: number) => invoke("goal_run_stop", { id });
-
 /** 스킬이 실제로 사는 곳. 같은 이름이 여러 벤더에 있으면 거처가 여럿이다. */
 export interface SkillHome {
   vendor: "claude" | "codex" | "antigravity";
@@ -1876,16 +1400,6 @@ export const skillsList = (host: HostId, repo: string) =>
 export const skillsRead = (repo: string, name: string) =>
   invoke<string>("skills_read", { repo, name });
 
-/** 메모리 추출 opt-in 상태 (작업 종료 시 claude 호출 여부) */
-export const captureEnabledGet = () => invoke<boolean>("capture_enabled_get");
-export const captureEnabledSet = (enabled: boolean) =>
-  invoke("capture_enabled_set", { enabled });
-
-/** 회고 opt-in — 추출과 **독립**이다. 값어치가 다른 두 기능을 함께 끄지 않기 위해 갈랐다. */
-export const reflectEnabledGet = () => invoke<boolean>("reflect_enabled_get");
-export const reflectEnabledSet = (enabled: boolean) =>
-  invoke("reflect_enabled_set", { enabled });
-
 /**
  * 캡처·회고 호출의 실행 프로파일.
  *
@@ -1908,26 +1422,6 @@ export const captureProfileSet = (
   effort: string,
   lean: boolean,
 ) => invoke("capture_profile_set", { model, effort, lean });
-
-/** 한 번의 캡처·회고 호출이 남긴 관측 기록. */
-export interface CaptureRun {
-  model: string;
-  effort: string;
-  lean: boolean;
-  /** `lean=false`에서는 봉투가 없어 회수 불가 — null을 "0원"으로 읽으면 안 된다. */
-  cost_usd: number | null;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  ok: boolean;
-  /** 기대한 구조를 실제로 얻었는지. 조용한 0건 캡처의 탐지기다. */
-  parsed_ok: boolean;
-  citation_found: boolean | null;
-  err: string | null;
-  at: number;
-}
-/** 마지막 실행 기록 — `extract`/`reflect` 키. 슬롯이 갈려 있어 서로 덮지 않는다. */
-export const captureLastRuns = () =>
-  invoke<Record<string, CaptureRun>>("capture_last_runs");
 
 /** 동시 실행 상한과 허용 범위. 경계는 백엔드가 소유한다 — 프런트에 복제하지 않는다. */
 export interface ConcurrencyLimit {
@@ -1962,7 +1456,7 @@ export interface McpServer {
 
 export interface ModelStat {
   model: string;
-  /** 모델 제공자 — 현재는 "claude" */
+  /** 로컬 CLI 기록에서 정규화한 제공자 */
   provider: string;
   messages: number;
   sessions: number;
@@ -1970,6 +1464,11 @@ export interface ModelStat {
   output_tokens: number;
   cache_creation_tokens: number;
   cache_read_tokens: number;
+  /** 구형 fixture/응답과의 호환을 위해 선택값이다. */
+  cache_observed_messages?: number;
+  cache_observed_input_tokens?: number;
+  cache_observed_read_tokens?: number;
+  cache_unknown_messages?: number;
   total_tokens: number;
   /** 24칸 — 모델별 시간대 분포 */
   hours: number[];
@@ -1979,6 +1478,31 @@ export interface DayStat {
   date: string; // YYYY-MM-DD (로컬)
   messages: number;
   tokens: number;
+}
+
+/** 전체 로컬 CLI 기록에서 관측한 일별 캐시 사용량. */
+export interface CacheDayStat {
+  date: string;
+  input_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  observed_messages: number;
+  unknown_messages: number;
+}
+
+/** Praxis 주 대화에서 접수 시점에 기록한 입력 바이트 요약. */
+export interface PromptInjectionSummary {
+  accepted_turns: number;
+  observed_turns: number;
+  unknown_turns: number;
+  user_bytes: number;
+  sent_user_bytes: number;
+  instruction_bytes: number;
+  skill_added_bytes: number;
+  goal_added_bytes: number;
+  capsule_added_bytes: number;
+  vault_added_bytes: number;
+  instruction_changes: number;
 }
 
 /** 프로젝트(cwd) 한 곳의 사용량. */
@@ -2010,6 +1534,13 @@ export interface Insights {
   output_tokens: number;
   cache_creation_tokens: number;
   cache_read_tokens: number;
+  cache_observed_messages?: number;
+  cache_observed_input_tokens?: number;
+  cache_observed_read_tokens?: number;
+  cache_unknown_messages?: number;
+  cache_days?: CacheDayStat[];
+  /** null/누락은 아직 접수 입력을 읽지 못한 상태다. */
+  prompt_injection?: PromptInjectionSummary | null;
   active_days: number;
   current_streak: number;
   longest_streak: number;
@@ -2028,7 +1559,7 @@ export interface Insights {
 
 export type InsightsRange = "all" | "30d" | "7d";
 
-/** 사용량 인사이트 집계 (~/.claude 트랜스크립트 스캔). 로컬 시간대 기준 버킷팅. */
+/** 사용량 인사이트 집계 (Claude·Codex 로컬 CLI 기록 스캔). 로컬 시간대 기준 버킷팅. */
 export const insightsCompute = (range: InsightsRange) =>
   invoke<Insights>("insights_compute", {
     range,
@@ -2133,7 +1664,6 @@ export const agentActionWrite = (key: string, data: string) =>
   invoke<void>("agent_action_write", { key, data });
 export const agentActionResize = (key: string, cols: number, rows: number) =>
   invoke<void>("agent_action_resize", { key, cols, rows });
-export const agentActionClose = (key: string) => invoke<void>("agent_action_close", { key });
 
 /** 로그인이 회복된 벤더의 인증 차단을 푼다. 반환: 다시 대기열로 돌아간 작업 수. */
 export const agentAuthReconcile = () => invoke<number>("agent_auth_reconcile");
@@ -2205,8 +1735,6 @@ export interface OutcomeInsights {
   accepted_task_count: number;
   goal_contract_task_count: number;
   ready_accepted_task_count: number;
-  legacy_memory_task_count: number;
-  ledger_memory_task_count: number;
   ensemble_count: number;
   selected_ensemble_count: number;
   ambiguous_ensemble_count: number;
@@ -2284,50 +1812,105 @@ export const taskPatterns = (range: InsightsRange) =>
     tzOffsetSecs: -new Date().getTimezoneOffset() * 60,
   });
 
-export interface RoleRate {
-  role: string;
-  count: number;
-  done_pct: number;
+// ── 발견 공간 신호 카드 (설계 2026-09-28, 슬라이스 T2·T3) ──
+
+/** 신호 세트. L1(교훈 주제, T3)을 더했다 — 나머지 후보는 아직 선택되지 않았다. */
+export type SignalId = "S1" | "S2" | "S6" | "L1";
+
+/**
+ * 카드 수치를 손으로 다시 셀 수 있게 하는 근거. `Ledger`(교훈 근거, T3)는 원장 번호를 담는다.
+ * `Evidence`라는 이름은 `VerifyReport`(§ 검증 리포트)가 이미 쓰고 있어 `CardEvidence`로 둔다.
+ */
+export type CardEvidence =
+  | { kind: "Tasks"; ids: number[] }
+  | { kind: "Spend"; project: string | null }
+  | { kind: "Ledger"; repo: string; numbers: number[] };
+
+/**
+ * 신호 카드 한 장.
+ *
+ * 이름을 `InsightCard`가 아니라 `SignalCard`로 둔다 — `InsightCard`는 지식창고 덱 카드
+ * (`deck`/`title`/`body`/`source`/`tags`, 위 §지식창고)가 이미 쓰고 있는 이름이라, 그대로
+ * 쓰면 이름은 같은데 완전히 다른 두 도메인 타입이 충돌한다.
+ */
+export interface SignalCard {
+  /** signal + range + 구간 시작일 — 무시 판정 키였으나, 롤링 윈도우 탓에 날마다 바뀐다.
+   *  실제 무시는 `(signal, repo)` 쌍으로 한다(T4) — 이 필드는 표시·정렬용으로만 쓴다. */
+  key: string;
+  signal: SignalId;
+  sentence: string;
+  value: number;
+  /** 직전 동일 길이 구간의 같은 지표. S2는 예외로 "구간 평균"을 담는다. */
+  baseline: number | null;
+  sample: number;
+  evidence: CardEvidence;
+  /** 저장소에 묶인 신호만 값이 있다(S2·L1, S6은 top project가 알려진 저장소일 때만).
+   *  메모리 저장 대상 기본값(§8 O2)·무시 키(§6.4)에 쓴다(T4). */
+  repo: string | null;
 }
 
 /**
- * 회고 서술에 쓰인 **확정 수치**. LLM이 만든 값이 아니라 Rust가 SQL로 계산해 프롬프트에
- * 넣은 원본이다 — 서술이 숫자를 틀렸는지 대조하는 근거(설계 0054 DR-7).
+ * 신호 카드 조회 — S1(한 번 보고 닫은 작업) · S2(저장소 집중) · S6(토큰 사용량 급증).
+ * `tzOffsetSecs`를 `taskPatterns`처럼 자동 계산하지 않고 인자로 받는다 — 화면이 이미
+ * 같은 값을 다른 인사이트 호출에도 넘기고 있어, 호출부가 그 값을 재사용할 수 있게 한다.
  */
-export interface RetroFacts {
-  week_start: number;
-  tasks_total: number;
-  tasks_done: number;
-  tasks_discarded: number;
-  discard_rate_pct: number;
-  discard_rate_prev_pct: number | null;
-  followup_pct: number;
-  proposals_pending: number;
-  proposals_applied: number;
-  top_role: RoleRate | null;
+export const insightCards = (range: InsightsRange, tzOffsetSecs: number) =>
+  invoke<SignalCard[]>("insight_cards", { range, tzOffsetSecs });
+
+// ── 발견 카드 행동 (설계 §8, 슬라이스 T4) ──
+
+/** 메모리에 남길 대상 — 저장소 없는 신호는 `USER.md`, 저장소에 묶인 신호는 그 저장소의
+ *  `MEMORY.md`(§8 O2). 저장 다이얼로그가 카드에 repo가 있을 때만 전환 옵션을 보여준다. */
+export type MemoryTarget = { kind: "User" } | { kind: "Repo"; repo: string };
+
+/** `insightMemoryAppend`의 결과. 상한을 넘기면 쓰지 않고 `Full`을 돌려준다 — 화면은 그
+ *  경로를 `memoryFileOpen`으로 열어 사람이 합치게 한다. */
+export type AppendOutcome = { kind: "Appended" } | { kind: "Full"; path: string };
+
+/** 카드 문장을 메모리 한 줄로 남긴다(§8 "메모리에 남기기"). 경로는 백엔드가 `target`만으로
+ *  조립한다 — 이 커맨드는 경로 인자를 받지 않는다. */
+export const insightMemoryAppend = (target: MemoryTarget, text: string) =>
+  invoke<AppendOutcome>("insight_memory_append", { target, text });
+
+/** `(signal, repo)`를 7일 동안 무시한다(§6.4) — 저장소 없는 카드는 `repo: null`로 보낸다. */
+export const insightCardDismiss = (signal: SignalId, repo: string | null) =>
+  invoke<void>("insight_card_dismiss", { signal, repo });
+
+// ── 교훈 주제 (설계 2026-09-28 §6, 슬라이스 T3) ──
+
+/** subject 하나의 빈도. `lessons`는 항목 수가 아니라 이 구간 교훈 줄 수의 합이다. */
+export interface SubjectCount {
+  subject: string;
+  lessons: number;
+  /** 직전 동일 길이 구간의 같은 지표. "all"은 직전 구간이 없어 항상 null. */
+  prev_lessons: number | null;
+  /** 이 합을 재현할 수 있는 원장 번호(교훈이 있는 항목만). */
+  numbers: number[];
 }
 
-export interface RetroDigest {
-  week_start: number;
-  body: string;
-  facts: RetroFacts;
-  agent: string | null;
-  model: string | null;
-  generated_at: number;
+/** 버린 길 한 줄 — `docs/lessons.json`의 `abandoned` 배열 원소 하나가 곧 한 항목이다. */
+export interface AbandonedItem {
+  number: number;
+  date: string;
+  subjects: string[];
+  text: string;
 }
 
-export interface RetroWeekRef {
-  week_start: number;
-  generated_at: number;
+/** 저장소 하나의 교훈 주제. 투영은 있지만 이 구간에 낼 것이 없으면 목록에 나타나지 않는다. */
+export interface RepoLessons {
+  repo: string;
+  /** 이 구간에 속한 원장 항목 수(교훈 유무와 무관). */
+  entries_in_window: number;
+  subjects: SubjectCount[];
+  abandoned: AbandonedItem[];
 }
 
-/** 주간 회고. weekStart가 없으면 가장 최근 주. 조회 시 inbox를 한 번 거둔다. */
-export const retroDigestGet = (weekStart?: number | null) =>
-  invoke<RetroDigest | null>("retro_digest_get", { weekStart: weekStart ?? null });
-
-/** 생성된 주 목록(최신순) — 주 이동용. */
-export const retroDigestList = (limit: number) =>
-  invoke<RetroWeekRef[]>("retro_digest_list", { limit });
+/**
+ * 저장소별 교훈 주제 조회 — `docs/lessons.json` 투영이 있는 저장소만 결과에 나타난다(§6.3).
+ * 투영이 없거나 호출이 실패하면 빈 배열이 오며, 화면은 섹션 자체를 감춘다(ledger #554 선례).
+ */
+export const lessonThemes = (range: InsightsRange, tzOffsetSecs: number) =>
+  invoke<RepoLessons[]>("lesson_themes", { range, tzOffsetSecs });
 
 /** 에이전트 하나가 스킬 안에서 차지한 몫. */
 export interface AgentSlice {
@@ -2523,6 +2106,12 @@ export interface MultiReviewItem {
 export interface MultiReviewResult {
   items: MultiReviewItem[];
   synthesis: string | null;
+  /** 파이프라인 리뷰만 채운다: 벤더별 구조화 지적(`{vendor, ok, findings, raw, error}`). */
+  vendor_reviews?: unknown;
+  /** 파이프라인 리뷰만 채운다: 구조화된 종합(`Synthesis`). */
+  synthesis_structured?: unknown;
+  /** 파이프라인 리뷰만 채운다: 종합(없으면 벤더 리뷰) 기준 blocking 지적 존재 여부. */
+  blocking?: boolean;
 }
 
 /** 리뷰 실행 시 사용한 모델 정보. */
@@ -2687,10 +2276,6 @@ export const designmodeHide = (id: number) => invoke<void>("designmode_hide", { 
 /** 프리뷰 탭을 완전히 닫을 때 웹뷰 해제. */
 export const designmodeClose = (id: number) => invoke<void>("designmode_close", { id });
 
-/** Composer 캡처 칩 목록(현재 저장된 캡처 전체). */
-export const designmodeListCaptures = (id: number) =>
-  invoke<DesignCaptureRecord[]>("designmode_list_captures", { id });
-
 /** Composer 칩 × — 저장된 캡처 파일 삭제. */
 export const designmodeRemoveCapture = (id: number, captureId: string) =>
   invoke<void>("designmode_remove_capture", { id, captureId });
@@ -2698,10 +2283,6 @@ export const designmodeRemoveCapture = (id: number, captureId: string) =>
 /** 중앙 에디터 영역을 캡처해 Composer 첨부 레코드로 저장. */
 export const designmodeCaptureEditor = (id: number, capture: EditorCaptureTarget) =>
   invoke<DesignCaptureRecord>("designmode_capture_editor", { id, capture });
-
-/** 프리뷰가 지금 보고 있는 주소 — 웹뷰가 없으면 null. */
-export const designmodeCurrentUrl = (id: number) =>
-  invoke<string | null>("designmode_current_url", { id });
 
 /** 사용자가 프리뷰를 되찾는다 — 대기 중인 에이전트 명령은 끊긴다. */
 export const previewTakeOver = (id: number) => invoke<void>("preview_take_over", { id });
@@ -2751,10 +2332,6 @@ export const previewWorkbenchSend = (
 export const previewWorkbenchReceipt = (taskId: number, requestId: string) =>
   invoke<PreviewWorkbenchReceipt>("preview_workbench_receipt", { taskId, requestId });
 
-/** 디버그 빌드 전용 — [token, port, instance]. 수동 curl 검증에만 쓴다. */
-export const previewDebugToken = (id: number) =>
-  invoke<[string, number, string]>("preview_debug_token", { id });
-
 /** 작업 컴포저 클립보드 이미지 → 캡처 레코드 저장 — 로컬 전용(designmode와 같은 관행).
  *  반환 레코드를 store에 push하면 칩 표시·전송 시 프롬프트 주입·`image_paths` 전달·종결
  *  정리까지 기존 캡처 파이프라인을 그대로 탄다. */
@@ -2781,15 +2358,6 @@ export interface KnowledgeHit {
   url: string | null;
   snippet: string;
   score: number;
-}
-
-export interface KnowledgeChunkDetail {
-  chunk_id: number;
-  source: string;
-  title: string;
-  heading: string | null;
-  url: string | null;
-  content: string;
 }
 
 export interface KnowledgeVaultEntry {
@@ -2876,9 +2444,6 @@ export const knowledgeGmailEstimate = () =>
 export const knowledgeGmailSync = (maxBatches?: number) =>
   invoke<KnowledgeGmailSyncResult>("knowledge_gmail_sync", { maxBatches });
 
-export const knowledgeChunksGet = (ids: number[]) =>
-  invoke<KnowledgeChunkDetail[]>("knowledge_chunks_get", { ids });
-
 // ── 금일 할 일 (설계 0021 · 플랜 0026) ─────────────────────────────────────
 // 로컬 전용 — Runner transport를 태우지 않고 invoke로 직결한다 (설계 §3 Scope).
 
@@ -2911,11 +2476,6 @@ export const todayRange = (from: string, to: string) =>
 
 export const todayAdd = (title: string, day?: string, repo?: string) =>
   invoke<TodayItem>("today_add", { title, day, repo });
-
-export const todayUpdate = (
-  id: number,
-  patch: { title?: string; note?: string; repo?: string },
-) => invoke<TodayItem>("today_update", { id, ...patch });
 
 export const todaySetStatus = (id: number, status: TodayItemStatus) =>
   invoke<TodayItem>("today_set_status", { id, status });

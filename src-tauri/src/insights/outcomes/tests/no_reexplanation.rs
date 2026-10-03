@@ -12,7 +12,6 @@ async fn complete_observation_reports_success_over_observed_tasks() {
     set_state(&pool, success, crate::db::state::DONE, 1_100).await;
     set_state(&pool, followup, crate::db::state::AWAITING_REVIEW, 1_200).await;
     for task_id in [success, followup] {
-        record_injection(&pool, task_id).await;
         record_event(&pool, task_id, "followup_observation_started").await;
     }
     record_event(&pool, followup, "user_followup_input_observed").await;
@@ -26,41 +25,44 @@ async fn complete_observation_reports_success_over_observed_tasks() {
     assert_eq!(outcome.no_reexplanation_completion_rate, Some(0.5));
 }
 
+/// 대상 자격은 `followup_observation_started` 마커 하나로 정해진다(파일 메모리가 실제
+/// 내용과 함께 투영됐다는 뜻) — 마커가 없는 작업은 완료 상태라도 셀 수 없다.
 #[tokio::test]
-async fn missing_marker_keeps_rate_unmeasured() {
+async fn task_without_marker_is_not_counted() {
     let pool = test_pool().await;
     let observed = insert_task(&pool, "observed", 1_000).await;
     let missing = insert_task(&pool, "missing", 1_000).await;
     for task_id in [observed, missing] {
         set_state(&pool, task_id, crate::db::state::DONE, 1_100).await;
-        record_injection(&pool, task_id).await;
     }
     record_event(&pool, observed, "followup_observation_started").await;
+    // `missing`은 완료 상태지만 마커가 없다 — 메모리를 안내한 적이 없으니 대상에서 빠진다.
 
     let outcome = compute_outcomes(&pool, "all", 2_000).await.unwrap();
 
-    assert_eq!(outcome.no_reexplanation_target_task_count, 2);
+    assert_eq!(
+        outcome.no_reexplanation_target_task_count, 1,
+        "마커 없는 작업은 대상에서 빠진다"
+    );
     assert_eq!(outcome.no_reexplanation_observed_task_count, 1);
     assert_eq!(outcome.no_reexplanation_success_task_count, 1);
-    assert_eq!(outcome.no_reexplanation_unmeasured_task_count, 1);
-    assert_eq!(outcome.no_reexplanation_completion_rate, None);
+    assert_eq!(outcome.no_reexplanation_unmeasured_task_count, 0);
+    assert_eq!(outcome.no_reexplanation_completion_rate, Some(1.0));
 }
 
 #[tokio::test]
-async fn running_or_non_injected_tasks_are_excluded() {
+async fn running_or_unmarked_tasks_are_excluded() {
     let pool = test_pool().await;
     let eligible = insert_task(&pool, "eligible", 1_000).await;
     let running = insert_task(&pool, "running", 1_000).await;
-    let no_injection = insert_task(&pool, "no-injection", 1_000).await;
+    let unmarked = insert_task(&pool, "unmarked", 1_000).await;
     set_state(&pool, eligible, crate::db::state::DONE, 1_100).await;
     set_state(&pool, running, crate::db::state::RUNNING, 1_100).await;
-    set_state(&pool, no_injection, crate::db::state::DONE, 1_100).await;
+    set_state(&pool, unmarked, crate::db::state::DONE, 1_100).await;
     for task_id in [eligible, running] {
-        record_injection(&pool, task_id).await;
-    }
-    for task_id in [eligible, running, no_injection] {
         record_event(&pool, task_id, "followup_observation_started").await;
     }
+    // `unmarked`는 완료 상태지만 마커가 없다.
 
     let outcome = compute_outcomes(&pool, "all", 2_000).await.unwrap();
 
@@ -101,18 +103,6 @@ async fn set_state(pool: &sqlx::SqlitePool, task_id: i64, state: &str, now: i64)
     crate::db::update_state(pool, task_id, state, now)
         .await
         .unwrap();
-}
-
-async fn record_injection(pool: &sqlx::SqlitePool, task_id: i64) {
-    sqlx::query(
-        "INSERT INTO memory_injections \
-         (memory_id, version, task_id, target_hash, injected_at) VALUES (?, 1, ?, 'hash', 1)",
-    )
-    .bind(task_id)
-    .bind(task_id)
-    .execute(pool)
-    .await
-    .unwrap();
 }
 
 async fn record_event(pool: &sqlx::SqlitePool, task_id: i64, kind: &str) {

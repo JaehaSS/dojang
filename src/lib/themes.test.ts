@@ -18,7 +18,7 @@ import {
 describe("기존 테마 보존", () => {
   // 이 두 블록은 다중 테마 도입 **전**의 index.css / TerminalView 값이다.
   // 하나라도 어긋나면 기존 사용자 화면의 색이 바뀐 것이다.
-  it("Praxis Dark가 옛 .dark 토큰과 정확히 같다", () => {
+  it("Dojang Dark가 옛 .dark 토큰과 정확히 같다", () => {
     expect(getTheme("praxis-dark").tokens).toEqual({
       bg: "#0d0d0d",
       surface: "#161616",
@@ -51,7 +51,7 @@ describe("기존 테마 보존", () => {
     });
   });
 
-  it("Praxis Light가 옛 :root 토큰과 정확히 같다", () => {
+  it("Dojang Light가 옛 :root 토큰과 정확히 같다", () => {
     expect(getTheme("praxis-light").tokens).toEqual({
       bg: "#ffffff",
       surface: "#f7f7f8",

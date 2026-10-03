@@ -177,10 +177,10 @@ async fn handle_callback(
 
     if succeeded {
         axum::response::Html(
-            "<h2>연결되었습니다</h2><p>이 창을 닫고 Praxis로 돌아가세요.</p>",
+            "<h2>연결되었습니다</h2><p>이 창을 닫고 Dojang으로 돌아가세요.</p>",
         )
     } else {
-        axum::response::Html("<h2>연결에 실패했습니다</h2><p>Praxis에서 다시 시도하세요.</p>")
+        axum::response::Html("<h2>연결에 실패했습니다</h2><p>Dojang에서 다시 시도하세요.</p>")
     }
 }
 

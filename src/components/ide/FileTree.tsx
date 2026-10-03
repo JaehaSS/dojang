@@ -101,14 +101,14 @@ export function FileTree({
   // 빈 워크트리에서도 우클릭은 받는다 — 새 워크트리의 첫 파일을 만들 자리가 여기뿐이다.
   if (nodes.length === 0) {
     return (
-      <div className="text-text-muted text-xs px-2 py-1 min-h-[2rem]" onContextMenu={rootMenu}>
+      <div className="flex-1 text-text-muted text-xs px-2 py-1 min-h-[2rem]" onContextMenu={rootMenu}>
         (빈 워크트리)
       </div>
     );
   }
   if (rows.length === 0) {
     return (
-      <div className="text-text-muted text-xs px-2 py-1 min-h-[2rem]" onContextMenu={rootMenu}>
+      <div className="flex-1 text-text-muted text-xs px-2 py-1 min-h-[2rem]" onContextMenu={rootMenu}>
         (숨김 항목뿐)
       </div>
     );
@@ -131,7 +131,8 @@ export function FileTree({
         fontSize: "var(--file-tree-font-size)",
         lineHeight: "var(--file-tree-line-height)",
       }}
-      className="select-none outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/50"
+      // 부모가 flex 열이면 남은 높이를 채운다 — 마지막 행 아래 빈 자리도 루트 메뉴를 받아야 한다.
+      className="flex-1 select-none outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/50"
     >
       {rows.map(({ node, depth }, i) => {
         const open = node.is_dir && expanded.has(node.path);

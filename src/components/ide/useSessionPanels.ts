@@ -24,6 +24,11 @@ export interface PanelState {
 type Updater<T> = T | ((prev: T) => T);
 
 export interface SessionPanels extends PanelState {
+  /**
+   * 지금 렌더된 값이 속한 세션. 전환 직후 한 렌더 동안은 옛 세션의 것이다 — 복원이 layout
+   * effect에서 일어나기 때문이다. "세션에 도착한 순간"을 보는 쪽은 인자가 아니라 이것을 본다.
+   */
+  stateKey: string | null;
   setTerminalDock: (next: Updater<boolean>) => void;
   setCodeOpen: (next: Updater<boolean>) => void;
   setCodeTab: (next: Updater<CodeTab>) => void;
@@ -73,6 +78,7 @@ export function useSessionPanels(sessionKey: string | null): SessionPanels {
 
   const store = useRef(new Map<string, PanelState>());
   const [state, setState] = useState<PanelState>(seedRef.current);
+  const [stateKey, setStateKey] = useState<string | null>(sessionKey);
   /** 최신 상태 — setter가 마운트 내내 같은 identity를 유지해야 해서 렌더 값을 못 읽는다. */
   const stateRef = useRef<PanelState>(state);
   /** 같은 이유로 세션 키도 ref로 읽는다. 단축키 핸들러가 마운트 시 한 번만 붙는다. */
@@ -88,6 +94,7 @@ export function useSessionPanels(sessionKey: string | null): SessionPanels {
       (sessionKey == null ? undefined : store.current.get(sessionKey)) ?? seedRef.current!;
     stateRef.current = restored;
     setState(restored);
+    setStateKey(sessionKey);
   }, [sessionKey]);
 
   const apply = useCallback(
@@ -157,6 +164,7 @@ export function useSessionPanels(sessionKey: string | null): SessionPanels {
 
   return {
     ...state,
+    stateKey,
     setTerminalDock,
     setCodeOpen,
     setCodeTab,

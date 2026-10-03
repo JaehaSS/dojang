@@ -2,12 +2,13 @@ pub mod agent;
 pub mod agenthealth;
 pub mod annotations;
 pub mod approval;
+pub mod task_results;
+pub mod pipeline;
+pub mod project_plan;
+pub mod task_review;
 pub mod baseline;
-pub mod bench;
 pub mod capsule;
 pub mod capture;
-pub mod challenge;
-pub mod codegraph;
 mod commands;
 pub mod convo;
 pub mod db;
@@ -23,10 +24,10 @@ pub mod followup_observation;
 pub mod fonts;
 pub mod fsapi;
 pub mod goal_contract;
-pub mod goal_run;
 pub mod insightdeck;
 pub mod insights;
 pub mod interview;
+pub mod jsonextract;
 pub mod knowledge;
 pub mod lspdetect;
 pub mod managed_process;
@@ -42,7 +43,6 @@ pub mod projector;
 pub mod pty;
 pub mod quiz;
 pub mod repl_launch;
-pub mod retro;
 pub mod review_ops;
 pub mod reviewer;
 pub mod rewind;
@@ -51,7 +51,6 @@ pub mod rlimit;
 pub mod runner;
 pub mod schedule;
 pub mod secret;
-pub mod selfimprove;
 pub mod sessionhome;
 pub mod shellreap;
 pub mod side_question;
@@ -61,11 +60,11 @@ pub mod skills;
 mod testtmp;
 pub mod theme_store;
 pub mod today;
-pub mod transcript;
+pub mod translate;
+pub mod vocab;
 pub mod verify;
 pub mod voice;
 pub mod worktree;
-pub mod workflow;
 // 알파벳 순서 밖(신규 모듈, C-2) — 위쪽 목록이 다른 작업 세션과 동시 수정 중이라
 // 병합 안전을 위해 끝에 추가한다.
 pub mod github;
@@ -214,12 +213,6 @@ pub fn run() {
                             eprintln!("별도 질의 실행 복구 실패 — DB를 활성화하지 않음: {error}");
                             return;
                         }
-                        if let Err(error) =
-                            memory::reconcile_prepared_projections(&pool, now()).await
-                        {
-                            eprintln!("메모리 투영 복구 실패 — DB를 활성화하지 않음: {error}");
-                            return;
-                        }
                         if let Err(error) = decision::local_approval::reconcile(&pool, now()).await
                         {
                             eprintln!("로컬 승인 ledger 복구 실패 — 다음 시작에 재시도: {error}");
@@ -237,7 +230,6 @@ pub fn run() {
                             now(),
                         )
                         .await;
-                        let _ = selfimprove::migrate(&pool).await;
                         let _ = mcp_registry::migrate(&pool).await;
                         let _ = schedule::migrate(&pool).await;
                         let _ = multireview::migrate(&pool).await;
@@ -252,18 +244,9 @@ pub fn run() {
                         }
                         // quiz는 knowledge_chunks를 FK로 참조한다 — 반드시 그 뒤에.
                         let _ = quiz::migrate(&pool).await;
-                        let _ = codegraph::migrate(&pool).await;
                         let _ = today::migrate(&pool).await;
-                        let _ = goal_run::migrate(&pool).await;
-                        let _ = retro::migrate(&pool).await;
-                        // 주간 회고 스케줄을 첫 부팅에 한 번 심는다(ADR 2026-09-13). 실패해도
-                        // 부팅을 막지 않는다 — 스케줄은 사용자가 직접 등록할 수도 있다.
-                        let tz = chrono::Local::now().offset().local_minus_utc();
-                        match schedule::seed_weekly_retro(&pool, tz).await {
-                            Ok(true) => eprintln!("주간 회고 스케줄을 등록했습니다"),
-                            Ok(false) => {}
-                            Err(error) => eprintln!("주간 회고 스케줄 시드 실패(무시): {error}"),
-                        }
+                        let _ = vocab::migrate(&pool).await;
+                        let _ = insights::migrate_dismissals(&pool).await;
                         // 옛 메모리 파이프라인이 남긴 행을 한 번만 비운다(설계 2026-09-13 §7).
                         // 실패해도 부팅을 막지 않는다 — 남은 행은 아무도 읽지 않는다.
                         match memory::file::purge_legacy_once(&pool).await {
@@ -278,37 +261,6 @@ pub fn run() {
                             Ok(pinned) => eprintln!("diff 기준점 {pinned}건을 고정했습니다"),
                             Err(error) => eprintln!("diff 기준점 backfill 실패(무시): {error}"),
                         }
-                        // 캡처 opt-in 설정 복원.
-                        let cap = db::get_setting(&pool, "capture_enabled")
-                            .await
-                            .ok()
-                            .flatten()
-                            .as_deref()
-                            == Some("true");
-                        state.capture_enabled.store(cap, Ordering::Relaxed);
-                        // 회고 opt-in 복원 — 미설정이면 캡처 값을 승계하고 **바로 기록한다**.
-                        // 읽기 시점 폴백으로 두면 나중에 캡처를 켜는 순간 회고가 따라 켜져,
-                        // 분리한 의도와 정반대가 된다(설계 0055 AD-5).
-                        // 읽기 실패와 미설정을 가른다 — 둘을 합치면 DB가 일시적으로 실패한
-                        // 부팅에서 사용자가 명시적으로 끈 값이 캡처 값으로 **덮인다.**
-                        // write-back은 "한 번도 설정된 적 없음"에서만 정당하다.
-                        let reflect = match db::get_setting(&pool, "reflect_enabled").await {
-                            Ok(Some(v)) => v == "true",
-                            Ok(None) => {
-                                let _ = db::set_setting(
-                                    &pool,
-                                    "reflect_enabled",
-                                    if cap { "true" } else { "false" },
-                                )
-                                .await;
-                                cap
-                            }
-                            Err(error) => {
-                                eprintln!("reflect_enabled 복원 실패(캡처 값 승계): {error}");
-                                cap
-                            }
-                        };
-                        state.reflect_enabled.store(reflect, Ordering::Relaxed);
                         // 동시 실행 상한 복원 — 미설정/손상 값은 기본값으로 접힌다.
                         let limit = commands::parse_max_concurrent(
                             db::get_setting(&pool, "max_concurrent")
@@ -350,7 +302,8 @@ pub fn run() {
             // 임베딩 캐시를 app data 아래로 고정한다 — fastembed 기본값은 CWD 상대 경로라
             // 앱을 어디서 띄우느냐에 따라 ~130MB를 다시 내려받는다. best-effort로 둔다:
             // 이 관심사가 부팅을 막을 이유가 없고, 실패하면 종전 동작(기본 경로)이 남는다.
-            // 워밍업이 모델을 로드하기 **전에** 주입해야 한다(주입은 1회만 유효).
+            // 모델을 처음 로드하기 **전에** 주입해야 한다(주입은 1회만 유효). 시작 시 워밍업은
+            // 하지 않는다 — 쓰지도 않을 기능 때문에 ~130MB를 동의 없이 내려받게 된다.
             match handle.path().app_data_dir() {
                 Ok(dir) => {
                     let cache = dir.join("fastembed");
@@ -363,14 +316,15 @@ pub fn run() {
                 }
                 Err(error) => eprintln!("app data 경로 조회 실패(임베딩 기본 경로 사용): {error}"),
             }
-            // 임베딩 모델 백그라운드 워밍업 — 첫 작업 생성 시 모델 로드로 멈추지 않도록.
-            std::thread::spawn(|| {
-                let _ = embed::embed("warmup");
-            });
             // 크론 틱 루프(Phase 3) — 주기적으로 due 스케줄 실행.
             let cron_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 schedule::runner::tick_loop(cron_handle).await;
+            });
+            // 멀티 벤더 파이프라인 드라이버 — 활성 실행을 DB 상태에서 이어 받아 단계마다 한 동작씩 진행한다.
+            let pipeline_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                commands::pipeline_driver::run_loop(pipeline_handle).await;
             });
             // 유휴 워크스페이스 셸 회수(ADR 0163 결정 4) — 아무도 보고 있지 않고 프롬프트에서
             // 놀고 있는 셸만 골라 정리한다. 판정이 불가능한 플랫폼에서는 아무것도 하지 않는다.
@@ -441,7 +395,7 @@ pub fn run() {
             // 웹뷰(JS)가 Cmd+W keydown을 받도록 한다. 종료/복사·붙여넣기 등 표준 항목은 유지.
             #[cfg(target_os = "macos")]
             {
-                let app_menu = SubmenuBuilder::new(app, "Praxis")
+                let app_menu = SubmenuBuilder::new(app, "Dojang")
                     .about(Some(AboutMetadata::default()))
                     .separator()
                     .services()
@@ -493,10 +447,10 @@ pub fn run() {
                 commands::task_create,
                 commands::task_resume,
                 commands::session_home_index,
+                commands::session_home_preview,
                 commands::today_list,
                 commands::today_range,
                 commands::today_add,
-                commands::today_update,
                 commands::today_set_status,
                 commands::today_reorder,
                 commands::today_remove,
@@ -524,15 +478,12 @@ pub fn run() {
                 commands::knowledge_vault_create_note,
                 commands::knowledge_vault_update_note,
                 commands::knowledge_vault_search,
-                commands::knowledge_vault_preview,
-                commands::knowledge_vault_preview_exclude,
+                commands::knowledge_vault_prepare_attachments,
                 commands::knowledge_vault_register_project,
                 commands::knowledge_vault_rebind_project,
                 commands::knowledge_vault_rebind,
                 commands::knowledge_vault_settings_get,
                 commands::knowledge_vault_settings_set,
-                commands::knowledge_vault_capture_consent_set,
-                commands::knowledge_vault_capture_consent_revoke,
                 commands::knowledge_vault_usage,
                 commands::knowledge_vault_import_files,
                 commands::knowledge_vault_text_source,
@@ -540,14 +491,13 @@ pub fn run() {
                 commands::knowledge_vault_scan,
                 commands::knowledge_vault_open_original,
                 commands::knowledge_vault_recover_operations,
-                commands::knowledge_vault_draft_policy_set,
                 // 파일형 메모리(설계 2026-09-13) — 창고의 이웃 폴더라 창고 커맨드 옆에 둔다.
                 commands::memory_settings_get,
                 commands::memory_settings_set,
                 commands::memory_files_list,
                 commands::memory_file_open,
                 commands::memory_session_open,
-                commands::knowledge_chunks_get,
+                commands::insight_memory_append,
                 commands::wiki_spaces,
                 commands::wiki_connect,
                 commands::wiki_sync,
@@ -590,6 +540,27 @@ pub fn run() {
                 commands::task_cancel,
                 commands::notification_source_page,
                 commands::notification_snapshot,
+                commands::project_plan_get,
+                commands::project_plan_save,
+                commands::pipeline_vendors,
+                commands::pipeline_start,
+                commands::pipeline_list,
+                commands::pipeline_get,
+                commands::pipeline_update_tickets,
+                commands::pipeline_approve_plan,
+                commands::pipeline_reject_plan,
+                commands::pipeline_retry_ticket,
+                commands::pipeline_skip_ticket,
+                commands::pipeline_resume,
+                commands::pipeline_cancel,
+                commands::project_plan_import,
+                commands::purpose_get,
+                commands::purpose_request_refresh,
+                commands::task_result_get,
+                commands::task_result_reference,
+                commands::task_review_get,
+                commands::task_review_decide,
+                commands::task_review_deliver,
                 commands::notification_ingest,
                 commands::notification_acknowledge,
                 commands::notification_reconcile,
@@ -606,7 +577,6 @@ pub fn run() {
                 commands::task_pty_replay,
                 commands::verify_spec,
                 commands::task_verify,
-                commands::evidence_get,
                 commands::task_capsule,
                 commands::capsule_inject,
                 commands::convo_context_reset,
@@ -631,6 +601,7 @@ pub fn run() {
                 commands::convo_history,
                 convo::interaction_commands::interaction_snapshot,
                 convo::interaction_commands::interaction_draft,
+                convo::interaction_commands::interaction_pending_tasks,
                 convo::interaction_commands::interaction_answer,
                 convo::interaction_commands::interaction_receipt,
                 convo::interaction_commands::interaction_cleanup_retry,
@@ -649,7 +620,7 @@ pub fn run() {
                 commands::quiz_approve,
                 commands::quiz_pending,
                 commands::convo_interrupt,
-                commands::debate_side,
+                commands::debate_sides,
                 commands::debate_start,
                 commands::debate_end,
                 commands::debate_round_cap_get,
@@ -665,6 +636,17 @@ pub fn run() {
                 commands::use_worktree_override_clear,
                 commands::voice_settings_get,
                 commands::voice_settings_set,
+                commands::translate_settings_get,
+                commands::translate_settings_set,
+                commands::translate_text,
+                commands::vocab_list,
+                commands::vocab_due,
+                commands::vocab_due_count,
+                commands::vocab_save,
+                commands::vocab_mark_known,
+                commands::vocab_set_status,
+                commands::vocab_review,
+                commands::vocab_delete,
                 commands::voice_stt_test,
                 commands::voice_server_status,
                 commands::voice_server_start,
@@ -716,6 +698,7 @@ pub fn run() {
                 commands::git_status_path,
                 commands::git_init_path,
                 commands::git_branches_path,
+                commands::git_checkout_branch_path,
                 commands::fs_read,
                 commands::fs_write,
                 commands::open_local_file,
@@ -724,46 +707,6 @@ pub fn run() {
                 commands::lsp_goto,
                 commands::lsp_status,
                 commands::lsp_semantic_tokens,
-                commands::lsp_shutdown,
-                commands::codegraph_index,
-                commands::codegraph_status,
-                commands::codewiki_status,
-                commands::codewiki_generate,
-                commands::codegraph_cancel,
-                commands::codegraph_impact_at,
-                commands::codegraph_neighborhood_at,
-                commands::codegraph_impact_of,
-                commands::memory_list,
-                commands::memory_archive,
-                commands::memory_purge,
-                commands::memory_add,
-                commands::memory_update,
-                commands::memory_set_application_policy,
-                commands::knowledge_versions,
-                commands::knowledge_restore_version,
-                commands::knowledge_confirm,
-                commands::knowledge_add_code_location,
-                commands::knowledge_add_local_document,
-                commands::knowledge_add_external_document,
-                commands::knowledge_evidence,
-                commands::knowledge_revalidate,
-                commands::knowledge_submit_review,
-                commands::knowledge_approve,
-                commands::knowledge_confirm_and_approve,
-                commands::memory_usages,
-                commands::memory_preview,
-                commands::memory_injection_report,
-                commands::context_report,
-                commands::context_file_read,
-                commands::goal_run_create,
-                commands::goal_run_list,
-                commands::goal_run_detail,
-                commands::goal_run_stop,
-                commands::proposal_list,
-                commands::proposal_apply,
-                commands::proposal_reject,
-                commands::proposal_withdraw,
-                commands::proposal_refine,
                 commands::mcp_list,
                 commands::mcp_add,
                 commands::mcp_remove,
@@ -774,13 +717,8 @@ pub fn run() {
                 commands::schedule_set_enabled,
                 commands::cron_next_runs,
                 commands::reminder_add,
-                commands::capture_enabled_get,
-                commands::capture_enabled_set,
-                commands::reflect_enabled_get,
-                commands::reflect_enabled_set,
                 commands::capture_profile_get,
                 commands::capture_profile_set,
-                commands::capture_last_runs,
                 commands::max_concurrent_get,
                 commands::max_concurrent_set,
                 commands::insights_compute,
@@ -795,7 +733,6 @@ pub fn run() {
                 commands::agent_action_replay,
                 commands::agent_action_write,
                 commands::agent_action_resize,
-                commands::agent_action_close,
                 commands::agent_auth_reconcile,
                 commands::usage_bridge_status,
                 commands::usage_bridge_install,
@@ -805,13 +742,13 @@ pub fn run() {
                 commands::usage_claude_token_status,
                 commands::outcome_insights,
                 commands::task_patterns,
-                commands::retro_digest_get,
-                commands::retro_digest_list,
+                commands::insight_cards,
+                commands::insight_card_dismiss,
+                commands::lesson_themes,
                 commands::default_shell,
                 commands::shell_open,
                 commands::shell_write,
                 commands::shell_resize,
-                commands::shell_close,
                 commands::shell_replay,
                 commands::shell_detach,
                 commands::repl_open,
@@ -841,18 +778,14 @@ pub fn run() {
                 commands::designmode_set_selection_mode,
                 commands::designmode_hide,
                 commands::designmode_close,
-                commands::designmode_list_captures,
                 commands::designmode_remove_capture,
                 commands::designmode_capture_editor,
-                commands::designmode_current_url,
                 commands::preview_take_over,
                 commands::preview_release,
                 commands::preview_workbench_state,
                 commands::preview_workbench_prepare,
                 commands::preview_workbench_send,
                 commands::preview_workbench_receipt,
-                commands::preview_debug_token,
-                commands::preview_debug_snapshot_cost,
                 commands::paste_capture_save,
                 commands::paste_image_save,
                 project_editor::project_editor_open,
@@ -892,6 +825,9 @@ pub fn run() {
                     return;
                 }
                 if convo::interaction_commands::shutdown(window.app_handle(),false) {api.prevent_close();return;}
+                // 파이프라인 자식 프로세스는 여기서 죽이지 않는다. 메인 창을 닫아도 앱이 남을 수 있는데,
+                // kill_everything은 실행별 취소 표시를 영구히 남겨 드라이버가 재시작 전까지 멈추기 때문이다.
+                // 실제 종료(ExitRequested)에서만 정리한다.
                 let state = window.state::<AppState>();
                 let tasks = state.tasks.lock().unwrap();
                 for a in tasks.values() {
@@ -919,6 +855,7 @@ pub fn run() {
         .run(|app,event| {
             if let tauri::RunEvent::ExitRequested {api,..}=event {
                 if convo::interaction_commands::shutdown(app,true) {api.prevent_exit();}
+                else { pipeline::registry::kill_everything(); }
             }
         });
 }

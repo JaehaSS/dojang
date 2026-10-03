@@ -7,8 +7,6 @@ const history: EnsembleFeedbackHistory = {
   selected_count: 1,
   pending_count: 1,
   ambiguous_count: 1,
-  selected_with_memory: 1,
-  selected_without_memory: 0,
   entries: [
     {
       ensemble: "current",
@@ -19,8 +17,6 @@ const history: EnsembleFeedbackHistory = {
       selected_agent: "claude",
       requested_model: "opus",
       resolved_model: "claude-opus-4-8",
-      selected_memory_count: 2,
-      selected_approved_memory_count: 2,
     },
     {
       ensemble: "pending",
@@ -31,8 +27,6 @@ const history: EnsembleFeedbackHistory = {
       selected_agent: null,
       requested_model: null,
       resolved_model: null,
-      selected_memory_count: 0,
-      selected_approved_memory_count: 0,
     },
     {
       ensemble: "ambiguous",
@@ -43,27 +37,22 @@ const history: EnsembleFeedbackHistory = {
       selected_agent: null,
       requested_model: null,
       resolved_model: null,
-      selected_memory_count: 0,
-      selected_approved_memory_count: 0,
     },
   ],
 };
 
 describe("EnsembleFeedback", () => {
-  it("renders actual selections, model evidence, memory association, and uncertain states", () => {
+  it("renders actual selections, model evidence, and uncertain states", () => {
     const html = renderToStaticMarkup(
       <EnsembleFeedback history={history} currentEnsemble="current" />,
     );
 
-    expect(html).toContain("선택·메모리 피드백");
+    expect(html).toContain("선택 피드백");
     expect(html).toContain("선정 완료 1");
-    expect(html).toContain("메모리 사용 선정 1");
     expect(html).toContain("claude-opus-4-8 · 관측됨");
-    expect(html).toContain("메모리 2 · 승인 연결 2");
     expect(html).toContain("현재");
     expect(html).toContain("선택 대기");
     expect(html).toContain("복수 승인 · 승자 미추정");
-    expect(html).toContain("상관 관측");
   });
 
   it("keeps a feedback-only load failure visible", () => {

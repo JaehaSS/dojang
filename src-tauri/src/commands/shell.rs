@@ -169,15 +169,6 @@ pub async fn shell_resize(
     slot.session.resize(cols, rows).map_err(|e| e.to_string())
 }
 
-/// 워크스페이스 셸 종료(명시적 닫기).
-#[tauri::command]
-pub fn shell_close(state: State<AppState>, id: i64) -> Result<(), String> {
-    if let Some(slot) = state.shells.lock().unwrap().remove(&id) {
-        slot.session.terminate();
-    }
-    Ok(())
-}
-
 // ── 에이전트 CLI 액션 셸 ─────────────────────────────────────────────
 //
 // 인증·업데이트·자유 셸을 앱 안 PTY에서 끝낸다. `shell_*`은 task id로 키잉되고 워크트리를

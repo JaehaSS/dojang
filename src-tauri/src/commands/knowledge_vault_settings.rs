@@ -5,12 +5,12 @@ use tauri::State;
 use crate::knowledge::vault;
 
 use super::knowledge_vault::{
-    binding, binding_dto, pool_of, text, vaults, BindingDto, VaultDto,
+    binding_dto, pool_of, text, vaults, BindingDto, VaultDto,
 };
 use super::knowledge_vault_recovery::{
     binding_history, operation_conflicts, BindingHistoryDto, OperationConflictDto,
 };
-use super::{now, pool_of as app_pool, AppState};
+use super::{pool_of as app_pool, AppState};
 
 /// 창고 채널의 설정 — 위키 폴더(창고 루트 기준 상대 경로), 정리 스킬 이름,
 /// 위키를 열 때 먼저 띄울 진입 문서.
@@ -119,41 +119,4 @@ pub async fn knowledge_vault_status(
         prior_bindings: binding_history(&pool).await.map_err(text)?,
         operation_conflicts: operation_conflicts(&pool).await.map_err(text)?,
     })
-}
-
-#[tauri::command]
-pub async fn knowledge_vault_capture_consent_set(
-    state: State<'_, AppState>,
-    repo_root: String,
-) -> Result<CaptureConsentDto, String> {
-    let pool = pool_of(&state)?;
-    let profile = crate::capture::invoke::profile(&pool).await;
-    let provider = crate::capture::invoke::provider_identity(&profile);
-    let id = vault::provenance::grant_consent(
-        &pool,
-        &binding(&pool, &repo_root).await.map_err(text)?,
-        &provider,
-        now(),
-    )
-    .await
-    .map_err(text)?;
-    Ok(CaptureConsentDto { id, provider })
-}
-
-#[tauri::command]
-pub async fn knowledge_vault_capture_consent_revoke(
-    state: State<'_, AppState>,
-    repo_root: String,
-) -> Result<(), String> {
-    let pool = pool_of(&state)?;
-    let provider =
-        crate::capture::invoke::provider_identity(&crate::capture::invoke::profile(&pool).await);
-    vault::provenance::revoke_consent(
-        &pool,
-        &binding(&pool, &repo_root).await.map_err(text)?,
-        &provider,
-        now(),
-    )
-    .await
-    .map_err(text)
 }

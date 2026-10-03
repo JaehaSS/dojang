@@ -7,7 +7,6 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import {
-  evidenceGet,
   taskVerify,
   verifySpec,
 } from "../ipc";
@@ -30,7 +29,6 @@ const reviewStub = (hostId: string) =>
     hostId,
     verifySpec: vi.fn().mockResolvedValue({ preview_token: `preview-${hostId}` }),
     taskVerify: vi.fn().mockResolvedValue({ ready: true }),
-    evidenceGet: vi.fn().mockResolvedValue(null),
   }) as unknown as PraxisTransport;
 
 describe("review transport ownership", () => {
@@ -48,18 +46,15 @@ describe("review transport ownership", () => {
       hostId: "mini1",
       verifySpec: vi.fn().mockResolvedValue({ preview_token: "preview-1" }),
       taskVerify: vi.fn().mockResolvedValue({ ready: true }),
-      evidenceGet: vi.fn().mockResolvedValue(null),
     } as unknown as PraxisTransport;
     registerTransport(remote);
     const session = captureReviewTransportSession("mini1");
 
     await verifySpec(7, session);
     await taskVerify(7, "preview-1", session);
-    await evidenceGet(7, session);
 
     expect(remote.verifySpec).toHaveBeenCalledWith(7);
     expect(remote.taskVerify).toHaveBeenCalledWith(7, "preview-1");
-    expect(remote.evidenceGet).toHaveBeenCalledWith(7);
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -158,12 +153,10 @@ describe("review transport ownership", () => {
 
     await transport.verifySpec(7);
     await transport.taskVerify(7, "preview-1");
-    await transport.evidenceGet(7);
 
     expect(request.mock.calls.map(([url]) => String(url))).toEqual([
       "http://127.0.0.1:49123/v1/tasks/7/verify/spec",
       "http://127.0.0.1:49123/v1/tasks/7/verify",
-      "http://127.0.0.1:49123/v1/tasks/7/evidence",
     ]);
     expect(request.mock.calls[1][1]).toMatchObject({ method: "POST" });
     expect(JSON.parse(String(request.mock.calls[1][1]?.body))).toEqual({

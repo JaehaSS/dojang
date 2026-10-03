@@ -10,11 +10,8 @@ export interface DesignBoundingRect {
 export interface DesignCaptureRecord {
   id: string;
   task_id: number;
-  /**
-   * `"wiki"`만 프런트 전용이다 — Rust `CaptureSource`에 대응 변형이 없고, 백엔드로 갈 일도 없다
-   * (로컬 캡처라 `designmodeRemoveCapture`를 건너뛴다). 나머지 셋은 저쪽 enum과 같다.
-   */
-  source: "preview" | "editor" | "paste" | "wiki";
+  /** Rust `CaptureSource` enum과 같다. */
+  source: "preview" | "editor" | "paste";
   outer_html: string;
   computed_css: Record<string, string>;
   bounding_rect: DesignBoundingRect;

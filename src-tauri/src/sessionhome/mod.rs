@@ -1,17 +1,13 @@
 //! 세션홈(`~/.claude/projects`) 경로·해석·인덱싱의 단일 소유자.
 //!
 //! [설계](../../../docs/designs/2026-09-17-session-home-resume-design.md) 결정 1: 경로 산출·cwd
-//! 인코딩·세션 id 해석이 지금 `transcript/mod.rs`와 `insights/mod.rs` 둘로 갈려 있어 심볼릭·정규화
-//! 차이가 나면 "저장소 경로 접두 필터"와 워크트리 매칭이 서로 다른 답을 낼 수 있다. 이 모듈이
-//! 그 갈림을 없앤다 — **단, 집계·파싱 로직(트랜스크립트 요약·사용량 통계)은 옮기지 않는다.** 같은
+//! 인코딩·세션 id 해석이 한때 `transcript/mod.rs`와 `insights/mod.rs` 둘로 갈려 있어 심볼릭·정규화
+//! 차이가 나면 "저장소 경로 접두 필터"와 워크트리 매칭이 서로 다른 답을 낼 수 있었다. 1.0에서
+//! 트랜스크립트 파서를 통째로 없애면서 이 모듈이 경로 산출·cwd 인코딩·세션 id 해석의 유일한
+//! 소유자가 됐다 — **단, 집계·파싱 로직(트랜스크립트 요약·사용량 통계)은 여기 두지 않는다.** 같은
 //! 형식을 두 파서가 읽으면 반드시 어긋난다는 것은 원장(#236 로테이션 사고)에서 이미 치른 값이다.
 //!
 //! ## 정규화 계약
-//! - [`encode_cwd`]는 **문자열 변환만** 한다 — canonicalize를 하지 않는다. `transcript`의 소비자는
-//!   지금처럼 cwd를 스스로 `canonicalize()`한 뒤 이 함수를 부르고, 실패 시 처리(`Ok(None)` 등)도
-//!   호출자가 정한다. `sessionhome` 자신(= [`scan`]·[`resolve`])은 벤더가 세션 파일에 기록한 cwd
-//!   문자열을 있는 그대로 인코딩한다. 이 구분을 없애고 한쪽으로 통일하면 트랜스크립트 캡처가
-//!   조용히 죽거나, 이미 정리된 워크트리의 세션이 목록에서 사라진다.
 //! - [`resolve`]는 **라이브 스캔**이다 — 캐시를 쓰지 않는다. 실측상 벤더(claude)가 세션 id를
 //!   세션홈 전역에서 해석하므로, 우리도 전역에서 찾아 **정확히 하나**일 때만 성립시킨다. mtime
 //!   캐시를 두더라도 [`scan`]의 목록 표시 메타에만 쓰고 해석에는 쓰지 않는다 — 캐시로 유일성을
@@ -19,19 +15,28 @@
 //! - [`scan`]은 **전량 파싱 금지**다. 파일당 선두 일부 줄 + 말미 일부 바이트 + `mtime`/`size`만
 //!   읽는다(실측 세션홈: 1,568개 파일·1.2GB·최대 62MB). 손상된 줄은 조용히 건너뛴다.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 
 /// 메타(`cwd`·`gitBranch`·`version`·`sessionId`)는 벤더 포맷상 선두 10줄 안에 있다(설계 실측).
-/// 제목 후보(`custom-title`·`agent-name`·`summary`)는 세션 중간에도 나올 수 있어 약간의 여유를
+/// 제목 후보(`custom-title`·`summary`)는 세션 중간에도 나올 수 있어 약간의 여유를
 /// 둔다. 여전히 파일 전체를 읽지 않는 상수 크기 창이다.
 const HEAD_SAMPLE_LINES: usize = 20;
+/// 한 개의 비정상적으로 큰 JSONL 행이 목록 스캔 예산을 우회하지 못하게 한다.
+const HEAD_SAMPLE_BYTES: u64 = 32 * 1024;
 /// 말미에서 다시 읽는 바이트 수 — 마지막 `cwd`(워크트리 밖 이동 감지)·최근 제목 갱신용.
 const TAIL_SAMPLE_BYTES: u64 = 32 * 1024;
+/// 상세 대화는 선택할 때만 읽으며, 최근 256KiB 안에서만 추출한다.
+const PREVIEW_TAIL_BYTES: u64 = 256 * 1024;
+const PREVIEW_MESSAGES: usize = 6;
+const PREVIEW_MESSAGE_CHARS: usize = 2_000;
+const PREVIEW_TITLE_CHARS: usize = 512;
+const MAX_SESSION_ENTRIES: usize = 20_000;
+const SCAN_CACHE_CAPACITY: usize = 4_096;
 /// `title`·`first_message`는 신뢰 경계 밖(쓰기 가능한 세션홈)의 데이터라 상한을 둔다.
 const SNIPPET_MAX_CHARS: usize = 120;
 
@@ -55,6 +60,27 @@ pub fn set_projects_root(root: PathBuf) -> Result<(), PathBuf> {
 }
 
 static ROOT_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+static CODEX_ROOT_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+static SCAN_CACHE: OnceLock<Mutex<HashMap<ScanCacheKey, SessionMeta>>> = OnceLock::new();
+
+#[derive(Hash, PartialEq, Eq)]
+struct ScanCacheKey {
+    vendor: &'static str,
+    path: PathBuf,
+    size: u64,
+    modified_ns: u128,
+}
+
+/// Codex session root을 명시 지정한다. 통합 테스트와 Runner가 로그인 사용자와 다른 환경에서
+/// Codex 세션을 읽을 때 사용한다. 프로세스 수명 동안 한 번만 설정할 수 있다.
+pub fn set_codex_sessions_root(root: PathBuf) -> Result<(), PathBuf> {
+    CODEX_ROOT_OVERRIDE.set(root).map_err(|_| {
+        CODEX_ROOT_OVERRIDE
+            .get()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from(""))
+    })
+}
 
 /// `~/.claude/projects`. [`set_projects_root`]로 지정된 값이 있으면 그것이 이긴다.
 /// 지정이 없고 `HOME`/`USERPROFILE`도 못 찾으면 `None`.
@@ -68,31 +94,67 @@ pub fn projects_root() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".claude").join("projects"))
 }
 
-/// cwd 문자열의 `/`와 `.`를 `-`로 치환. **문자열 변환만** 한다 — canonicalize하지 않는다.
-/// (canonicalize 여부·실패 처리는 호출자 책임. 모듈 문서의 "정규화 계약" 참조.)
-pub fn encode_cwd(cwd: &str) -> String {
-    cwd.chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
-        .collect()
+/// `~/.codex/sessions`. CODEX_HOME가 있으면 Codex CLI와 같은 규칙을 따른다.
+pub fn codex_sessions_root() -> Option<PathBuf> {
+    if let Some(root) = CODEX_ROOT_OVERRIDE.get() {
+        return Some(root.clone());
+    }
+    // Claude fixture root만 바꾼 통합 테스트가 사용자의 실제 Codex 세션을 목록에 섞지 않게 한다.
+    // Codex fixture가 필요하면 위 setter로 명시한다.
+    if ROOT_OVERRIDE.get().is_some() {
+        return None;
+    }
+    std::env::var_os("CODEX_HOME")
+        .map(|root| PathBuf::from(root).join("sessions"))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".codex").join("sessions"))
+        })
 }
 
 /// 세션홈 인덱스 항목. `cwd`는 세션 선두 값, `last_cwd`는 말미 값 — 세션 중간에 cwd가 바뀔 수
 /// 있어(메시지마다 있는 필드) 인가 판정은 둘 다 봐야 한다.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionMeta {
+    /// 원본 세션을 여는 CLI. 구형 Runner 응답은 serde 기본값으로 Claude가 된다.
+    #[serde(default = "default_vendor")]
+    pub vendor: String,
     pub session_id: String,
     pub cwd: Option<String>,
     pub last_cwd: Option<String>,
     pub git_branch: Option<String>,
-    /// `custom-title` > `summary` > `agent-name` 우선순위. 120자 상한 + 제어문자 제거.
+    /// `custom-title` > `summary` 우선순위. 120자 상한 + 제어문자 제거.
     pub title: Option<String>,
     /// 첫 user 메시지 텍스트. 120자 상한 + 제어문자 제거.
     pub first_message: Option<String>,
+    /// 표본 안에서 확인한 가장 최근 실제 사용자 발언. 없으면 전체 대화를 읽지 않는다.
+    #[serde(default)]
+    pub recent_user_message: Option<String>,
     /// 파일 mtime(초 단위 epoch) 기준.
     pub last_active: i64,
     /// 선두/말미 표본에서 센 user·assistant 메시지 수 — 색인용 근사치이고 정확한 총계가 아니다.
     pub messages: usize,
     pub vendor_version: Option<String>,
+}
+
+fn default_vendor() -> String {
+    "claude".to_string()
+}
+
+/// 선택 시에만 반환하는 제한된 대화 상세. 원문 파일 경로는 절대 노출하지 않는다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionPreview {
+    pub meta: SessionMeta,
+    pub messages: Vec<PreviewMessage>,
+    /// `true`이면 정해진 tail 예산 때문에 더 이전 대화가 생략됐다.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreviewMessage {
+    pub role: String,
+    pub text: String,
 }
 
 /// [`scan`] 필터. 비어 있으면 필터링하지 않는다.
@@ -179,7 +241,11 @@ pub fn resolve_in(root: &Path, session_id: &str) -> Result<PathBuf, ResolveError
             let only = matches.into_iter().next().expect("길이 1 확인됨");
             // 방어: 실경로가 root 하위인지 재확인(레이스·이상 경로 대비).
             match only.canonicalize() {
-                Ok(real) if real.starts_with(&root_canon) => Ok(only),
+                Ok(real)
+                    if real.starts_with(&root_canon) && claude_file_has_id(&only, session_id) =>
+                {
+                    Ok(only)
+                }
                 _ => Err(ResolveError::NotFound),
             }
         }
@@ -201,10 +267,44 @@ fn is_valid_session_id(id: &str) -> bool {
 
 /// 세션홈 인덱스. 최근순 정렬 + `limit` 상한. 전량 파싱하지 않는다(모듈 문서 참조).
 pub fn scan(filter: &ScanFilter, limit: usize) -> Vec<SessionMeta> {
-    let Some(root) = projects_root() else {
-        return Vec::new();
-    };
-    scan_in(&root, filter, limit)
+    let mut out = Vec::new();
+    if let Some(root) = projects_root() {
+        out.extend(scan_in(&root, filter, limit));
+    }
+    if let Some(root) = codex_sessions_root() {
+        out.extend(scan_codex_in(&root, filter, limit));
+    }
+    apply_filter(&mut out, filter);
+    out.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+    out.truncate(limit);
+    out
+}
+
+/// 공급자 하나만 스캔한다. 허용하지 않는 vendor는 빈 목록으로 처리한다.
+pub fn scan_vendor(vendor: &str, filter: &ScanFilter, limit: usize) -> Vec<SessionMeta> {
+    match vendor {
+        "claude" => projects_root()
+            .map(|root| scan_in(&root, filter, limit))
+            .unwrap_or_default(),
+        "codex" => codex_sessions_root()
+            .map(|root| scan_codex_in(&root, filter, limit))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// 테스트·Runner 어댑터가 명시 루트로 공급자 하나를 스캔할 때 쓴다.
+pub fn scan_vendor_in(
+    vendor: &str,
+    root: &Path,
+    filter: &ScanFilter,
+    limit: usize,
+) -> Vec<SessionMeta> {
+    match vendor {
+        "claude" => scan_in(root, filter, limit),
+        "codex" => scan_codex_in(root, filter, limit),
+        _ => Vec::new(),
+    }
 }
 
 /// [`scan`]의 본체 — 루트를 **명시 인자로** 받는다. 근거는 [`resolve_in`]과 같다.
@@ -239,7 +339,7 @@ pub fn scan_in(root: &Path, filter: &ScanFilter, limit: usize) -> Vec<SessionMet
             if file_path.extension().map(|e| e != "jsonl").unwrap_or(true) {
                 continue;
             }
-            if let Some(meta) = index_session_file(&file_path) {
+            if let Some(meta) = index_scan_cached("claude", &file_path) {
                 out.push(meta);
             }
         }
@@ -254,11 +354,8 @@ fn apply_filter(sessions: &mut Vec<SessionMeta>, filter: &ScanFilter) {
     if !filter.cwd_prefixes.is_empty() {
         sessions.retain(|s| {
             filter.cwd_prefixes.iter().any(|p| {
-                s.cwd.as_deref().is_some_and(|c| c.starts_with(p.as_str()))
-                    || s
-                        .last_cwd
-                        .as_deref()
-                        .is_some_and(|c| c.starts_with(p.as_str()))
+                s.cwd.as_deref().is_some_and(|c| cwd_has_prefix(c, p))
+                    || s.last_cwd.as_deref().is_some_and(|c| cwd_has_prefix(c, p))
             })
         });
     }
@@ -272,6 +369,8 @@ fn apply_filter(sessions: &mut Vec<SessionMeta>, filter: &ScanFilter) {
             [
                 s.title.as_deref(),
                 s.first_message.as_deref(),
+                s.recent_user_message.as_deref(),
+                s.git_branch.as_deref(),
                 s.cwd.as_deref(),
                 s.last_cwd.as_deref(),
             ]
@@ -279,6 +378,21 @@ fn apply_filter(sessions: &mut Vec<SessionMeta>, filter: &ScanFilter) {
             .flatten()
             .any(|field| field.to_lowercase().contains(&q))
         });
+    }
+}
+
+/// 목록의 project filter는 경로 구성요소 경계를 지킨다(`/repo`가 `/repo-other`를 잡지 않는다).
+/// macOS의 `/var` → `/private/var`처럼 같은 기존 경로의 별칭도 canonical 경로로 한 번 더
+/// 비교한다. 둘 중 하나가 없어지면 원문 `Path::starts_with`만 사용한다.
+fn cwd_has_prefix(cwd: &str, prefix: &str) -> bool {
+    let cwd = Path::new(cwd);
+    let prefix = Path::new(prefix);
+    if cwd.starts_with(prefix) {
+        return true;
+    }
+    match (cwd.canonicalize(), prefix.canonicalize()) {
+        (Ok(cwd), Ok(prefix)) => cwd.starts_with(prefix),
+        _ => false,
     }
 }
 
@@ -295,44 +409,329 @@ pub fn describe(session_id: &str) -> Result<SessionMeta, ResolveError> {
 pub fn describe_in(root: &Path, session_id: &str) -> Result<SessionMeta, ResolveError> {
     let path = resolve_in(root, session_id)?;
     // 해석은 됐는데 인덱싱이 실패하는 경우(권한·경합으로 사라짐)는 "없음"과 같게 다룬다.
-    index_session_file(&path).ok_or(ResolveError::NotFound)
+    index_claude_session_file(&path).ok_or(ResolveError::NotFound)
 }
 
-/// 파일 하나를 선두/말미 표본만으로 인덱싱. 손상된 줄은 건너뛴다.
-fn index_session_file(path: &Path) -> Option<SessionMeta> {
+/// vendor와 id를 함께 써서 원본 세션을 확정한다. 기존 [`describe`]는 Claude 호환 경로다.
+pub fn describe_vendor(vendor: &str, session_id: &str) -> Result<SessionMeta, ResolveError> {
+    match vendor {
+        "claude" => describe(session_id),
+        "codex" => codex_sessions_root()
+            .ok_or(ResolveError::NotFound)
+            .and_then(|root| describe_codex_in(&root, session_id)),
+        _ => Err(ResolveError::InvalidId),
+    }
+}
+
+pub fn describe_vendor_in(
+    vendor: &str,
+    root: &Path,
+    session_id: &str,
+) -> Result<SessionMeta, ResolveError> {
+    match vendor {
+        "claude" => describe_in(root, session_id),
+        "codex" => describe_codex_in(root, session_id),
+        _ => Err(ResolveError::InvalidId),
+    }
+}
+
+/// 선택된 세션의 최근 대화만 반환한다. 목록 스캔은 이 함수를 호출하지 않는다.
+pub fn preview_vendor(vendor: &str, session_id: &str) -> Result<SessionPreview, ResolveError> {
+    match vendor {
+        "claude" => projects_root()
+            .ok_or(ResolveError::NotFound)
+            .and_then(|root| preview_vendor_in(vendor, &root, session_id)),
+        "codex" => codex_sessions_root()
+            .ok_or(ResolveError::NotFound)
+            .and_then(|root| preview_vendor_in(vendor, &root, session_id)),
+        _ => Err(ResolveError::InvalidId),
+    }
+}
+
+pub fn preview_vendor_in(
+    vendor: &str,
+    root: &Path,
+    session_id: &str,
+) -> Result<SessionPreview, ResolveError> {
+    let mut meta = describe_vendor_in(vendor, root, session_id)?;
+    let path = match vendor {
+        "claude" => resolve_in(root, session_id)?,
+        "codex" => resolve_codex_in(root, session_id)?,
+        _ => return Err(ResolveError::InvalidId),
+    };
+    let (lines, truncated) = read_tail_lines_with_truncation(&path, PREVIEW_TAIL_BYTES);
+    let mut messages = Vec::new();
+    let mut truncation = truncated;
+    let mut prior: Option<(String, String, String)> = None;
+    for line in lines {
+        if let Some(message) = preview_message(vendor, &line) {
+            let kind = serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("type")
+                        .and_then(|kind| kind.as_str())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            let duplicate_pair = vendor == "codex"
+                && prior.as_ref().is_some_and(|(role, text, prior_kind)| {
+                    role == &message.role
+                        && text == &message.text
+                        && prior_kind != &kind
+                        && matches!(kind.as_str(), "response_item" | "event_msg")
+                        && matches!(prior_kind.as_str(), "response_item" | "event_msg")
+                });
+            if duplicate_pair {
+                prior = None;
+                continue;
+            }
+            prior = Some((message.role.clone(), message.text.clone(), kind));
+            truncation |= message.text.chars().count() >= PREVIEW_MESSAGE_CHARS;
+            messages.push(message);
+        }
+    }
+    if messages.len() > PREVIEW_MESSAGES {
+        messages.drain(..messages.len() - PREVIEW_MESSAGES);
+        truncation = true;
+    }
+    truncation |= enrich_preview_meta(vendor, &path, &mut meta);
+    Ok(SessionPreview {
+        meta,
+        messages,
+        truncated: truncation,
+    })
+}
+
+/// Codex는 날짜 하위 디렉터리에 rollout 파일을 둔다. 파일명만 믿지 않고 내부 session_meta의
+/// id도 대조하며, 심볼릭 링크는 탐색·해석 모두에서 제외한다.
+fn resolve_codex_in(root: &Path, session_id: &str) -> Result<PathBuf, ResolveError> {
+    if !is_valid_session_id(session_id) {
+        return Err(ResolveError::InvalidId);
+    }
+    let root_canon = root.canonicalize().map_err(|_| ResolveError::NotFound)?;
+    let suffix = format!("{session_id}.jsonl");
+    let mut pending = vec![root_canon.clone()];
+    let mut matches = Vec::new();
+    let mut visited = 0usize;
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited = visited.saturating_add(1);
+            if visited > MAX_SESSION_ENTRIES {
+                return Err(ResolveError::NotFound);
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file()
+                && entry.file_name().to_string_lossy().ends_with(&suffix)
+                && codex_file_has_id(&entry.path(), session_id)
+            {
+                matches.push(entry.path());
+            }
+        }
+    }
+    match matches.len() {
+        0 => Err(ResolveError::NotFound),
+        1 => {
+            let only = matches.pop().expect("길이 1 확인됨");
+            match only.canonicalize() {
+                Ok(real) if real.starts_with(&root_canon) => Ok(only),
+                _ => Err(ResolveError::NotFound),
+            }
+        }
+        _ => Err(ResolveError::Ambiguous(matches)),
+    }
+}
+
+fn codex_file_has_id(path: &Path, session_id: &str) -> bool {
+    read_head_lines(path, HEAD_SAMPLE_LINES)
+        .into_iter()
+        .any(|line| {
+            serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .is_some_and(|value| {
+                    value.get("type").and_then(|v| v.as_str()) == Some("session_meta")
+                        && value.pointer("/payload/id").and_then(|v| v.as_str()) == Some(session_id)
+                })
+        })
+}
+
+/// Claude 구형 행에는 sessionId가 없을 수 있어 그 경우는 파일명의 기존 계약을 유지한다.
+/// 있지만 다르면 파일명 스푸핑이므로 목록·상세·재개 모두에서 제외한다.
+fn claude_file_has_id(path: &Path, session_id: &str) -> bool {
+    for line in read_head_lines(path, HEAD_SAMPLE_LINES) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(id) = value.get("sessionId").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if id != session_id {
+            return false;
+        }
+    }
+    true
+}
+
+fn describe_codex_in(root: &Path, session_id: &str) -> Result<SessionMeta, ResolveError> {
+    let path = resolve_codex_in(root, session_id)?;
+    index_codex_session_file(&path).ok_or(ResolveError::NotFound)
+}
+
+fn scan_codex_in(root: &Path, filter: &ScanFilter, limit: usize) -> Vec<SessionMeta> {
+    let mut out = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited = visited.saturating_add(1);
+            if visited > MAX_SESSION_ENTRIES {
+                break;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                pending.push(entry.path());
+                continue;
+            }
+            let path = entry.path();
+            if kind.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+                if let Some(meta) = index_scan_cached("codex", &path) {
+                    out.push(meta)
+                }
+            }
+        }
+    }
+    apply_filter(&mut out, filter);
+    out.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+    out.truncate(limit);
+    out
+}
+
+/// Claude 파일 하나를 선두/말미 표본만으로 인덱싱. 손상된 줄은 건너뛴다.
+fn index_claude_session_file(path: &Path) -> Option<SessionMeta> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
     if metadata.file_type().is_symlink() {
         return None;
     }
     let session_id = path.file_stem()?.to_str()?.to_string();
+    if !claude_file_has_id(path, &session_id) {
+        return None;
+    }
 
     let head_lines = read_head_lines(path, HEAD_SAMPLE_LINES);
     // 파일이 선두 표본 안에 다 들어오면 말미를 다시 읽지 않는다(중복 집계 방지 + 불필요한 IO 생략).
-    let tail_lines = if head_lines.len() < HEAD_SAMPLE_LINES {
-        Vec::new()
-    } else {
-        read_tail_lines(path, TAIL_SAMPLE_BYTES)
-    };
+    let tail_lines = read_tail_lines(path, TAIL_SAMPLE_BYTES);
 
     let mut acc = MetaAcc::default();
     let mut seen = HashSet::new();
     for line in head_lines.iter().chain(tail_lines.iter()) {
-        apply_line(&mut acc, line, &mut seen);
+        apply_claude_line(&mut acc, line, &mut seen);
     }
 
-    let title = [acc.custom_title, acc.summary, acc.agent_name]
+    // agent-name은 실행 워커 라벨일 뿐 사용자가 붙인 대화 제목이 아니다.
+    let title = [acc.custom_title, acc.summary]
         .into_iter()
         .flatten()
         .find_map(|s| sanitize_snippet(&s));
     let first_message = acc.first_message.as_deref().and_then(sanitize_snippet);
 
     Some(SessionMeta {
+        vendor: default_vendor(),
         session_id,
         cwd: acc.cwd_first,
         last_cwd: acc.cwd_last,
         git_branch: acc.git_branch,
         title,
         first_message,
+        recent_user_message: recent_user_from_tail("claude", &tail_lines),
+        last_active: mtime_secs(&metadata),
+        messages: acc.message_count,
+        vendor_version: acc.version,
+    })
+}
+
+/// 목록 스캔 전용 캐시. 해석·상세는 항상 원본을 다시 읽어 승계 인가에 캐시가 끼지 않는다.
+fn index_scan_cached(vendor: &'static str, path: &Path) -> Option<SessionMeta> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|time| time.as_nanos())
+        .unwrap_or(0);
+    let key = ScanCacheKey {
+        vendor,
+        path: path.to_path_buf(),
+        size: metadata.len(),
+        modified_ns,
+    };
+    let cache = SCAN_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(meta) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .cloned()
+    {
+        return Some(meta);
+    }
+    let meta = match vendor {
+        "claude" => index_claude_session_file(path),
+        "codex" => index_codex_session_file(path),
+        _ => None,
+    }?;
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() >= SCAN_CACHE_CAPACITY {
+        cache.clear();
+    }
+    cache.insert(key, meta.clone());
+    Some(meta)
+}
+
+fn index_codex_session_file(path: &Path) -> Option<SessionMeta> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() {
+        return None;
+    }
+    let head_lines = read_head_lines(path, HEAD_SAMPLE_LINES);
+    let tail_lines = read_tail_lines(path, TAIL_SAMPLE_BYTES);
+    let mut acc = MetaAcc::default();
+    let mut session_id = None;
+    let mut seen = HashSet::new();
+    for line in head_lines.iter().chain(tail_lines.iter()) {
+        apply_codex_line(&mut acc, &mut session_id, line, &mut seen);
+    }
+    let session_id = session_id?;
+    Some(SessionMeta {
+        vendor: "codex".to_string(),
+        session_id,
+        cwd: acc.cwd_first,
+        last_cwd: acc.cwd_last,
+        git_branch: acc.git_branch,
+        title: acc.custom_title.as_deref().and_then(sanitize_snippet),
+        first_message: acc.first_message.as_deref().and_then(sanitize_snippet),
+        recent_user_message: recent_user_from_tail("codex", &tail_lines),
         last_active: mtime_secs(&metadata),
         messages: acc.message_count,
         vendor_version: acc.version,
@@ -352,7 +751,7 @@ fn read_head_lines(path: &Path, max_lines: usize) -> Vec<String> {
     let Ok(file) = std::fs::File::open(path) else {
         return Vec::new();
     };
-    BufReader::new(file)
+    BufReader::new(file.take(HEAD_SAMPLE_BYTES))
         .lines()
         .take(max_lines)
         .filter_map(Result::ok)
@@ -361,29 +760,33 @@ fn read_head_lines(path: &Path, max_lines: usize) -> Vec<String> {
 
 /// 파일 말미 `tail_bytes`를 읽어 완결된 줄만 반환한다(선두 절단분은 버린다).
 fn read_tail_lines(path: &Path, tail_bytes: u64) -> Vec<String> {
+    read_tail_lines_with_truncation(path, tail_bytes).0
+}
+
+fn read_tail_lines_with_truncation(path: &Path, tail_bytes: u64) -> (Vec<String>, bool) {
     let Ok(mut file) = std::fs::File::open(path) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let Ok(len) = file.metadata().map(|m| m.len()) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let start = len.saturating_sub(tail_bytes);
     if file.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
-        return Vec::new();
+    if file.take(tail_bytes).read_to_end(&mut bytes).is_err() {
+        return (Vec::new(), false);
     }
     // 잘린 지점이 UTF-8 문자 경계가 아닐 수 있으니 손실 허용 변환.
     let text = String::from_utf8_lossy(&bytes);
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     // start > 0이면 첫 줄은 파일 중간에서 잘렸을 수 있으니 버린다(깨진 JSON으로 읽혀도
-    // 어차피 apply_line이 무시하지만, 잘못된 줄 절반을 온전한 것으로 오인하지 않기 위함).
+    // 어차피 파서가 무시하지만, 잘못된 줄 절반을 온전한 것으로 오인하지 않기 위함).
     if start > 0 && !lines.is_empty() {
         lines.remove(0);
     }
-    lines
+    (lines, start > 0)
 }
 
 /// 파싱 도중 누적하는 세션 메타. 필드별로 "첫 값"·"마지막 값" 의미가 다르다.
@@ -394,15 +797,15 @@ struct MetaAcc {
     git_branch: Option<String>,
     version: Option<String>,
     custom_title: Option<String>,
-    agent_name: Option<String>,
     summary: Option<String>,
     first_message: Option<String>,
+    recent_user_message: Option<String>,
     message_count: usize,
 }
 
 /// JSONL 한 줄을 누적기에 반영. 손상된 줄(JSON 파싱 실패)은 조용히 무시.
 /// `seen`은 선두/말미 표본이 겹칠 때(작은 파일) 같은 줄을 두 번 세지 않기 위한 방어.
-fn apply_line(acc: &mut MetaAcc, raw: &str, seen: &mut HashSet<String>) {
+fn apply_claude_line(acc: &mut MetaAcc, raw: &str, seen: &mut HashSet<String>) {
     let raw = raw.trim();
     if raw.is_empty() || !seen.insert(raw.to_string()) {
         return;
@@ -432,11 +835,6 @@ fn apply_line(acc: &mut MetaAcc, raw: &str, seen: &mut HashSet<String>) {
                 acc.custom_title = Some(t.to_string());
             }
         }
-        "agent-name" => {
-            if let Some(n) = v.get("agentName").and_then(|x| x.as_str()) {
-                acc.agent_name = Some(n.to_string());
-            }
-        }
         "summary" => {
             if let Some(s) = v.get("summary").and_then(|x| x.as_str()) {
                 acc.summary = Some(s.to_string());
@@ -445,11 +843,18 @@ fn apply_line(acc: &mut MetaAcc, raw: &str, seen: &mut HashSet<String>) {
         ty @ ("user" | "assistant") => {
             acc.message_count += 1;
             if ty == "user" && acc.first_message.is_none() {
-                if let Some(text) = user_message_text(&v) {
+                if let Some(text) = user_message_text(&v).and_then(|text| display_user_text(&text))
+                {
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
                         acc.first_message = Some(trimmed.to_string());
                     }
+                }
+            }
+            if ty == "user" {
+                if let Some(text) = user_message_text(&v).and_then(|text| display_user_text(&text))
+                {
+                    acc.recent_user_message = Some(text);
                 }
             }
         }
@@ -457,9 +862,253 @@ fn apply_line(acc: &mut MetaAcc, raw: &str, seen: &mut HashSet<String>) {
     }
 }
 
+fn apply_codex_line(
+    acc: &mut MetaAcc,
+    session_id: &mut Option<String>,
+    raw: &str,
+    seen: &mut HashSet<String>,
+) {
+    let raw = raw.trim();
+    if raw.is_empty() || !seen.insert(raw.to_string()) {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return;
+    };
+    let kind = value.get("type").and_then(|v| v.as_str());
+    let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
+    if kind == Some("session_meta") {
+        if let Some(id) = payload
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|id| is_valid_session_id(id))
+        {
+            *session_id = Some(id.to_string());
+        }
+        if acc.version.is_none() {
+            acc.version = payload
+                .get("cli_version")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+        }
+    }
+    if kind == Some("turn_context") || kind == Some("session_meta") {
+        if let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) {
+            if acc.cwd_first.is_none() {
+                acc.cwd_first = Some(cwd.to_string())
+            }
+            acc.cwd_last = Some(cwd.to_string());
+        }
+        if let Some(branch) = payload
+            .get("git_branch")
+            .or_else(|| payload.get("gitBranch"))
+            .or_else(|| payload.pointer("/git/branch"))
+            .and_then(|v| v.as_str())
+        {
+            acc.git_branch = Some(branch.to_string());
+        }
+    }
+    if kind != Some("response_item")
+        || payload.get("type").and_then(|v| v.as_str()) != Some("message")
+    {
+        return;
+    }
+    let role = payload.get("role").and_then(|v| v.as_str());
+    if !matches!(role, Some("user") | Some("assistant")) {
+        return;
+    }
+    acc.message_count += 1;
+    let Some(text) = codex_message_text(payload).and_then(|text| {
+        if role == Some("user") {
+            display_user_text(&text)
+        } else {
+            (!text.trim().is_empty()).then_some(text.trim().to_string())
+        }
+    }) else {
+        return;
+    };
+    let text = text.trim().to_string();
+    if role == Some("user") {
+        if acc.first_message.is_none() {
+            acc.first_message = Some(text.clone())
+        }
+        acc.recent_user_message = Some(text);
+    }
+}
+
+fn codex_message_text(payload: &serde_json::Value) -> Option<String> {
+    let content = payload.get("content")?.as_array()?;
+    let mut out = String::new();
+    for block in content {
+        if matches!(
+            block.get("type").and_then(|v| v.as_str()),
+            Some("input_text") | Some("output_text") | Some("text")
+        ) {
+            if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                out.push_str(text);
+                out.push(' ')
+            }
+        }
+    }
+    (!out.trim().is_empty()).then_some(out)
+}
+
+/// 끝 표본에 사용자가 없으면 선두의 오래된 발언을 "최근"이라고 추정하지 않는다.
+fn recent_user_from_tail(vendor: &str, lines: &[String]) -> Option<String> {
+    lines.iter().rev().find_map(|line| {
+        preview_message(vendor, line)
+            .filter(|message| message.role == "user")
+            .and_then(|message| sanitize_snippet(&message.text))
+    })
+}
+
+fn preview_message(vendor: &str, raw: &str) -> Option<PreviewMessage> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let (role, text) = match vendor {
+        "claude" => {
+            let role = value.get("type")?.as_str()?;
+            if !matches!(role, "user" | "assistant") {
+                return None;
+            }
+            let text = user_message_text(&value)?;
+            (
+                role,
+                if role == "user" {
+                    display_user_text(&text)?
+                } else {
+                    text
+                },
+            )
+        }
+        "codex" => {
+            let payload = value.get("payload")?;
+            let event_type = value.get("type")?.as_str()?;
+            let (role, text) = if event_type == "response_item"
+                && payload.get("type")?.as_str()? == "message"
+            {
+                (payload.get("role")?.as_str()?, codex_message_text(payload)?)
+            } else if event_type == "event_msg" {
+                match payload.get("type")?.as_str()? {
+                    "user_message" => ("user", payload.get("message")?.as_str()?.to_string()),
+                    "agent_message" => ("assistant", payload.get("message")?.as_str()?.to_string()),
+                    _ => return None,
+                }
+            } else {
+                return None;
+            };
+            if !matches!(role, "user" | "assistant") {
+                return None;
+            }
+            (
+                role,
+                if role == "user" {
+                    display_user_text(&text)?
+                } else {
+                    text
+                },
+            )
+        }
+        _ => return None,
+    };
+    sanitize_preview_text(&text).map(|text| PreviewMessage {
+        role: role.to_string(),
+        text,
+    })
+}
+
+/// Praxis가 사용자 메시지 앞에 붙이는 작업 지시를 대화 제목/목록의 "사용자 발언"으로
+/// 오인하지 않는다. 원문을 요약·재작성하지 않고, 명시적인 경계 뒤 문자열만 사용한다.
+fn display_user_text(raw: &str) -> Option<String> {
+    let text = raw.trim();
+    if text.starts_with("<system-reminder>") || text.starts_with("<local-command") {
+        return None;
+    }
+    let text = text
+        .split_once("# User request")
+        .map(|(_, request)| request)
+        .unwrap_or(text)
+        .trim();
+    if text.starts_with("# AGENTS.md instructions") || text.starts_with("<environment_context>") {
+        return None;
+    }
+    // 알려진 호출 래퍼의 명시적인 끝 문장만 제거한다. 임의 본문의 마지막 문단을
+    // 사용자 요청이라고 추측하지 않는다. 래퍼 형식이 다르면 원문 발췌를 유지한다.
+    let text = if text.starts_with("# Workflow Harness") {
+        text.split_once("This is conditional routing, not another mandatory profile transition or permission gate.")
+            .map(|(_, request)| request.trim()).unwrap_or(text)
+    } else {
+        text
+    };
+    (!text.is_empty()).then_some(text.to_string())
+}
+
+fn sanitize_preview_text(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in raw.chars() {
+        if out.chars().count() >= PREVIEW_MESSAGE_CHARS {
+            break;
+        }
+        out.push(if c.is_control() && c != '\n' { ' ' } else { c });
+    }
+    (!out.trim().is_empty()).then_some(out.trim().to_string())
+}
+
+/// 상세는 목록보다 긴 제목을 보여도 되지만, 파일 전체를 읽어 제목을 "복원"하지는 않는다.
+/// 선두·말미 표본에서 확인한 마지막 custom-title/summary만 512자로 확장한다.
+fn enrich_preview_meta(vendor: &str, path: &Path, meta: &mut SessionMeta) -> bool {
+    let mut custom_title = None;
+    let mut summary = None;
+    let mut first_request = None;
+    let mut seen = HashSet::new();
+    for line in read_head_lines(path, HEAD_SAMPLE_LINES)
+        .into_iter()
+        .chain(read_tail_lines(path, PREVIEW_TAIL_BYTES))
+    {
+        if !seen.insert(line.clone()) {
+            continue;
+        }
+        if first_request.is_none() {
+            first_request = preview_message(vendor, &line)
+                .filter(|message| message.role == "user")
+                .map(|message| message.text);
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if vendor == "claude" {
+            match value.get("type").and_then(|v| v.as_str()) {
+                Some("custom-title") => {
+                    custom_title = value
+                        .get("customTitle")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                }
+                Some("summary") => {
+                    summary = value
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                }
+                _ => {}
+            }
+        }
+    }
+    let first_truncated = first_request
+        .as_ref()
+        .is_some_and(|text| text.chars().count() > PREVIEW_TITLE_CHARS);
+    if let Some(text) = first_request {
+        meta.first_message = sanitize_limited(&text, PREVIEW_TITLE_CHARS);
+    }
+    let Some(raw) = custom_title.or(summary) else {
+        return first_truncated;
+    };
+    let was_truncated = first_truncated || raw.chars().count() > PREVIEW_TITLE_CHARS;
+    meta.title = sanitize_limited(&raw, PREVIEW_TITLE_CHARS);
+    was_truncated
+}
+
 /// `message.content` 추출 — 문자열 또는 `[{type:"text", text:"..."}]` 형태.
-/// (`transcript::message_text`와 목적이 겹치지만, 옮기지 않기로 한 집계 로직이 아니라
-/// 제목 표시용으로 필요한 최소 추출이라 별도로 둔다.)
+/// 제목 표시용으로 필요한 최소 추출이라 집계 로직과는 별도로 둔다.
 fn user_message_text(v: &serde_json::Value) -> Option<String> {
     let content = v.get("message").and_then(|m| m.get("content"))?;
     if let Some(s) = content.as_str() {
@@ -485,11 +1134,15 @@ fn user_message_text(v: &serde_json::Value) -> Option<String> {
 /// 제어문자를 공백으로 접고(연속 공백은 접힘) 120자로 자른다. 결과가 비면 `None`.
 /// 세션홈은 신뢰 경계 밖의 쓰기 가능 디렉터리이므로 마크다운·제어문자를 그대로 돌려주지 않는다.
 fn sanitize_snippet(raw: &str) -> Option<String> {
+    sanitize_limited(raw, SNIPPET_MAX_CHARS)
+}
+
+fn sanitize_limited(raw: &str, max_chars: usize) -> Option<String> {
     let mut out = String::new();
     let mut count = 0usize;
     let mut last_was_space = true; // 선두 공백도 접히도록 초기값 true.
     for c in raw.chars() {
-        if count >= SNIPPET_MAX_CHARS {
+        if count >= max_chars {
             break;
         }
         let ch = if c.is_control() { ' ' } else { c };
@@ -613,24 +1266,20 @@ mod tests {
         r#"{"type":"assistant","message":{"role":"assistant","content":"ok"}}"#.to_string()
     }
 
-    // ---- encode_cwd ----
-
-    #[test]
-    fn encode_cwd_replaces_slash_and_dot_only() {
-        assert_eq!(
-            encode_cwd("/Users/x/work/repo.git"),
-            "-Users-x-work-repo-git"
-        );
-        assert_eq!(encode_cwd("no-separators"), "no-separators");
+    fn write_codex_jsonl(root: &Path, session_id: &str, lines: &[String]) -> PathBuf {
+        let dir = root.join("2026").join("09").join("23");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-2026-09-23T00-00-00-{session_id}.jsonl"));
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        path
     }
 
-    #[test]
-    fn encode_cwd_does_not_touch_filesystem() {
-        // 존재하지 않는 경로를 줘도 패닉·에러 없이 문자열 변환만 한다.
-        assert_eq!(
-            encode_cwd("/definitely/not/a/real/path/xyz"),
-            "-definitely-not-a-real-path-xyz"
-        );
+    fn codex_meta_line(session_id: &str, cwd: &str) -> String {
+        serde_json::json!({"type":"session_meta","payload":{"id":session_id,"cwd":cwd,"cli_version":"0.154.0","git":{"branch":"codex-branch"}}}).to_string()
+    }
+
+    fn codex_message(role: &str, text: &str) -> String {
+        serde_json::json!({"type":"response_item","payload":{"type":"message","role":role,"content":[{"type": if role == "user" { "input_text" } else { "output_text" },"text":text}]}}).to_string()
     }
 
     // ---- is_valid_session_id / resolve ----
@@ -662,7 +1311,10 @@ mod tests {
             &[meta_line(id, "/Users/x/repo", "main", "2.1.274")],
         );
         let got = resolve_in(&root, id).expect("유일 해석 성공해야 함");
-        assert_eq!(got.canonicalize().unwrap(), expected.canonicalize().unwrap());
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            expected.canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -673,6 +1325,23 @@ mod tests {
             resolve_in(&root, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
             Err(ResolveError::NotFound)
         );
+    }
+
+    #[test]
+    fn resolve_rejects_claude_file_with_mismatched_internal_id() {
+        let root = temp_dir("resolve-id-mismatch");
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        write_jsonl(
+            &root.join("-Users-x-repo"),
+            id,
+            &[meta_line(
+                "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+                "/Users/x/repo",
+                "main",
+                "2.1.274",
+            )],
+        );
+        assert_eq!(resolve_in(&root, id), Err(ResolveError::NotFound));
     }
 
     #[test]
@@ -783,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_prefers_custom_title_then_summary_then_agent_name() {
+    fn scan_prefers_custom_title_then_summary() {
         let root = temp_dir("scan-title");
         let id = "33333333-3333-3333-3333-333333333333";
         write_jsonl(
@@ -798,6 +1467,37 @@ mod tests {
         );
         let out = scan_in(&root, &ScanFilter::default(), 10);
         assert_eq!(out[0].title.as_deref(), Some("내가 정한 제목"));
+    }
+
+    #[test]
+    fn scan_never_uses_agent_name_as_a_title() {
+        let root = temp_dir("scan-agent-name");
+        let id = "33333333-3333-3333-3333-333333333334";
+        write_jsonl(
+            &root.join("-Users-x-repo"),
+            id,
+            &[
+                meta_line(id, "/Users/x/repo", "main", "2.1.274"),
+                r#"{"type":"agent-name","agentName":"task-1"}"#.to_string(),
+            ],
+        );
+        assert!(scan_in(&root, &ScanFilter::default(), 10)[0]
+            .title
+            .is_none());
+    }
+
+    #[test]
+    fn user_request_wrapper_keeps_only_the_actual_request() {
+        let input = "# Workflow Harness\ninternal\n# User request\n세션 이어받기를 고친다";
+        assert_eq!(
+            display_user_text(input).as_deref(),
+            Some("세션 이어받기를 고친다")
+        );
+        assert_eq!(display_user_text("<system-reminder>internal"), None);
+        assert_eq!(
+            display_user_text("# AGENTS.md instructions\ninternal only"),
+            None
+        );
     }
 
     #[test]
@@ -839,7 +1539,11 @@ mod tests {
             ],
         );
         let out = scan_in(&root, &ScanFilter::default(), 10);
-        assert_eq!(out.len(), 1, "손상된 줄이 있어도 세션 자체는 인덱싱되어야 함");
+        assert_eq!(
+            out.len(),
+            1,
+            "손상된 줄이 있어도 세션 자체는 인덱싱되어야 함"
+        );
         assert_eq!(out[0].cwd.as_deref(), Some("/Users/x/repo"));
         assert_eq!(out[0].first_message.as_deref(), Some("살아남은 메시지"));
     }
@@ -857,6 +1561,76 @@ mod tests {
         let root = temp_dir("scan-missing").join("does-not-exist");
         let out = scan_in(&root, &ScanFilter::default(), 10);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn codex_scan_describe_and_preview_are_vendor_aware_and_bounded() {
+        let root = temp_dir("codex-scan");
+        let id = "019f205d-33b8-7111-93b8-63fe9eaea592";
+        write_codex_jsonl(
+            &root,
+            id,
+            &[
+                codex_meta_line(id, "/Users/x/repo"),
+                codex_message("user", "첫 요청"),
+                codex_message("assistant", "첫 답변"),
+                codex_message("user", "마지막 요청"),
+                codex_message("assistant", "마지막 답변"),
+            ],
+        );
+        let listed = scan_vendor_in("codex", &root, &ScanFilter::default(), 10);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].vendor, "codex");
+        assert_eq!(listed[0].session_id, id);
+        assert_eq!(listed[0].first_message.as_deref(), Some("첫 요청"));
+        assert_eq!(
+            listed[0].recent_user_message.as_deref(),
+            Some("마지막 요청")
+        );
+        assert_eq!(listed[0].git_branch.as_deref(), Some("codex-branch"));
+        assert_eq!(
+            describe_vendor_in("codex", &root, id).unwrap().vendor,
+            "codex"
+        );
+
+        let preview = preview_vendor_in("codex", &root, id).unwrap();
+        assert!(!preview.truncated);
+        assert_eq!(preview.messages.len(), 4);
+        assert_eq!(preview.messages[2].text, "마지막 요청");
+    }
+
+    #[test]
+    fn preview_returns_only_recent_messages_and_marks_tail_truncation() {
+        let root = temp_dir("preview-tail");
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let mut lines = vec![meta_line(id, "/Users/x/repo", "main", "2.1.274")];
+        lines.extend((0..10).flat_map(|n| [user_line(&format!("u{n}")), assistant_line()]));
+        lines.push("x".repeat(PREVIEW_TAIL_BYTES as usize + 1));
+        write_jsonl(&root.join("-Users-x-repo"), id, &lines);
+        let preview = preview_vendor_in("claude", &root, id).unwrap();
+        assert!(preview.truncated);
+        assert!(preview.messages.len() <= PREVIEW_MESSAGES);
+    }
+
+    #[test]
+    fn preview_expands_title_to_its_detail_limit() {
+        let root = temp_dir("preview-title");
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let long_title = "가".repeat(600);
+        write_jsonl(
+            &root.join("-Users-x-repo"),
+            id,
+            &[
+                meta_line(id, "/Users/x/repo", "main", "2.1.274"),
+                serde_json::json!({"type":"custom-title","customTitle":long_title}).to_string(),
+            ],
+        );
+        let preview = preview_vendor_in("claude", &root, id).unwrap();
+        assert_eq!(
+            preview.meta.title.unwrap().chars().count(),
+            PREVIEW_TITLE_CHARS
+        );
+        assert!(preview.truncated);
     }
 
     #[cfg(unix)]
@@ -906,6 +1680,113 @@ mod tests {
         assert_eq!(out[0].session_id, id_a);
     }
 
+    #[test]
+    fn codex_duplicate_events_do_not_erase_repeated_user_requests() {
+        let root = temp_dir("codex-repeated-preview");
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let path = root.join(format!("rollout-test-{id}.jsonl"));
+        let response = codex_message("user", "repeat this request");
+        let event = r#"{"type":"event_msg","payload":{"type":"user_message","message":"repeat this request"}}"#.to_string();
+        std::fs::write(
+            path,
+            [
+                codex_meta_line(id, "/repo"),
+                response.clone(),
+                event.clone(),
+                response,
+                event,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let preview = preview_vendor_in("codex", &root, id).unwrap();
+        assert_eq!(preview.messages.len(), 2);
+    }
+
+    #[test]
+    fn branch_search_and_long_request_detail_are_available() {
+        let root = temp_dir("branch-request-detail");
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let request = "사용자 요청 ".repeat(100);
+        write_jsonl(
+            &root.join("project"),
+            id,
+            &[
+                meta_line(id, "/Users/x/repo", "feature/unique-branch", "2.1.280"),
+                user_line(&request),
+            ],
+        );
+        let rows = scan_in(
+            &root,
+            &ScanFilter {
+                cwd_prefixes: Vec::new(),
+                query: Some("unique-branch".into()),
+            },
+            10,
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].first_message.as_ref().unwrap().chars().count() <= 120);
+        let preview = preview_vendor_in("claude", &root, id).unwrap();
+        assert_eq!(preview.meta.first_message.unwrap().chars().count(), 512);
+        assert!(preview.truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cwd_filter_accepts_a_canonical_symlink_alias_without_prefix_leakage() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("cwd-alias");
+        let real = root.join("real-repository");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias = root.join("alias-repository");
+        symlink(&real, &alias).unwrap();
+        assert!(cwd_has_prefix(
+            real.to_str().unwrap(),
+            alias.to_str().unwrap()
+        ));
+        assert!(!cwd_has_prefix(
+            root.join("real-repository-other").to_str().unwrap(),
+            real.to_str().unwrap()
+        ));
+    }
+
+    #[test]
+    fn scan_cache_invalidates_when_file_metadata_changes() {
+        let root = temp_dir("cache-invalidate");
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let path = write_jsonl(
+            &root.join("-Users-x-repo"),
+            id,
+            &[
+                meta_line(id, "/Users/x/repo", "main", "2.1.274"),
+                user_line("one"),
+            ],
+        );
+        assert_eq!(
+            scan_in(&root, &ScanFilter::default(), 10)[0]
+                .first_message
+                .as_deref(),
+            Some("one")
+        );
+        std::fs::write(
+            &path,
+            [
+                meta_line(id, "/Users/x/repo", "main", "2.1.274"),
+                user_line("two"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        set_mtime_secs(&path, 3_000);
+        assert_eq!(
+            scan_in(&root, &ScanFilter::default(), 10)[0]
+                .first_message
+                .as_deref(),
+            Some("two")
+        );
+    }
+
     /// 파일 mtime을 테스트가 원하는 값으로 되돌린다(정렬 검증용).
     fn set_mtime_secs(path: &Path, secs: u64) {
         let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
@@ -913,10 +1794,9 @@ mod tests {
         assert!(ft, "mtime 설정 실패: {}", path.display());
     }
 
-    #[cfg(unix)]
     fn filetime_set(path: &Path, time: std::time::SystemTime) -> bool {
         // `filetime` 크레이트 미의존 — libc utimes를 직접 호출하지 않고, std가 제공하는
-        // File::set_modified로 충분하다(플랫폼 지원: macOS/Linux 모두 안정화됨).
+        // File::set_modified로 충분하다(macOS·Linux·Windows 모두 안정화됨).
         std::fs::File::options()
             .write(true)
             .open(path)
@@ -938,10 +1818,7 @@ mod tests {
         let sub = root.join("repo").join("worktree");
         std::fs::create_dir_all(&sub).unwrap();
         let root_canon = root.canonicalize().unwrap();
-        assert!(authorize_cwd(
-            &[root_canon],
-            Some(sub.to_str().unwrap())
-        ));
+        assert!(authorize_cwd(&[root_canon], Some(sub.to_str().unwrap())));
     }
 
     #[test]
@@ -994,5 +1871,22 @@ mod tests {
         let long = "x".repeat(500);
         let capped = sanitize_snippet(&long).unwrap();
         assert_eq!(capped.chars().count(), 120);
+    }
+}
+
+#[cfg(test)]
+mod request_wrapper_tests {
+    use super::display_user_text;
+    #[test]
+    fn known_harness_wrapper_preserves_the_actual_request() {
+        assert_eq!(display_user_text("# Praxis synchronous turn contract\n...\n# User request\n# Workflow Harness\n...\nThis is conditional routing, not another mandatory profile transition or permission gate.\n\n세션을 개선하자"), Some("세션을 개선하자".into()));
+        assert_eq!(
+            display_user_text("<environment_context>cwd</environment_context>"),
+            None
+        );
+        assert_eq!(
+            display_user_text("# Workflow Harness\n새로운 형식을 설계해줘"),
+            Some("# Workflow Harness\n새로운 형식을 설계해줘".into())
+        );
     }
 }

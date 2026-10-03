@@ -8,8 +8,9 @@ import {
 } from "../../../lib/ipc";
 import { codeFontStack, uiFontStack } from "../../../lib/fonts";
 import { useTheme } from "../../../lib/use-theme";
+import { useExperimentalFeatures, setExperimentalFeaturesEnabled } from "../../../lib/experimental-features";
 import { ThemeSection } from "./ThemeSection";
-import { SettingRow, SettingSection, SettingsTabShell, TabSummary } from "./SettingRow";
+import { SettingRow, SettingSection, SettingsTabShell, Switch, TabSummary } from "./SettingRow";
 
 const DEFAULT_FONT_SETTINGS: FontSettings = {
   ui_family: "",
@@ -28,10 +29,11 @@ interface Props {
 
 /**
  * 모양새 — 테마·폰트. 눈에 보이는 것을 바꾸는 설정만 여기 온다.
- * 대기 인사이트는 지식 그래프 탭으로 갔다(`InsightSection`) — 내용이 지식창고에서 온다.
+ * 대기 인사이트는 설정 › 지식 탭에 있다(`InsightSection`) — 내용이 지식창고에서 온다.
  */
 export function AppearanceTab({ fontSettings, onFontSettings }: Props) {
   const theme = useTheme();
+  const advancedFeatures = useExperimentalFeatures();
   const [systemFonts, setSystemFonts] = useState<FontInfo[]>([]);
   const [font, setFont] = useState<FontSettings>(fontSettings ?? DEFAULT_FONT_SETTINGS);
 
@@ -163,12 +165,30 @@ export function AppearanceTab({ fontSettings, onFontSettings }: Props) {
 
         <div className="rounded border border-border bg-raised p-3 space-y-1 overflow-hidden">
           <div style={{ fontFamily: codeFontStack(font.code_family), fontSize: font.code_size }}>
-            {"안녕하세요 Praxis != => 0O1lI {}[]"}
+            {"안녕하세요 Dojang != => 0O1lI {}[]"}
           </div>
           <div style={{ fontFamily: uiFontStack(font.ui_family), fontSize: font.ui_size }}>
             빠른 갈색 여우 The quick brown fox
           </div>
         </div>
+      </SettingSection>
+
+      <SettingSection
+        id="advanced-features"
+        title="고급"
+        hint="개발자용·실험 기능의 노출 여부."
+      >
+        <SettingRow
+          id="advanced-features"
+          title="고급·실험 기능 표시"
+          hint="캐시 관측치·앙상블 실험 지표·Design Mode처럼 개발자용·실험 단계인 기능을 화면에 보여준다. 꺼도 기능 자체는 남아 있고 다시 켜면 그대로 나온다."
+        >
+          <Switch
+            on={advancedFeatures}
+            onClick={() => setExperimentalFeaturesEnabled(!advancedFeatures)}
+            label="고급·실험 기능 표시"
+          />
+        </SettingRow>
       </SettingSection>
     </SettingsTabShell>
   );

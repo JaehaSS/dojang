@@ -79,11 +79,13 @@ fn mismatched_process_identity_is_quarantined_and_never_killed() {
     command
         .args(["-c", "import time;time.sleep(30)"])
         .process_group(0);
+    let scope = TurnProcessScope::attach(&mut command);
     let mut child = ReapOnDrop::new(command.spawn().unwrap());
     db(sqlx::query(
-        "UPDATE convo_executions SET pgid=?,identity_hash='unrelated-process' WHERE id=?",
+        "UPDATE convo_executions SET pgid=?,process_marker=?,identity_hash='unrelated-process' WHERE id=?",
     )
     .bind(i64::from(child.id()))
+    .bind(scope.marker())
     .bind(&execution)
     .execute(&p))
     .unwrap();
@@ -91,6 +93,7 @@ fn mismatched_process_identity_is_quarantined_and_never_killed() {
     assert!(child.try_wait().unwrap().is_none());
     assert!(db(ledger::blocked(&p, 1)).unwrap());
     drop(child);
+    drop(scope);
 }
 #[test]
 #[cfg(unix)]

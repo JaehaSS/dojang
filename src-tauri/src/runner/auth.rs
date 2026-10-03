@@ -137,7 +137,7 @@ pub fn mobile_scope_denies(method: &Method, path: &str) -> bool {
         || path.starts_with("/v1/mobile/")
         // 세션홈 목록은 페어링 자격 전용이다(설계 2026-09-17 제약 5) — 승계(POST /v1/tasks의
         // resume_session)는 본문을 봐야 하므로 여기서 못 막는다. `task_create` 핸들러가 대신 막는다.
-        || (method == Method::GET && path == "/v1/sessions")
+        || (method == Method::GET && (path == "/v1/sessions" || path.starts_with("/v1/sessions/")))
 }
 
 /// 요청이 자기 출처에서 왔는지 본다. 두 신호 중 하나면 통과한다.

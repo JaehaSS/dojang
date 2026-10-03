@@ -101,3 +101,69 @@ fn completion_notification_allows_success_and_finishes_worker() {
         }
     )));
 }
+
+/// claude 2.1.28x는 백그라운드 작업이 살아 있으면 `result` 뒤에도 프로세스를 끝내지 않고,
+/// 알림이 오면 모델을 다시 불러 `result`를 또 낸다. 턴의 답은 마지막 것이고, 판정은 EOF에서
+/// 한 번이다 — `result`마다 판정하면 회수가 끝난 작업이 미완료로 찍히고 경고가 반복된다.
+#[test]
+fn a_notification_after_the_first_result_lets_the_reinvoked_turn_finish_cleanly() {
+    let mut lines = base_lines().to_vec();
+    lines.push(
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"결과가 오면 이어가겠습니다","session_id":"session"}"#,
+    );
+    lines.push(
+        r#"{"type":"system","subtype":"task_notification","task_id":"a1d772ce","tool_use_id":"agent-tool","status":"completed","output_file":"/tmp/a.output"}"#,
+    );
+    lines.push(r#"{"type":"system","subtype":"init","session_id":"session"}"#);
+    lines.push(
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"검증 완료"}]}}"#,
+    );
+    lines.push(
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"검증 완료","session_id":"session"}"#,
+    );
+    let events = run_stub(&lines);
+
+    let results = events
+        .iter()
+        .filter_map(|event| match event {
+            ConvoEvent::Result { text, is_error, .. } => Some((text.clone(), *is_error)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results,
+        vec![("검증 완료".to_string(), false)],
+        "Result는 마지막 하나만, 성공으로 나가야 한다"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ConvoEvent::ToolResult {
+            is_error: false,
+            tool_use_id: Some(id),
+            ..
+        } if id == "agent-tool"
+    )));
+}
+
+#[test]
+fn a_task_cut_after_the_result_fails_the_turn() {
+    let mut lines = base_lines().to_vec();
+    lines.push(
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"기다리겠습니다","session_id":"session"}"#,
+    );
+    lines.push(
+        r#"{"type":"system","subtype":"task_notification","task_id":"a1d772ce","tool_use_id":"agent-tool","status":"stopped"}"#,
+    );
+    let events = run_stub(&lines);
+
+    let results = events
+        .iter()
+        .filter(|event| matches!(event, ConvoEvent::Result { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    assert!(matches!(
+        results[0],
+        ConvoEvent::Result { is_error: true, text, .. }
+            if text.contains("끊은 작업") && text.contains("구현 Worker")
+    ));
+}

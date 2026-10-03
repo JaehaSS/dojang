@@ -14,7 +14,10 @@
 //! 해당 스킬에 귀속한다 — fork된 쪽에는 `attributionSkill`이 안 붙는 경우가 있기 때문.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use serde::Serialize;
 
@@ -178,17 +181,21 @@ fn message_tokens(v: &serde_json::Value) -> u64 {
         + g("cache_read_input_tokens")
 }
 
-/// 트랜스크립트 한 개를 누적. `forced_skill`은 스킬이 통째로 fork된 에이전트에서
-/// `attributionSkill` 대신 쓸 스킬명. 반환값은 **한 건이라도 반영했는가** — 스폰 카운트의 근거다.
-fn accumulate_transcript(
-    acc: &mut Acc,
-    content: &str,
-    agent: &str,
-    forced_skill: Option<&str>,
-    cutoff: i64,
-    offset_secs: i64,
-) -> bool {
-    let mut touched = false;
+/// 트랜스크립트 한 줄에서 뽑은 원시 레코드 — cutoff와 무관해 파일 단위로 캐시할 수 있다.
+/// 에이전트 키와 fork된 스킬은 사이드카에서 오므로 여기 담지 않고 적용 시점에 얹는다.
+struct SkillRec {
+    /// UTC epoch(초). 로컬 오프셋과 무관하다.
+    epoch: i64,
+    session: String,
+    attributed: Option<String>,
+    tokens: u64,
+    /// 이 메시지가 부른 `Skill` 대상들.
+    calls: Vec<String>,
+}
+
+/// JSONL 본문 → 원시 레코드. user/assistant 외의 줄, 깨진 줄, 시각 없는 줄은 버린다.
+fn parse_skill_records(content: &str) -> Vec<SkillRec> {
+    let mut out = Vec::new();
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -201,54 +208,101 @@ fn accumulate_transcript(
         if ty != "user" && ty != "assistant" {
             continue;
         }
-        let Some(ts) = v
+        let Some(epoch) = v
             .get("timestamp")
             .and_then(|x| x.as_str())
-            .and_then(|s| parse_ts(s, offset_secs))
+            .and_then(|s| parse_ts(s, 0))
+            .map(|ts| ts.epoch)
         else {
             continue;
         };
-        if ts.epoch < cutoff {
-            continue;
-        }
-        touched = true;
-        let session = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
-        let skill = forced_skill.or_else(|| v.get("attributionSkill").and_then(|x| x.as_str()));
-        let tokens = if ty == "assistant" {
-            message_tokens(&v)
+        let session = v
+            .get("sessionId")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let attributed = v
+            .get("attributionSkill")
+            .and_then(|x| x.as_str())
+            .map(str::to_string);
+        let (tokens, calls) = if ty == "assistant" {
+            (message_tokens(&v), skill_calls(&v))
         } else {
-            0
+            (0, Vec::new())
         };
-        acc.add_message(agent, skill, session, tokens);
+        out.push(SkillRec {
+            epoch,
+            session,
+            attributed,
+            tokens,
+            calls,
+        });
+    }
+    out
+}
 
-        if ty != "assistant" {
-            continue;
-        }
-        let Some(content) = v
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_array())
-        else {
-            continue;
-        };
-        for block in content {
-            if block.get("type").and_then(|x| x.as_str()) != Some("tool_use") {
-                continue;
-            }
-            if block.get("name").and_then(|x| x.as_str()) != Some("Skill") {
-                continue;
-            }
-            let target = block
+/// assistant 메시지 안의 `Skill` tool_use 대상 이름들.
+fn skill_calls(v: &serde_json::Value) -> Vec<String> {
+    let Some(content) = v
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return Vec::new();
+    };
+    content
+        .iter()
+        .filter(|block| block.get("type").and_then(|x| x.as_str()) == Some("tool_use"))
+        .filter(|block| block.get("name").and_then(|x| x.as_str()) == Some("Skill"))
+        .filter_map(|block| {
+            block
                 .get("input")
                 .and_then(|i| i.get("skill"))
                 .and_then(|x| x.as_str())
-                .unwrap_or("");
-            if !target.is_empty() {
-                acc.add_call(agent, target);
-            }
+        })
+        .filter(|target| !target.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// cutoff 이후 레코드를 누적한다. 한 줄이라도 반영했으면 true — 스폰 수를 셀지 가른다.
+fn apply_skill_records(
+    acc: &mut Acc,
+    recs: &[SkillRec],
+    agent: &str,
+    forced_skill: Option<&str>,
+    cutoff: i64,
+) -> bool {
+    let mut touched = false;
+    for r in recs {
+        if r.epoch < cutoff {
+            continue;
+        }
+        touched = true;
+        let skill = forced_skill.or(r.attributed.as_deref());
+        acc.add_message(agent, skill, &r.session, r.tokens);
+        for target in &r.calls {
+            acc.add_call(agent, target);
         }
     }
     touched
+}
+
+#[cfg(test)]
+fn accumulate_transcript(
+    acc: &mut Acc,
+    content: &str,
+    agent: &str,
+    forced_skill: Option<&str>,
+    cutoff: i64,
+) -> bool {
+    apply_skill_records(
+        acc,
+        &parse_skill_records(content),
+        agent,
+        forced_skill,
+        cutoff,
+    )
 }
 
 /// 스캔 대상 한 건 — 경로, 에이전트 키, fork된 스킬명.
@@ -424,26 +478,43 @@ fn finalize(acc: Acc) -> AgentSkillUsage {
     }
 }
 
-/// range별 에이전트 × 스킬 집계. offset_secs = 로컬 UTC 오프셋(KST=32400). 베스트 에포트.
-pub fn compute_agent_skills(range: &str, offset_secs: i64) -> AgentSkillUsage {
+/// 파일 한 개의 파싱 결과 + 그때의 mtime·size. 둘 중 하나라도 다르면 다시 읽는다.
+struct CachedSkillFile {
+    mtime: Option<SystemTime>,
+    size: u64,
+    recs: Vec<SkillRec>,
+}
+
+static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedSkillFile>>> = OnceLock::new();
+
+/// 파일을 실제로 읽은 횟수 — 캐시가 스캔을 건너뛰는지 테스트가 확인한다.
+static FILE_READS: AtomicUsize = AtomicUsize::new(0);
+
+/// range별 에이전트 × 스킬 집계. 베스트 에포트.
+///
+/// `_offset_secs`는 커맨드 계약으로 받지만 쓰지 않는다 — 집계는 UTC epoch cutoff만 보고
+/// 날짜 버킷을 만들지 않는다.
+pub fn compute_agent_skills(range: &str, _offset_secs: i64) -> AgentSkillUsage {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let cut = cutoff(range, now);
+    compute_targets(&transcript_targets(), cutoff(range, now))
+}
+
+/// 대상 목록을 주입받는 본체 — 테스트가 가짜 트랜스크립트로 부른다.
+///
+/// 인사이트의 지출 집계(`super::compute`)처럼 파일 단위 캐시를 둔다. 없으면 range 칩을 바꿀
+/// 때마다 메인·서브에이전트 트랜스크립트 전체(GB 단위)를 다시 읽는다.
+fn compute_targets(targets: &[Target], cut: i64) -> AgentSkillUsage {
     let mut acc = Acc::default();
-    for t in transcript_targets() {
-        let Ok(content) = std::fs::read_to_string(&t.path) else {
-            continue;
-        };
-        let touched = accumulate_transcript(
-            &mut acc,
-            &content,
-            &t.agent,
-            t.forced_skill.as_deref(),
-            cut,
-            offset_secs,
-        );
+    let cell = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cell.lock().unwrap_or_else(|e| e.into_inner());
+    let live: HashSet<&PathBuf> = targets.iter().map(|t| &t.path).collect();
+    cache.retain(|path, _| live.contains(path));
+    for t in targets {
+        let recs = cached_recs(&mut cache, &t.path);
+        let touched = apply_skill_records(&mut acc, recs, &t.agent, t.forced_skill.as_deref(), cut);
         if !touched {
             continue;
         }
@@ -453,7 +524,30 @@ pub fn compute_agent_skills(range: &str, offset_secs: i64) -> AgentSkillUsage {
             acc.subagent_runs += 1;
         }
     }
+    drop(cache);
     finalize(acc)
+}
+
+/// 캐시가 파일의 현재 mtime·size와 맞으면 그대로, 아니면 읽어서 갱신한 뒤 돌려준다.
+fn cached_recs<'a>(
+    cache: &'a mut HashMap<PathBuf, CachedSkillFile>,
+    path: &Path,
+) -> &'a [SkillRec] {
+    let meta = std::fs::metadata(path).ok();
+    let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let fresh = cache
+        .get(path)
+        .map(|c| c.mtime == mtime && c.size == size)
+        .unwrap_or(false);
+    if !fresh {
+        FILE_READS.fetch_add(1, Ordering::Relaxed);
+        let recs = std::fs::read_to_string(path)
+            .map(|c| parse_skill_records(&c))
+            .unwrap_or_default();
+        cache.insert(path.to_path_buf(), CachedSkillFile { mtime, size, recs });
+    }
+    cache.get(path).map(|c| c.recs.as_slice()).unwrap_or(&[])
 }
 
 #[cfg(test)]
@@ -481,7 +575,7 @@ mod tests {
     }
 
     fn feed(acc: &mut Acc, content: &str, agent: &str, forced: Option<&str>) -> bool {
-        accumulate_transcript(acc, content, agent, forced, 0, 0)
+        accumulate_transcript(acc, content, agent, forced, 0)
     }
 
     fn agent_of<'a>(u: &'a AgentSkillUsage, name: &str) -> &'a AgentStat {
@@ -624,7 +718,6 @@ mod tests {
             MAIN_AGENT,
             None,
             2_000_000_000, // 2033년
-            0,
         );
         assert!(!touched);
         assert!(finalize(acc).skills.is_empty());
@@ -644,6 +737,45 @@ mod tests {
         let u = finalize(acc);
         assert_eq!(u.attributed_messages, 1);
         assert_eq!(skill_of(&u, "research").tokens, 5);
+    }
+
+    #[test]
+    fn cache_reuses_parsed_records_across_ranges_until_file_changes() {
+        let dir = crate::testtmp::dir().join(format!("agent-skills-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.jsonl");
+        let first_line = assistant("2026-08-01T01:00:00.000Z", "s1", Some("research"), 10);
+        std::fs::write(&path, &first_line).unwrap();
+        let targets = [Target {
+            path: path.clone(),
+            agent: MAIN_AGENT.to_string(),
+            forced_skill: None,
+            subagent: false,
+        }];
+
+        let reads = || FILE_READS.load(Ordering::Relaxed);
+        let first = compute_targets(&targets, 0);
+        let after_first = reads();
+        let narrowed = compute_targets(&targets, 2_000_000_000);
+        assert_eq!(
+            reads(),
+            after_first,
+            "range를 바꿔도 파일을 다시 읽지 않는다"
+        );
+        assert!(narrowed.skills.is_empty());
+        assert_eq!(skill_of(&first, "research").tokens, 10);
+
+        let grown = [
+            first_line,
+            assistant("2026-08-01T02:00:00.000Z", "s1", Some("research"), 5),
+        ]
+        .join("\n");
+        std::fs::write(&path, grown).unwrap();
+        let third = compute_targets(&targets, 0);
+        assert_eq!(reads(), after_first + 1, "바뀐 파일만 다시 읽는다");
+        assert_eq!(skill_of(&third, "research").tokens, 15);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

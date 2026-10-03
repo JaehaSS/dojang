@@ -80,52 +80,12 @@ describe("tauriTransport", () => {
     });
   });
 
-  it("maps memory and context methods to local Tauri commands", async () => {
+  it("maps quickopen search to local Tauri commands", async () => {
     invoke.mockResolvedValue([]);
 
-    await tauriTransport.memoryList();
-    await tauriTransport.memoryAdd("/repo", "decision", "remember");
-    await tauriTransport.memoryVersions(3);
-    await tauriTransport.memoryRestoreVersion(3, 1, 2, "candidate");
-    await tauriTransport.memorySetApplicationPolicy(3, "must_apply", 2, "relevance");
-    await tauriTransport.memoryConfirm(3, 99);
-    await tauriTransport.memoryConfirmAndApprove(3, 2);
-    await tauriTransport.memoryAddCodeEvidence(3, {
-      relative_path: "src/lib.rs",
-      line_start: 2,
-      line_end: 4,
-    });
-    await tauriTransport.memoryRevalidate(3);
-    await tauriTransport.contextReport(7);
-    await tauriTransport.contextFileRead(7, "/repo/CLAUDE.md");
     await tauriTransport.quickopenSearch("deploy", ["task", "session"]);
 
     expect(invoke.mock.calls).toEqual([
-      ["memory_list"],
-      ["memory_add", { repo: "/repo", kind: "decision", content: "remember" }],
-      ["knowledge_versions", { id: 3 }],
-      ["knowledge_restore_version", {
-        id: 3,
-        sourceVersion: 1,
-        expectedCurrentVersion: 2,
-        expectedStatus: "candidate",
-      }],
-      // Tauri는 camelCase 인자를 snake_case 파라미터로 변환한다 — Runner 본문과 표기가 다르다.
-      ["memory_set_application_policy", {
-        id: 3,
-        policy: "must_apply",
-        expectedVersion: 2,
-        expectedPolicy: "relevance",
-      }],
-      ["knowledge_confirm", { id: 3, expiresAt: 99 }],
-      ["knowledge_confirm_and_approve", { id: 3, expectedVersion: 2 }],
-      ["knowledge_add_code_location", {
-        id: 3,
-        input: { relative_path: "src/lib.rs", line_start: 2, line_end: 4 },
-      }],
-      ["knowledge_revalidate", { id: 3 }],
-      ["context_report", { taskId: 7 }],
-      ["context_file_read", { taskId: 7, path: "/repo/CLAUDE.md" }],
       ["quickopen_search", { query: "deploy", scopes: ["task", "session"] }],
     ]);
   });
@@ -135,12 +95,10 @@ describe("tauriTransport", () => {
 
     await tauriTransport.verifySpec(7);
     await tauriTransport.taskVerify(7, "preview-1");
-    await tauriTransport.evidenceGet(7);
 
     expect(invoke.mock.calls).toEqual([
       ["verify_spec", { id: 7 }],
       ["task_verify", { id: 7, previewToken: "preview-1" }],
-      ["evidence_get", { id: 7 }],
     ]);
   });
 
@@ -231,6 +189,18 @@ describe("tauriTransport", () => {
       ["github_issue_delete", { repo: "/repo", number: 42 }],
     ]);
   });
+
+  it("asks task_diff for the atomic review snapshot with Tauri camelCase arguments", async () => {
+    invoke.mockResolvedValue({ files: [], baseline: { kind: "pinned" } });
+
+    await tauriTransport.taskDiff(7, "uncommitted", true);
+
+    expect(invoke).toHaveBeenCalledWith("task_diff", {
+      id: 7,
+      range: "uncommitted",
+      includeReview: true,
+    });
+  });
 });
 
 
@@ -252,4 +222,10 @@ it("maps isolated questions and idempotent main receipts to their dedicated comm
     ["conversation_submit", { taskId: 7, requestId: "main-1", message: "apply this", imagePaths: ["/image.png"] }],
     ["conversation_receipt", { taskId: 7, requestId: "main-1" }],
   ]);
+});
+
+it("forwards the active composer generation for explicit wiki attachments", async () => {
+  invoke.mockReset(); invoke.mockResolvedValue({});
+  await tauriTransport.conversationSubmit(7, "request", "message", [], "vault-followup:7:nonce");
+  expect(invoke).toHaveBeenCalledWith("conversation_submit", { taskId: 7, requestId: "request", message: "message", imagePaths: [], previewClientRef: "vault-followup:7:nonce" });
 });

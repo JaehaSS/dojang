@@ -21,6 +21,7 @@ import { ConversationView, eventToItems, type ConvoEventLike, type ConvoItem } f
 import { EnsembleCompare } from "./EnsembleCompare";
 import { EnsembleFeedback } from "./EnsembleFeedback";
 import { EnsembleMetrics } from "./EnsembleMetrics";
+import { useExperimentalFeatures } from "../../lib/experimental-features";
 
 interface Props {
   ensemble: string;
@@ -31,6 +32,7 @@ interface Props {
 
 /** 앙상블 비교/교차검증 뷰 — N개 후보 diffstat 나란히 + 독립 심판이 최선 추천. */
 export function EnsembleView({ ensemble, onOpenTask, onApprove, onHome }: Props) {
+  const advancedFeatures = useExperimentalFeatures();
   const [cands, setCands] = useState<Task[]>([]);
   const [stats, setStats] = useState<Record<number, string>>({});
   const [convos, setConvos] = useState<Record<number, ConvoItem[]>>({});
@@ -210,7 +212,7 @@ export function EnsembleView({ ensemble, onOpenTask, onApprove, onHome }: Props)
         </div>
       )}
 
-      <EnsembleMetrics metrics={metrics} unavailable={metricsUnavailable} />
+      {advancedFeatures && <EnsembleMetrics metrics={metrics} unavailable={metricsUnavailable} />}
       <EnsembleFeedback
         history={feedback}
         currentEnsemble={ensemble}

@@ -20,35 +20,47 @@ pub const ROUND_CAP_RANGE: RangeInclusive<u32> = 2..=5;
 
 /// 매 턴 같은 문자열로 붙는 토론 규약(설계 §3 지시문 초안 원문).
 /// 마지막 문장(쓰기 금지)이 토론 중 파일 변경을 막는 **유일한** 장치다(Q6).
-pub const DEBATE_PROTOCOL: &str = "당신은 다른 AI 에이전트와 함께 하나의 작업을 두고 토론하고 있습니다. 목표는 이기는 것이 아니라 **사용자가 채택할 수 있는 하나의 결론**에 이르는 것입니다. 상대의 직전 발화를 인용해 어디에 동의하고 어디에 반대하는지 먼저 밝히고, 반대에는 근거(코드 경로·측정값·실패 사례)를 붙이십시오. 근거 없는 선호는 반대가 아닙니다. 상대의 지적이 옳으면 즉시 인정하고 자기 안을 고치십시오 — 입장을 지키는 것은 이 자리의 목적이 아닙니다. 남은 이견이 사용자의 결정을 바꾸지 않을 만큼 작아졌다고 판단하면, 합의된 결론을 3줄 이내로 요약한 뒤 마지막 줄에 정확히 `[합의]`만 적으십시오. 이견이 남았다면 마커를 적지 말고, 무엇이 남았는지 한 줄로 밝히십시오. 파일을 수정하지 말고 명령을 실행하지 마십시오 — 이 라운드에서 당신이 하는 일은 판단뿐입니다.";
+pub const DEBATE_PROTOCOL: &str = "당신은 다른 AI 에이전트들과 함께 하나의 작업을 두고 토론하고 있습니다. 목표는 이기는 것이 아니라 **사용자가 채택할 수 있는 하나의 결론**에 이르는 것입니다. 다른 참여자의 직전 발화를 인용해 어디에 동의하고 어디에 반대하는지 먼저 밝히고, 반대에는 근거(코드 경로·측정값·실패 사례)를 붙이십시오. 근거 없는 선호는 반대가 아닙니다. 다른 참여자의 지적이 옳으면 즉시 인정하고 자기 안을 고치십시오 — 입장을 지키는 것은 이 자리의 목적이 아닙니다. 남은 이견이 사용자의 결정을 바꾸지 않을 만큼 작아졌다고 판단하면, 합의된 결론을 3줄 이내로 요약한 뒤 마지막 줄에 정확히 `[합의]`만 적으십시오. 이견이 남았다면 마커를 적지 말고, 무엇이 남았는지 한 줄로 밝히십시오. 파일을 수정하지 말고 명령을 실행하지 마십시오 — 이 라운드에서 당신이 하는 일은 판단뿐입니다.";
+
+/// 다른 참여자 한 명 — 이름과, 이번 턴에 중계할 그의 가장 최근 발화.
+pub struct Peer<'a> {
+    pub agent: &'a str,
+    /// 없으면 아직 말하지 않았거나 직전 턴이 말이 없었다 — 그의 절이 빠진다.
+    pub last: Option<&'a str>,
+}
 
 /// 이번 턴의 프롬프트 접미에 들어갈 재료. 자리(좌·우)는 바뀌지 않으므로 고지하지 않는다(Q5).
 pub struct RoundContext<'a> {
     pub round: u32,
     pub cap: u32,
-    pub opponent_agent: &'a str,
     pub user_message: &'a str,
-    /// 상대의 **직전 하나**만 중계한다. 전체 로그를 붙이면 라운드마다 컨텍스트가 선형으로 분다.
-    pub opponent_last: Option<&'a str>,
+    /// 다른 참여자 전원, 자리 순서. 각자 **가장 최근 하나**만 중계한다 — 전체 로그를 붙이면
+    /// 라운드마다 컨텍스트가 선형으로 분다(설계 2026-09-23 D2).
+    pub peers: Vec<Peer<'a>>,
 }
 
-/// 규약 → 라운드 헤더 → 사용자 발화 → 상대 직전 발화. 캡슐은 붙이지 않는다 —
-/// 호출부가 이미 맨 앞에 둔다(ADR 0170).
+/// 규약 → 라운드 헤더 → 사용자 발화 → 다른 참여자 직전 발화. 캡슐은 붙이지 않는다 —
+/// 호출부가 이미 맨 앞에 둔다(ADR 0170). 참여자 수와 무관하게 한 형태다.
 pub fn debate_suffix(ctx: &RoundContext) -> String {
+    let names = ctx.peers.iter().map(|peer| peer.agent).collect::<Vec<_>>().join(", ");
     let mut out = format!(
-        "{DEBATE_PROTOCOL}\n\n## 라운드 {}/{} · 상대: {}\n\n## 사용자 발화\n{}\n",
-        ctx.round, ctx.cap, ctx.opponent_agent, ctx.user_message
+        "{DEBATE_PROTOCOL}\n\n## 라운드 {}/{} · 다른 참여자: {names}\n\n## 사용자 발화\n{}\n",
+        ctx.round, ctx.cap, ctx.user_message
     );
-    if let Some(last) = ctx.opponent_last {
-        out.push_str("\n## 상대 직전 발화\n");
-        out.push_str(last);
-        out.push('\n');
+    let spoken = ctx.peers.iter().filter_map(|peer| peer.last.map(|last| (peer.agent, last)));
+    let mut opened = false;
+    for (agent, last) in spoken {
+        if !opened {
+            out.push_str("\n## 다른 참여자의 직전 발화\n");
+            opened = true;
+        }
+        out.push_str(&format!("### {agent}\n{last}\n"));
     }
     out
 }
 
-/// 우측의 첫 턴 — 새로 판 세션이라 작업 맥락이 없다. 에이전트 전환이 쓰는 인계 조립을 앞에
-/// 두고 접미를 뒤에 붙인다. 새 조립 파이프라인을 만들지 않는다(설계 §3).
+/// 세션이 없는 비좌측 자리의 첫 턴 — 새로 판 세션이라 작업 맥락이 없다. 에이전트 전환이 쓰는
+/// 인계 조립을 앞에 두고 접미를 뒤에 붙인다. 새 조립 파이프라인을 만들지 않는다(설계 §3).
 pub fn first_right_prompt(handoff: &str, ctx: &RoundContext) -> String {
     format!("{handoff}\n{}", debate_suffix(ctx))
 }
@@ -80,28 +92,44 @@ pub enum TurnOutcome {
     Interrupted,
 }
 
-/// 다음에 할 일 — 반대편 턴이거나 종료다.
+/// 다음에 할 일 — 다음 자리의 턴이거나 종료다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     Next(Side),
     End(DebateEndReason),
 }
 
-/// 라운드 장부. 합의는 라운드 경계가 아니라 **연속한 두 턴**으로 판정하므로 불리언 하나가 아니라
-/// 카운터 하나면 된다(설계 §3).
-#[derive(Debug, Clone, Copy)]
+/// 자리 목록 검증. 좌측이 맨 앞이고 비좌측이 자리 순서로 이어져야 한다 — 허용되는 것은
+/// `[좌, 우]`와 `[좌, 우, 셋째]`뿐이다. 빈틈을 받아들이면 "마지막 자리"가 틀어져 라운드가
+/// 오르지 않고 벤더 호출이 상한 없이 돈다(설계 2026-09-23 D1).
+pub fn valid_seats(seats: &[Side]) -> bool {
+    seats.len() >= 2 && seats.iter().enumerate().all(|(i, side)| side.index() == i)
+}
+
+/// 라운드 장부. 합의는 라운드 경계가 아니라 **참여자 수만큼 연속한 턴**으로 판정하므로
+/// 불리언 하나가 아니라 카운터 하나면 된다(설계 §3, 2026-09-23 D4).
+#[derive(Debug, Clone)]
 pub struct DebateState {
     round: u32,
     cap: u32,
-    consecutive_markers: u8,
+    consecutive_markers: usize,
+    seats: Vec<Side>,
 }
 
 impl DebateState {
+    /// 2자 토론.
     pub fn new(cap: u32) -> Self {
+        Self::with_seats(cap, vec![Side::Left, Side::Right])
+    }
+
+    /// 자리 목록은 호출부가 `valid_seats`로 이미 걸렀다고 본다.
+    pub fn with_seats(cap: u32, seats: Vec<Side>) -> Self {
+        debug_assert!(valid_seats(&seats), "자리 목록이 어긋났다: {seats:?}");
         Self {
             round: 1,
             cap,
             consecutive_markers: 0,
+            seats,
         }
     }
 
@@ -111,6 +139,10 @@ impl DebateState {
 
     pub fn cap(&self) -> u32 {
         self.cap
+    }
+
+    pub fn seats(&self) -> &[Side] {
+        &self.seats
     }
 
     /// 턴 하나를 장부에 넣고 다음 걸음을 돌려준다.
@@ -126,16 +158,19 @@ impl DebateState {
         } else {
             0
         };
-        if self.consecutive_markers >= 2 {
+        if self.consecutive_markers >= self.seats.len() {
             return Step::End(DebateEndReason::Consensus);
         }
-        if side == Side::Right {
+        let last = self.seats.len() - 1;
+        let at = self.seats.iter().position(|seat| *seat == side).unwrap_or(last);
+        if at == last {
             if self.round >= self.cap {
                 return Step::End(DebateEndReason::RoundCap);
             }
             self.round += 1;
+            return Step::Next(self.seats[0]);
         }
-        Step::Next(side.opposite())
+        Step::Next(self.seats[at + 1])
     }
 }
 
@@ -147,9 +182,8 @@ mod tests {
         RoundContext {
             round: 2,
             cap: 3,
-            opponent_agent: "codex",
             user_message: "이 설계가 맞나?",
-            opponent_last,
+            peers: vec![Peer { agent: "codex", last: opponent_last }],
         }
     }
 
@@ -239,14 +273,14 @@ mod tests {
     fn suffix_keeps_its_order_and_drops_the_missing_clause() {
         let with_last = debate_suffix(&ctx(Some("나는 반대다")));
         let protocol = with_last.find(DEBATE_PROTOCOL).expect("규약");
-        let header = with_last.find("## 라운드 2/3 · 상대: codex").expect("헤더");
+        let header = with_last.find("## 라운드 2/3 · 다른 참여자: codex").expect("헤더");
         let user = with_last.find("## 사용자 발화").expect("사용자 발화");
-        let opponent = with_last.find("## 상대 직전 발화").expect("상대 발화");
+        let opponent = with_last.find("## 다른 참여자의 직전 발화\n### codex").expect("상대 발화");
         assert!(protocol < header && header < user && user < opponent);
         assert!(with_last.contains("나는 반대다"));
 
         let without_last = debate_suffix(&ctx(None));
-        assert!(!without_last.contains("## 상대 직전 발화"));
+        assert!(!without_last.contains("## 다른 참여자의 직전 발화"));
         assert!(without_last.contains("이 설계가 맞나?"));
     }
 
@@ -258,7 +292,7 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("## 라운드"))
             .expect("헤더");
-        for banned in ["좌", "우", "left", "right"] {
+        for banned in ["좌", "우", "left", "right", "third"] {
             assert!(!header.contains(banned), "헤더가 자리를 고지한다: {header}");
         }
     }
@@ -277,5 +311,67 @@ mod tests {
         assert_eq!(round_cap_from_setting(Some("nope")), DEFAULT_ROUND_CAP);
         assert_eq!(round_cap_from_setting(Some("7")), DEFAULT_ROUND_CAP);
         assert_eq!(round_cap_from_setting(Some("4")), 4);
+    }
+
+    /// (10) 3자는 좌 → 우 → 셋째 순서이고, 라운드는 셋째 턴 뒤에만 오른다.
+    #[test]
+    fn three_seats_rotate_and_raise_the_round_after_the_last_seat() {
+        let seats = vec![Side::Left, Side::Right, Side::Third];
+        let mut state = DebateState::with_seats(2, seats);
+        assert_eq!(state.advance(Side::Left, spoke(false)), Step::Next(Side::Right));
+        assert_eq!(state.advance(Side::Right, spoke(false)), Step::Next(Side::Third));
+        assert_eq!(state.round(), 1);
+        assert_eq!(state.advance(Side::Third, spoke(false)), Step::Next(Side::Left));
+        assert_eq!(state.round(), 2);
+        state.advance(Side::Left, spoke(false));
+        state.advance(Side::Right, spoke(false));
+        assert_eq!(
+            state.advance(Side::Third, spoke(false)),
+            Step::End(DebateEndReason::RoundCap)
+        );
+    }
+
+    /// (11) 3자 합의는 세 턴 연속 마커다 — 둘만 연속이면 계속 돌고, 경계를 넘어도 이어진다.
+    #[test]
+    fn three_seats_need_three_consecutive_markers() {
+        let seats = vec![Side::Left, Side::Right, Side::Third];
+        let mut state = DebateState::with_seats(3, seats);
+        state.advance(Side::Left, spoke(false));
+        assert_eq!(state.advance(Side::Right, spoke(true)), Step::Next(Side::Third));
+        assert_eq!(state.advance(Side::Third, spoke(true)), Step::Next(Side::Left));
+        assert_eq!(
+            state.advance(Side::Left, spoke(true)),
+            Step::End(DebateEndReason::Consensus)
+        );
+    }
+
+    /// (12) 허용되는 자리 목록은 좌측부터 빈틈없이 이어진 둘·셋뿐이다.
+    #[test]
+    fn seat_lists_must_start_at_left_without_gaps() {
+        assert!(valid_seats(&[Side::Left, Side::Right]));
+        assert!(valid_seats(&[Side::Left, Side::Right, Side::Third]));
+        assert!(!valid_seats(&[Side::Left]));
+        assert!(!valid_seats(&[Side::Left, Side::Third]));
+        assert!(!valid_seats(&[Side::Right, Side::Left]));
+    }
+
+    /// (13) 여러 참여자의 직전 발화는 자리 순서로 이름과 함께 붙고, 말하지 않은 참여자는 빠진다.
+    #[test]
+    fn suffix_relays_each_peer_under_its_name() {
+        let suffix = debate_suffix(&RoundContext {
+            round: 1,
+            cap: 3,
+            user_message: "어느 안인가?",
+            peers: vec![
+                Peer { agent: "claude", last: Some("A안") },
+                Peer { agent: "codex", last: None },
+                Peer { agent: "agy", last: Some("B안") },
+            ],
+        });
+        assert!(suffix.contains("## 라운드 1/3 · 다른 참여자: claude, codex, agy"));
+        let claude = suffix.find("### claude\nA안").expect("claude 절");
+        let agy = suffix.find("### agy\nB안").expect("agy 절");
+        assert!(claude < agy);
+        assert!(!suffix.contains("### codex"));
     }
 }

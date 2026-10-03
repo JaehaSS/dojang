@@ -36,6 +36,7 @@ fn todowrite_line_reaches_capsule_block_as_mermaid() {
         canvas: mmd,
     });
 
+    assert!(block.contains("# Dojang Capsule (작업 핸드오프)"));
     assert!(block.contains("## 작업 캔버스"));
     assert!(block.contains("```mermaid"));
     assert!(block.contains("주입 경로 수정"));

@@ -102,6 +102,87 @@ describe("ConversationView scroll lifecycle", () => {
   });
 });
 
+describe("ConversationView 폭 변화", () => {
+  /** 코드 열이 열리고 닫히면 대화 열의 폭이 바뀐다 — 대화 영역을 지켜보는 관찰자를 손으로 부른다. */
+  let observers: { callback: () => void; targets: Element[] }[] = [];
+  let scrollContainer: HTMLDivElement;
+  const resize = () => {
+    for (const o of observers) if (o.targets.includes(scrollContainer)) o.callback();
+  };
+  beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        private entry: { callback: () => void; targets: Element[] };
+        constructor(callback: () => void) {
+          this.entry = { callback, targets: [] };
+          observers.push(this.entry);
+        }
+        observe(target: Element) {
+          this.entry.targets.push(target);
+        }
+        disconnect() {
+          this.entry.targets = [];
+        }
+      },
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    observers = [];
+  });
+
+  /**
+   * 첫 항목이 문서에서 차지하는 위치를 줄바꿈 상태로 흉내 낸다. 넓으면 400px 지점, 좁아져 줄이
+   * 늘면 위 항목이 길어져 700px 지점으로 밀린다. 뷰포트 윗변은 0이다.
+   */
+  function layout(scrollContainer: HTMLDivElement, width: () => number): HTMLElement {
+    const item = scrollContainer.lastElementChild as HTMLElement;
+    Object.defineProperty(scrollContainer, "clientWidth", { configurable: true, get: width });
+    scrollContainer.getBoundingClientRect = () => ({ top: 0, bottom: 500 }) as DOMRect;
+    item.getBoundingClientRect = () => {
+      const top = (width() >= 600 ? 400 : 700) - scrollContainer.scrollTop;
+      return { top, bottom: top + 300 } as DOMRect;
+    };
+    return item;
+  }
+
+  it("위로 읽던 중 폭이 바뀌면 보던 항목을 같은 자리에 다시 놓는다", async () => {
+    await renderConversation(1, "읽던 답변");
+    scrollContainer = container?.firstElementChild?.firstElementChild as HTMLDivElement;
+    let width = 800;
+    const item = layout(scrollContainer, () => width);
+    setScrollMetrics(scrollContainer, 1_000);
+    act(() => resize());
+    scrollContainer.scrollTop = 300;
+    scrollContainer.dispatchEvent(new Event("scroll"));
+    expect(item.getBoundingClientRect().top).toBe(100);
+
+    width = 500;
+    // 줄어든 길이 때문에 브라우저가 낸 스크롤이 관찰자보다 먼저 와도 기준을 덮어쓰지 않는다.
+    scrollContainer.dispatchEvent(new Event("scroll"));
+    act(() => resize());
+
+    expect(item.getBoundingClientRect().top).toBe(100);
+    expect(scrollContainer.scrollTop).toBe(600);
+  });
+
+  it("하단을 따라가던 중이면 폭이 바뀌어도 하단에 붙는다", async () => {
+    await renderConversation(1, "마지막 답변");
+    scrollContainer = container?.firstElementChild?.firstElementChild as HTMLDivElement;
+    let width = 800;
+    layout(scrollContainer, () => width);
+    setScrollMetrics(scrollContainer, 1_000);
+    act(() => resize());
+
+    width = 500;
+    setScrollMetrics(scrollContainer, 1_600);
+    act(() => resize());
+
+    expect(scrollContainer.scrollTop).toBe(1_600);
+  });
+});
+
 describe("ConversationView 렌더 윈도우", () => {
   /** 아이템 n개를 `대화 0` … `대화 n-1`로 만든다 — 어디까지 올라왔는지 텍스트로 판정하려고. */
   const numbered = (count: number): ConvoItem[] =>
@@ -286,5 +367,52 @@ describe("ConversationView — 공백 없는 긴 줄은 가로로 넘치지 않�
     const scroller = container?.firstElementChild?.firstElementChild as HTMLDivElement;
     expect(scroller.className).toContain("overflow-x-hidden");
     expect(scroller.className).not.toMatch(/\boverflow-auto\b/);
+  });
+});
+
+describe("ConversationView — 구조화된 도구 미디어", () => {
+  it("allowlist된 data 이미지·음성을 표시하고 리소스는 사용자 클릭으로만 연다", async () => {
+    const onOpenLink = vi.fn();
+    const image = "data:image/png;base64,aGVsbG8=";
+    const audio = "data:audio/mpeg;base64,aGVsbG8=";
+    const items: ConvoItem[] = [{
+      role: "tool_output",
+      toolUseId: "tool-1",
+      contents: [
+        { type: "text", text: "connector output" },
+        { type: "image", url: image },
+        { type: "audio", url: audio },
+        { type: "resource", uri: "https://example.com/report", title: "보고서 열기" },
+      ],
+    }];
+    await act(async () => root?.render(<ConversationView conversationId={1} items={items} busy={false} onOpenLink={onOpenLink} />));
+
+    expect(container?.textContent).toContain("connector output");
+    expect(container?.querySelector("img")?.getAttribute("src")).toBe(image);
+    const player = container?.querySelector("audio") as HTMLAudioElement;
+    expect(player?.getAttribute("src")).toBe(audio);
+    expect(player?.autoplay).toBe(false);
+    expect(onOpenLink).not.toHaveBeenCalled();
+    await act(async () => [...container!.querySelectorAll("button")].find((node) => node.textContent === "보고서 열기")?.click());
+    expect(onOpenLink).toHaveBeenCalledWith("https://example.com/report");
+  });
+
+  it("refuses remote media, invalid MIME, and executable resource URLs", async () => {
+    const onOpenLink = vi.fn();
+    const items: ConvoItem[] = [{
+      role: "tool_output",
+      toolUseId: "tool-1",
+      contents: [
+        { type: "image", url: "https://evil.example/track.png" },
+        { type: "audio", url: "data:text/html;base64,aGVsbG8=" },
+        { type: "resource", uri: "javascript:alert(1)", title: "열기" },
+      ],
+    }];
+    await act(async () => root?.render(<ConversationView conversationId={1} items={items} busy={false} onOpenLink={onOpenLink} />));
+
+    expect(container?.querySelector("img")).toBeNull();
+    expect(container?.querySelector("audio")).toBeNull();
+    expect([...container!.querySelectorAll("button")].some((node) => node.textContent === "열기")).toBe(false);
+    expect(onOpenLink).not.toHaveBeenCalled();
   });
 });

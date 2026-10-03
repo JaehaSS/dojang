@@ -61,21 +61,6 @@ describe("formatCaptureBlock", () => {
     expect(block).toContain("이미지를 열어");
   });
 
-  it("위키 문서는 제목·절대 경로·본문을 markdown 펜스로 전달한다", () => {
-    const block = formatCaptureBlock(record({
-      source: "wiki",
-      outer_html: "문서 A",
-      file_path: "/창고/wiki/a.md",
-      selection_text: "# 문서 A",
-    }), 3);
-    expect(block).toBe(["[위키 문서 3]", "제목: 문서 A", "파일: /창고/wiki/a.md", "본문:", "```markdown", "# 문서 A", "```"].join("\n"));
-  });
-
-  it("본문이 비어도 위키 문서는 경로만으로 첨부된다 — 에이전트가 파일을 직접 연다", () => {
-    const block = formatCaptureBlock(record({ source: "wiki", outer_html: "빈 문서", file_path: "/창고/b.md", selection_text: "" }), 1);
-    expect(block).toBe(["[위키 문서 1]", "제목: 빈 문서", "파일: /창고/b.md"].join("\n"));
-  });
-
   it("선택 코드 펜스에 파일 확장자 기반 언어를 붙인다", () => {
     const block = formatCaptureBlock(
       record({

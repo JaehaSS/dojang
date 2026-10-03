@@ -32,7 +32,6 @@ pub struct CandidateBenchmarkMetrics {
     pub tokens_in: i64,
     pub tokens_out: i64,
     pub cost_usd: f64,
-    pub memory_count: i64,
 }
 #[derive(sqlx::FromRow)]
 struct TimedEvent {
@@ -49,8 +48,7 @@ pub async fn candidate_metrics(
         let events = timed_events(pool, task.id).await?;
         let event_metrics =
             summarize_events(events.iter().map(|row| (row.timestamp, row.event.as_str())));
-        let memory_count = memory_count(pool, task.id).await?;
-        candidates.push(candidate_from(task, event_metrics, memory_count));
+        candidates.push(candidate_from(task, event_metrics));
     }
     Ok(candidates)
 }
@@ -65,19 +63,7 @@ async fn timed_events(pool: &SqlitePool, task_id: i64) -> anyhow::Result<Vec<Tim
     .map_err(Into::into)
 }
 
-async fn memory_count(pool: &SqlitePool, task_id: i64) -> anyhow::Result<i64> {
-    sqlx::query_scalar("SELECT COUNT(DISTINCT memory_id) FROM memory_usages WHERE task_id = ?")
-        .bind(task_id)
-        .fetch_one(pool)
-        .await
-        .map_err(Into::into)
-}
-
-fn candidate_from(
-    task: crate::db::Task,
-    metrics: EventMetrics,
-    memory_count: i64,
-) -> CandidateBenchmarkMetrics {
+fn candidate_from(task: crate::db::Task, metrics: EventMetrics) -> CandidateBenchmarkMetrics {
     CandidateBenchmarkMetrics {
         task_id: task.id,
         agent: task.agent.unwrap_or(task.branch),
@@ -93,7 +79,6 @@ fn candidate_from(
         tokens_in: metrics.tokens_in,
         tokens_out: metrics.tokens_out,
         cost_usd: metrics.cost_usd,
-        memory_count,
     }
 }
 

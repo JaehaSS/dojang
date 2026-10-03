@@ -7,8 +7,6 @@ pub struct OutcomeInsights {
     pub accepted_task_count: i64,
     pub goal_contract_task_count: i64,
     pub ready_accepted_task_count: i64,
-    pub legacy_memory_task_count: i64,
-    pub ledger_memory_task_count: i64,
     pub ensemble_count: i64,
     pub selected_ensemble_count: i64,
     pub ambiguous_ensemble_count: i64,
@@ -27,8 +25,6 @@ struct TaskOutcomeStats {
     accepted_task_count: i64,
     goal_contract_task_count: i64,
     ready_accepted_task_count: i64,
-    legacy_memory_task_count: i64,
-    ledger_memory_task_count: i64,
     average_accept_seconds: Option<f64>,
 }
 
@@ -63,8 +59,6 @@ pub async fn compute_outcomes(
         accepted_task_count: tasks.accepted_task_count,
         goal_contract_task_count: tasks.goal_contract_task_count,
         ready_accepted_task_count: tasks.ready_accepted_task_count,
-        legacy_memory_task_count: tasks.legacy_memory_task_count,
-        ledger_memory_task_count: tasks.ledger_memory_task_count,
         ensemble_count: ensembles.ensemble_count,
         selected_ensemble_count: ensembles.selected_ensemble_count,
         ambiguous_ensemble_count: ensembles.ambiguous_ensemble_count,
@@ -95,10 +89,6 @@ async fn load_task_stats(pool: &SqlitePool, cutoff: i64) -> anyhow::Result<TaskO
                 (SELECT COUNT(DISTINCT s.id) FROM scoped s \
                    JOIN evidence e ON e.task_id = s.id \
                   WHERE s.state = 'Done' AND e.ready = 1) AS ready_accepted_task_count, \
-                (SELECT COUNT(DISTINCT s.id) FROM scoped s \
-                   JOIN memory_usages u ON u.task_id = s.id) AS legacy_memory_task_count, \
-                (SELECT COUNT(DISTINCT s.id) FROM scoped s \
-                   JOIN memory_injections i ON i.task_id = s.id) AS ledger_memory_task_count, \
                 AVG(CASE WHEN state = 'Done' AND updated_at >= created_at \
                          THEN updated_at - created_at END) AS average_accept_seconds \
            FROM scoped",
@@ -149,7 +139,8 @@ async fn load_no_reexplanation_stats(
              FROM tasks t \
             WHERE t.updated_at >= ? \
               AND t.state IN ('AwaitingReview', 'Done') \
-              AND EXISTS(SELECT 1 FROM memory_injections i WHERE i.task_id = t.id) \
+              AND EXISTS(SELECT 1 FROM task_events e WHERE e.task_id = t.id \
+                    AND e.kind = 'followup_observation_started') \
          ) \
          SELECT COUNT(*) AS target_task_count, \
                 COALESCE(SUM(observed), 0) AS observed_task_count, \

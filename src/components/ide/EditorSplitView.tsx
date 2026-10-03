@@ -13,7 +13,7 @@ import {
 } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { EditorPane, type EditorPaneProps, type OpenFile } from "./EditorPane";
-import { resolveDocumentLink, type DocumentLinkTarget } from "../../lib/document-link";
+import { isAbsolutePath, resolveDocumentLink, type DocumentLinkTarget } from "../../lib/document-link";
 import {
   DocumentLinkContextMenu,
   type DocumentLinkMenuAction,
@@ -54,17 +54,8 @@ import { fileTabKey, pathFromTabKey, type TabKey } from "../../lib/tab-key";
 import { fsRead, type LspTarget } from "../../lib/ipc";
 import type { HostId } from "../../lib/transport";
 import { ReferencesPanel } from "./ReferencesPanel";
-import { CodeGraphPanel } from "./CodeGraphPanel";
-import { CodeGraphView } from "./CodeGraphView";
-import { useCodeGraphPanel, type CodeGraphSource } from "./useCodeGraphPanel";
 import { useEditorNavigation } from "./useEditorNavigation";
 import type { WorkspaceFiles } from "./useWorkspaceFiles";
-
-type NavigationGraphSource = CodeGraphSource & {
-  groupId: string;
-  scrollTop: number;
-  scrollLeft: number;
-};
 
 /** 칸 하나에 그대로 넘어가는 EditorPane 계약 — 배치가 소유하는 것만 여기서 뺀다. */
 type PassThroughProps = Omit<
@@ -229,31 +220,7 @@ export function EditorSplitView({
       scrollLeft: number;
     };
   } | null>(null);
-  const [activeTool, setActiveTool] = useState<"references" | "graph" | null>(null);
-  const [graphSource, setGraphSource] = useState<NavigationGraphSource | null>(null);
-  const [graphOpen, setGraphOpen] = useState(false);
-  const [graphDirection, setGraphDirection] = useState<"incoming" | "outgoing">("incoming");
-  const [graphDepth, setGraphDepth] = useState(1);
-  const graph = useCodeGraphPanel({
-    actions: pane.codeGraph,
-    path: graphSource?.path ?? null,
-    dirty: graphSource?.dirty ?? false,
-    getPosition: () => graphSource == null ? null : { line: graphSource.line, column: graphSource.column },
-  });
-  const invalidateGraphRef = useRef(graph.invalidate);
-  invalidateGraphRef.current = graph.invalidate;
-  const graphTool = {
-    panel: graph,
-    open: graphOpen,
-    direction: graphDirection,
-    depth: graphDepth,
-    onIndex: (source: NavigationGraphSource) => { setGraphSource(source); void graph.index(); },
-    onImpact: (source: NavigationGraphSource) => { setGraphSource(source); setGraphOpen(false); setActiveTool("graph"); void graph.inspect(source); },
-    onNeighborhood: (source: NavigationGraphSource) => { setGraphSource(source); setActiveTool("graph"); setGraphOpen(true); void graph.inspectNeighborhood(graphDirection, graphDepth, source); },
-    onDirection: (direction: "incoming" | "outgoing") => { setGraphDirection(direction); void graph.inspectNeighborhood(direction, graphDepth); },
-    onDepth: (depth: number) => { setGraphDepth(depth); void graph.inspectNeighborhood(graphDirection, depth); },
-    onClose: () => setGraphOpen(false),
-  };
+  const [activeTool, setActiveTool] = useState<"references" | null>(null);
 
   const showReferences = useCallback((
     targets: LspTarget[],
@@ -284,10 +251,6 @@ export function EditorSplitView({
     referenceRequestRef.current += 1;
     setDocumentLinkMenu(null);
     setReferences(null);
-    setGraphSource(null);
-    setGraphOpen(false);
-    setGraphDirection("incoming");
-    setGraphDepth(1);
     setActiveTool(null);
   }, [host, pane.taskId, windowId]);
   useEffect(() => {
@@ -296,10 +259,9 @@ export function EditorSplitView({
       const key = `${host}:${pane.taskId}:${path}`;
       sourceVersionsRef.current.set(key, sourceVersion(path) + 1);
       setReferences((current) => current?.sourcePath === path ? { ...current, stale: true } : current);
-      if (graphSource?.path === path) invalidateGraphRef.current();
     };
     return () => { sourceChangeRef.current = () => undefined; };
-  }, [graphSource?.path, host, pane.taskId, sourceChangeRef, sourceVersion]);
+  }, [host, pane.taskId, sourceChangeRef, sourceVersion]);
   const closeReferences = useCallback(() => {
     setActiveTool(null);
     hostRef.current?.querySelector<HTMLElement>('[data-focused="true"] .monaco-editor textarea')?.focus();
@@ -514,7 +476,8 @@ export function EditorSplitView({
     if (target.kind === "file") {
       if (action === "open") return openLinkTarget(groupId, target, link);
       if (action === "copyPath") return copy(target.path);
-      if (action === "copyAbsPath") return onCopyAbsPath?.(target.path);
+      // 루트 밖 문서의 옆 파일은 이미 절대 경로다 — 루트에 붙여 달라고 하면 거부만 돌아온다.
+      if (action === "copyAbsPath") return isAbsolutePath(target.path) ? copy(target.path) : onCopyAbsPath?.(target.path);
       if (action === "reveal") return pane.onRevealPath(target.path);
       return;
     }
@@ -989,12 +952,6 @@ export function EditorSplitView({
               }
               sourceVersion={sourceVersion}
               navigationScope={`${host}:${pane.taskId}:${windowId}`}
-              graphTool={{
-                ...graphTool,
-                onIndex: (source) => graphTool.onIndex({ ...source, groupId: group.id, scrollTop: source.scrollTop ?? 0, scrollLeft: source.scrollLeft ?? 0 }),
-                onImpact: (source) => graphTool.onImpact({ ...source, groupId: group.id, scrollTop: source.scrollTop ?? 0, scrollLeft: source.scrollLeft ?? 0 }),
-                onNeighborhood: (source) => graphTool.onNeighborhood({ ...source, groupId: group.id, scrollTop: source.scrollTop ?? 0, scrollLeft: source.scrollLeft ?? 0 }),
-              }}
               onNavigateTarget={(target, origin) => void navigation.navigate(target, { ...origin, groupId: group.id })}
               reveal={navigation.reveal == null ? pane.reveal : group.id === navigationGroupId ? navigation.reveal : null}
               onRevealed={(ack) => {
@@ -1055,13 +1012,10 @@ export function EditorSplitView({
         </Fragment>
       ))}
       </div>
-      {(references || graph.impact || graph.neighborhood || activeTool) && <div role="tablist" aria-label="코드 탐색 도구" className="flex shrink-0 gap-1 border-t border-border bg-raised px-2 py-1">
+      {references && <div role="tablist" aria-label="코드 탐색 도구" className="flex shrink-0 gap-1 border-t border-border bg-raised px-2 py-1">
         {references && <button role="tab" aria-selected={activeTool === "references"} onClick={() => setActiveTool("references")} className="rounded px-2 py-1 text-xs text-text-muted">사용처</button>}
-        {(graph.impact || graph.neighborhood || activeTool === "graph") && <button role="tab" aria-selected={activeTool === "graph"} onClick={() => setActiveTool("graph")} className="rounded px-2 py-1 text-xs text-text-muted">그래프</button>}
       </div>}
       {activeTool != null && <div className="flex min-h-0 min-w-0 shrink-0 flex-col overflow-hidden border-t border-border" style={{ height: "45%" }} aria-label="코드 탐색 결과">
-        {activeTool === "graph" && !graphOpen && <CodeGraphPanel embedded impact={graph.impact} error={graph.error} onOpen={(item) => graphSource && navigation.navigate({ path: item.relPath, abs_path: item.relPath, line: item.line + 1, column: item.character + 1, external: false }, graphSource)} onClose={() => { graph.close(); setActiveTool(null); }} />}
-        {activeTool === "graph" && graphOpen && <CodeGraphView embedded graph={graph.neighborhood} error={graph.error} direction={graphDirection} depth={graphDepth} onDirection={graphTool.onDirection} onDepth={graphTool.onDepth} onOpen={(node) => graphSource && navigation.navigate({ path: node.relPath, abs_path: node.relPath, line: node.line + 1, column: node.character + 1, external: false }, graphSource)} onClose={() => setActiveTool(null)} />}
         {activeTool === "references" && references && <ReferencesPanel embedded targets={references.targets} total={references.total} stale={references.stale} onOpen={(target) => navigation.navigate(target, references.origin)} onClose={closeReferences} readPreview={readReferencePreview} />}
       </div>}
       <TabContextMenu

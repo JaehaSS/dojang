@@ -69,26 +69,6 @@ pub async fn today_add(
 }
 
 #[tauri::command]
-pub async fn today_update(
-    state: State<'_, AppState>,
-    id: i64,
-    title: Option<String>,
-    note: Option<String>,
-    repo: Option<String>,
-) -> Result<crate::today::DayItem, String> {
-    let pool = pool_of(&state)?;
-    crate::today::store::update(
-        &pool,
-        id,
-        title.as_deref(),
-        note.as_deref(),
-        repo.as_deref(),
-        now(),
-    )
-    .await
-}
-
-#[tauri::command]
 pub async fn today_set_status(
     state: State<'_, AppState>,
     id: i64,
@@ -178,6 +158,9 @@ pub async fn today_start(
         // 오늘 항목 착수는 언제나 새 대화다.
         resume_from: None,
         resume_session: None,
+        resume_vendor: None,
+        purpose_selection: None,
+        approvals: false,
     };
     let task = create_task_internal(&app, &state, params).await?;
     // Task 생성은 성공했는데 링크만 실패하면 되돌리지 않는다 — 사용자는 이미 실행 중인

@@ -268,7 +268,7 @@ export function AgentHealthSection(): ReactElement {
         <div className="text-[11px] text-status-awaiting py-1">
           {hubNotice(hub)}
           <div className="text-text-muted">
-            받아둔 업데이트는 앱이 꺼질 때 설치됩니다 — Praxis가 대신 종료하지는 않습니다.
+            받아둔 업데이트는 앱이 꺼질 때 설치됩니다 — Dojang이 대신 종료하지는 않습니다.
           </div>
         </div>
       )}

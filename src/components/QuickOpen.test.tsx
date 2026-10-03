@@ -39,11 +39,12 @@ const select = vi.fn();
 const FILES = ["src/alpha.ts", "src/beta.ts"];
 const SCOPES = ["file", "code"] as const;
 
-function render(open = true, contentAvailable = true, taskId: number | null = 42) {
+function render(open = true, contentAvailable = true, taskId: number | null = 42, initialEditorTab?: "all" | "file" | "code") {
   root.render(
     <QuickOpen
       open={open}
       editorSearch={{ scopeLabel: "feature/search · local · 세션 #42", contentAvailable }}
+      initialEditorTab={initialEditorTab}
       scopes={[...SCOPES]}
       files={FILES}
       repo=""
@@ -110,6 +111,18 @@ describe("QuickOpen editor search", () => {
     await act(async () => render(false));
     expect(document.activeElement).toBe(editor);
     editor.remove();
+  });
+
+  it("시작 범위를 받으면 그 탭으로 열리고, 다시 열 때도 그 범위로 돌아온다", async () => {
+    await act(async () => render(true, true, 42, "file"));
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("파일");
+    const input = host.querySelector("input") as HTMLInputElement;
+    await act(async () => key(input, "Tab"));
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("내용");
+
+    await act(async () => render(false, true, 42, "file"));
+    await act(async () => render(true, true, 42, "file"));
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("파일");
   });
 
   it("원격 창은 내용 탭을 막고 로컬 검색 IPC를 부르지 않는다", async () => {

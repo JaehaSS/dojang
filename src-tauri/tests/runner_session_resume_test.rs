@@ -8,8 +8,9 @@
 //!
 //! 덮는 계약: 세션 미해석 → 404(설계 결정 9), 인가 루트 **밖** cwd → 같은 404 + 목록에도
 //! 없음, cwd가 **삭제된** 인가 루트 안 세션 → 승계 성립(인가 완화의 회귀 지점), 중복 승계 →
-//! 409 + 점유 중인 작업 id, `validate_request` 거절(모드·agy), 모바일 차단 두 지점
-//! (`GET /v1/sessions`와 `POST /v1/tasks`의 `resume_session`), 미인증 거절.
+//! 409 + 점유 중인 작업 id, `validate_request` 거절(모드·agy), 모바일 차단
+//! (`POST /v1/tasks`의 `resume_session`), 미인증 거절. 세션홈 목록(`GET /v1/sessions`)은
+//! Runner 전용 라우트였고 1.0에서 모바일 서피스와 함께 남지 않았다.
 
 #[path = "support/temp_root.rs"]
 mod temp_root;
@@ -22,6 +23,7 @@ use praxis_lib::db;
 use praxis_lib::runner::auth::RunnerAuth;
 use praxis_lib::runner::config::RunnerConfig;
 use praxis_lib::runner::events::EventHub;
+use praxis_lib::runner::actions::RunnerTaskActions;
 use praxis_lib::runner::http::{self, RunnerHttpState};
 use praxis_lib::runner::queue::QueueWorker;
 use praxis_lib::runner::session;
@@ -156,33 +158,6 @@ async fn unauthenticated_resume_request_is_rejected() {
         .unwrap();
     assert_eq!(response.status(), 401);
 
-    let sessions = reqwest::Client::new()
-        .get(format!("http://{address}/v1/sessions"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(sessions.status(), 401);
-
-    server.abort();
-    cleanup(&db_path, &token_path, &repo);
-}
-
-#[tokio::test]
-async fn mobile_session_cannot_list_session_home() {
-    let (pool, db_path) = test_pool("mobile-list").await;
-    let repo = git_repository("mobile-list");
-    let (address, server, token_path) =
-        serve_with_roots(pool.clone(), vec![repo.canonicalize().unwrap()]).await;
-    let session_cookie = pair_device(&address).await;
-
-    let response = reqwest::Client::new()
-        .get(format!("http://{address}/v1/sessions"))
-        .header(reqwest::header::COOKIE, &session_cookie)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 403, "세션홈 목록은 페어링 자격 전용이다");
-
     server.abort();
     cleanup(&db_path, &token_path, &repo);
 }
@@ -267,27 +242,6 @@ async fn resume_session_outside_repository_roots_is_rejected_as_not_found() {
     let session_id = write_session_file("outside", &outside);
     let (address, server, token_path) =
         serve_with_roots(pool.clone(), vec![repo.canonicalize().unwrap()]).await;
-
-    // 목록에도 나오지 않는다 — `cwd_prefixes`는 언제나 인가된 루트에서만 나온다.
-    let listed: serde_json::Value = authenticated_client()
-        .get(format!(
-            "http://{address}/v1/sessions?repository={}",
-            repo.to_string_lossy()
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(
-        !listed["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["session_id"] == session_id.as_str()),
-        "루트 밖 세션은 목록에 나오지 않는다"
-    );
 
     let response = create_resuming_task(&address, &repo, &session_id).await;
     assert_eq!(response.status(), 404);
@@ -415,6 +369,15 @@ fn session_home() -> &'static std::path::Path {
     .as_path()
 }
 
+/// 벤더(claude)가 프로젝트 디렉터리 이름을 지을 때 쓰는 것과 같은 치환 — `/`와 `.`를 `-`로
+/// 바꾼다. `sessionhome`은 이 변환을 canonicalize 없는 순수 문자열 변환으로만 쓰고 프로덕션에
+/// 노출하지 않으므로, 픽스처 이름을 짓는 이 테스트에서만 그대로 흉내낸다.
+fn encode_cwd_like_vendor(cwd: &str) -> String {
+    cwd.chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
+}
+
 /// 벤더가 쓰는 모양의 세션 파일 하나를 픽스처 세션홈에 심고 session_id를 돌려준다.
 /// 프로젝트 디렉터리 이름은 실제와 같이 cwd 인코딩으로 짓는다.
 fn write_session_file(label: &str, cwd: &std::path::Path) -> String {
@@ -422,7 +385,7 @@ fn write_session_file(label: &str, cwd: &std::path::Path) -> String {
     // UUID 문법(8-4-4-4-12)을 지켜야 `is_valid_session_id`를 통과한다.
     let session_id = format!("{:08x}-1111-4222-8333-444444444444", suffix + 1);
     let cwd_text = cwd.to_string_lossy();
-    let project_dir = session_home().join(praxis_lib::sessionhome::encode_cwd(&cwd_text));
+    let project_dir = session_home().join(encode_cwd_like_vendor(&cwd_text));
     std::fs::create_dir_all(&project_dir).unwrap();
     let lines = [
         format!(
@@ -514,7 +477,8 @@ async fn serve_with_roots(
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
-            http::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            http::mobile_surface_router(state, std::sync::Arc::new(RunnerTaskActions))
+                .into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
         .unwrap();
@@ -580,3 +544,4 @@ fn cleanup(db_path: &str, token_path: &str, repo: &std::path::Path) {
     let _ = std::fs::remove_file(token_path);
     let _ = std::fs::remove_dir_all(repo);
 }
+

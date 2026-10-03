@@ -110,6 +110,20 @@ async fn run_owned(
     if preview_token(task_id, &root, &spec) != expected_token {
         return Err("검증 명령이 미리보기 이후 변경되었습니다 — 다시 확인하세요".into());
     }
+    let started_at = now();
+    let started_epoch: i64 = sqlx::query_scalar(
+        "SELECT completion_epoch FROM task_result_completion_epochs WHERE task_id=?",
+    )
+    .bind(task_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .unwrap_or(0);
+    let source_before = crate::task_results::fingerprint_with_base(
+        &root,
+        &spec,
+        task.base_revision.as_deref().or(Some(task.base.as_str())),
+    );
     let root_for_worker = root.clone();
     let mut report =
         tokio::task::spawn_blocking(move || execution::execute(&root_for_worker, spec, registrars))
@@ -117,7 +131,42 @@ async fn run_owned(
             .map_err(|error| error.to_string())?;
     let current = reviewable_task(&pool, task_id).await?;
     add_warnings(&current, &root, &mut report);
-    crate::review_ops::store::persist_evidence(&pool, task_id, &report, now()).await?;
+    let source_after = crate::task_results::fingerprint_with_base(
+        &root,
+        &report.spec,
+        task.base_revision.as_deref().or(Some(task.base.as_str())),
+    );
+    let ended_epoch: i64 = sqlx::query_scalar(
+        "SELECT completion_epoch FROM task_result_completion_epochs WHERE task_id=?",
+    )
+    .bind(task_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .unwrap_or(0);
+    crate::review_ops::store::persist_evidence(
+        &pool,
+        task_id,
+        &report,
+        &root,
+        &source_before,
+        &source_after,
+        if task.state == state::RUNNING || started_epoch != ended_epoch {
+            state::RUNNING
+        } else {
+            &current.state
+        },
+        started_at,
+        now(),
+    )
+    .await?;
+    let current_ready = crate::task_results::refresh_evidence(&pool, task_id).await?;
+    if report.ready && !current_ready {
+        report.warnings.push(
+            "검사 후 결과 버전이 바뀌었거나 확인할 수 없어 현재 통과로 사용할 수 없습니다".into(),
+        );
+    }
+    report.ready &= current_ready;
     Ok(report)
 }
 

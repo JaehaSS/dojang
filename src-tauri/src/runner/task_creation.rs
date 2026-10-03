@@ -80,23 +80,26 @@ pub async fn create_queued_task(
     };
     let _guard = worktree_locks.acquire(&worktree.path).await;
     let task = create_task(pool, &request, &repo, &worktree, &instruction, &agent, now).await?;
-    if let Err(error) = project_memory(pool, &task, now).await {
-        return fail_created_task(pool, task, worktree, CreateTaskError::Invalid(error), false, now)
-            .await;
+    match project_memory(pool, &task, now).await {
+        Ok(true) => {
+            let _ = crate::followup_observation::insert_observation_start(pool, task.id, now).await;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            return fail_created_task(pool, task, worktree, CreateTaskError::Invalid(error), now)
+                .await;
+        }
     }
     // 승계는 `project_memory` 뒤·`expose_created_task` 앞에서만 일어난다(설계 결정 2) — 기본
     // 실행 정책이 AlwaysApprove라 노출 즉시 워커가 집어가므로, 그 뒤에 승계하면 첫 턴만 문맥
     // 없이 도는 모양이 된다.
     if let Some(session_id) = request.resume_session.as_deref() {
-        if let Err(error) = adopt_resumed_session(config, pool, task.id, session_id, now).await {
-            return fail_created_task(pool, task, worktree, error, false, now).await;
+        if let Err(error) = adopt_resumed_session(config, pool, task.id, request.resume_vendor.as_deref().unwrap_or("claude"), session_id, now).await {
+            return fail_created_task(pool, task, worktree, error, now).await;
         }
     }
     if let Err(error) = expose_created_task(config, pool, task.id, now).await {
-        // 파일형 투영에는 회수할 원장(journal)이 없다 — `retire_task_projection`은 영수증이
-        // 없으면 실패하므로 false로 넘긴다. 투영 바이트는 아래 worktree 폐기가 함께 가져간다.
-        return fail_created_task(pool, task, worktree, CreateTaskError::Invalid(error), false, now)
-            .await;
+        return fail_created_task(pool, task, worktree, CreateTaskError::Invalid(error), now).await;
     }
     db::get_task(pool, task.id)
         .await
@@ -115,15 +118,17 @@ async fn adopt_resumed_session(
     config: &config::RunnerConfig,
     pool: &SqlitePool,
     task_id: i64,
+    vendor: &str,
     session_id: &str,
     now: i64,
 ) -> Result<(), CreateTaskError> {
     let roots = config.repository_roots.clone();
     let owned_id = session_id.to_string();
     let lookup_id = owned_id.clone();
+    let lookup_vendor = vendor.to_string();
     // `resolve`(디렉터리 순회)와 메타 조회(선두/말미 샘플링)는 동기 파일시스템 IO라 blocking
     // 풀로 분리한다 — git worktree 생성과 같은 이유.
-    let meta = tokio::task::spawn_blocking(move || resolve_session_meta(&lookup_id))
+    let meta = tokio::task::spawn_blocking(move || resolve_session_meta(&lookup_vendor, &lookup_id))
         .await
         .map_err(|error| CreateTaskError::Invalid(error.to_string()))??;
     let authorized = crate::sessionhome::authorize_cwd(&roots, meta.cwd.as_deref())
@@ -131,7 +136,7 @@ async fn adopt_resumed_session(
     if !authorized {
         return Err(CreateTaskError::SessionUnavailable);
     }
-    db::adopt_external_session(pool, task_id, &owned_id, now)
+    db::adopt_external_session_vendor(pool, task_id, vendor, &owned_id, now)
         .await
         .map_err(CreateTaskError::from)
 }
@@ -139,8 +144,8 @@ async fn adopt_resumed_session(
 /// 해석 실패 사유(없음·모호함·문법 오류)를 하나의 [`CreateTaskError::SessionUnavailable`]로
 /// 뭉갠다 — 존재 열거를 막는다(설계 결정 9). `sessionhome::describe`는 유일성을 확정한 뒤
 /// 그 파일 하나만 인덱싱하므로 승계마다 세션홈 전체를 훑지 않는다.
-fn resolve_session_meta(session_id: &str) -> Result<crate::sessionhome::SessionMeta, CreateTaskError> {
-    crate::sessionhome::describe(session_id).map_err(|_| CreateTaskError::SessionUnavailable)
+fn resolve_session_meta(vendor: &str, session_id: &str) -> Result<crate::sessionhome::SessionMeta, CreateTaskError> {
+    crate::sessionhome::describe_vendor(vendor, session_id).map_err(|_| CreateTaskError::SessionUnavailable)
 }
 
 /// 격리 워크트리를 만들되, git 저장소가 아니면 폴더에서 바로 실행하는 직접 모드로 폴백한다.
@@ -205,6 +210,14 @@ pub(super) fn validate_request(request: &QueuedTaskRequest) -> Result<(), String
             );
         }
     }
+    if request.resume_session.is_some() {
+        let vendor = request.resume_vendor.as_deref().unwrap_or("claude");
+        if !matches!(vendor, "claude" | "codex") || vendor != request.agent.trim() {
+            return Err("세션 공급자와 에이전트가 일치해야 합니다".into());
+        }
+    } else if request.resume_vendor.is_some() {
+        return Err("세션 없이 공급자를 지정할 수 없습니다".into());
+    }
     crate::agent::normalize_role_or_default(&request.role)?;
     crate::agent::reasoning_effort_override_for_model(
         &request.agent,
@@ -222,7 +235,7 @@ fn branch_name(instruction: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    format!("praxis/{}-{suffix}", crate::worktree::slugify(instruction))
+    format!("dojang/{}-{suffix}", crate::worktree::slugify(instruction))
 }
 
 async fn create_task(
@@ -263,7 +276,10 @@ async fn create_task(
 
 /// 파일형 메모리 투영(설계 2026-09-13). Runner는 Tauri가 없어 앱 데이터 디렉터리를
 /// 물어볼 곳이 없으므로, 자신이 연 DB 파일의 위치에서 되돌려 얻는다.
-async fn project_memory(pool: &SqlitePool, task: &db::Task, now: i64) -> Result<(), String> {
+///
+/// 반환값(`bool`)은 실제 내용이 실렸는지다 — 호출자가 이 값으로 "메모리 안내 후 재설명
+/// 없음" 인사이트의 마커를 남긴다.
+async fn project_memory(pool: &SqlitePool, task: &db::Task, now: i64) -> Result<bool, String> {
     let targets = crate::projector::project_targets();
     let data_dir = crate::memory::file::data_dir(pool);
     crate::memory::file::project(
@@ -284,7 +300,6 @@ async fn fail_created_task(
     task: db::Task,
     worktree: crate::worktree::Worktree,
     error: CreateTaskError,
-    projection_applied: bool,
     now: i64,
 ) -> Result<db::Task, CreateTaskError> {
     let reason = error.to_string();
@@ -296,22 +311,8 @@ async fn fail_created_task(
         }
         CreateTaskError::Invalid(_) => "memory_projection_failed",
     };
-    if projection_applied {
-        if let Err(retire_error) = crate::memory::retire_task_projection(pool, task.id, now).await
-        {
-            let detail = format!("{reason}; projection retirement failed: {retire_error}");
-            let _ = db::transition_state_with_runner_event(
-                pool,
-                task.id,
-                state::FAILED,
-                now,
-                event_kind,
-                Some(&detail),
-            )
-            .await;
-            return Err(CreateTaskError::Invalid(detail));
-        }
-    }
+    // 옛 DB 투영(P2)의 retire는 제거됐다(설계 2026-09-13 §P2 제거) — 파일형 투영은 회수할
+    // 원장이 없다. 투영 바이트는 아래 worktree 폐기가 함께 가져간다.
     let _ = db::transition_state_with_runner_event(
         pool,
         task.id,

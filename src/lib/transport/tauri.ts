@@ -5,14 +5,9 @@ import type {
   BranchList,
   BrowseResult,
   ComposeOutcome,
-  ConfirmedApproval,
-  ContextReport,
-  CodeLocationInput,
   CrystallizeResult,
   DiffHunk,
   EnsembleMatrix,
-  Evidence,
-  ExternalDocumentInput,
   FileContent,
   FsNode,
   GhRepo,
@@ -21,19 +16,13 @@ import type {
   GrillRound,
   HunkRef,
   InterviewAssessment,
-  Memory,
-  MemoryEvidence,
-  MemoryStatus,
-  MemoryUsageRow,
-  MemoryVersion,
-  LocalDocumentInput,
   PartialApplyResult,
   QuickOpenTaskCandidate,
   RematchedAnnotation,
   ReviewAnnotation,
-  RevalidationReport,
   Schedule,
   SessionHomeEntry,
+  SessionHomePreview,
   SkillMeta,
   Task,
   TaskRow,
@@ -47,7 +36,6 @@ import type {
   SessionHomeSession,
   TaskCreateRequest,
 } from "../transport";
-import { unsupportedWorkflowTransport } from "../workflow/api";
 
 /** 서버 행을 화면 타입으로 승격 — 로컬 command는 host를 모르므로 여기서 붙인다. */
 const local = (row: TaskRow): Task => ({ ...row, host: LOCAL_HOST });
@@ -55,10 +43,10 @@ const local = (row: TaskRow): Task => ({ ...row, host: LOCAL_HOST });
 export const tauriTransport: PraxisTransport = {
   kind: "local",
   hostId: LOCAL_HOST,
-  workflow: unsupportedWorkflowTransport,
   taskList: async () => (await invoke<TaskRow[]>("task_list")).map(local),
   taskDiffStat: (id) => invoke<string>("task_diff_stat", { id }),
-  taskDiff: (id, range) => invoke<TaskDiffResult>("task_diff", { id, range }),
+  taskDiff: (id, range, includeReview) =>
+    invoke<TaskDiffResult>("task_diff", { id, range, includeReview }),
   fsTree: (id) => invoke<FsNode[]>("fs_tree", { id }),
   fsTreePath: (repository) => invoke<FsNode[]>("fs_tree_path", { path: repository }),
   fsBrowse: (path) => invoke<BrowseResult>("fs_browse", { path }),
@@ -72,6 +60,8 @@ export const tauriTransport: PraxisTransport = {
   gitStatus: (path) => invoke<boolean>("git_status_path", { path }),
   gitInit: (path) => invoke<boolean>("git_init_path", { path }),
   gitBranches: (path) => invoke<BranchList>("git_branches_path", { path }),
+  gitCheckoutBranch: (path, branch) =>
+    invoke<BranchList>("git_checkout_branch_path", { path, branch }),
   repositoryList: async () => [],
   fsRead: (id, path) => invoke<FileContent>("fs_read", { id, path }),
   fsWrite: (id, path, content) => invoke<number>("fs_write", { id, path, content }),
@@ -84,12 +74,14 @@ export const tauriTransport: PraxisTransport = {
       ambiguity,
       base_branch: baseBranch,
       client_ref: clientRef,
+      purpose_selection: purposeSelection,
       ...commandArgs
     } = request;
     try {
       return local(await invoke<TaskRow>("task_create", {
         ...commandArgs,
         ...(goalContract != null ? { goalContract } : {}),
+        ...(purposeSelection ? { purposeSelection } : {}),
         ...(reasoningEffort?.trim() ? { reasoningEffort: reasoningEffort.trim() } : {}),
         ...(serviceTier != null ? { serviceTier } : {}),
         ...(ambiguity != null ? { ambiguity } : {}),
@@ -129,8 +121,8 @@ export const tauriTransport: PraxisTransport = {
   taskInput: (id, data) => invoke("task_write", { id, data }),
   taskMessage: (id, message) => invoke("convo_send", { id, message }),
   taskModelSet: (id, model) => invoke("task_model_set", { id, model }),
-  conversationSubmit: (taskId, requestId, message, imagePaths) =>
-    invoke("conversation_submit", { taskId, requestId, message, imagePaths }),
+  conversationSubmit: (taskId, requestId, message, imagePaths, previewClientRef) =>
+    invoke("conversation_submit", { taskId, requestId, message, imagePaths, ...(previewClientRef ? { previewClientRef } : {}) }),
   conversationReceipt: (taskId, requestId) => invoke("conversation_receipt", { taskId, requestId }),
   sideQuestionRead: (taskId) => invoke("side_question_read", { taskId }),
   sideQuestionSend: (taskId, input) => invoke("side_question_send", { taskId, input }),
@@ -157,7 +149,6 @@ export const tauriTransport: PraxisTransport = {
   verifySpec: (id) => invoke<VerifyPreview>("verify_spec", { id }),
   taskVerify: (id, previewToken) =>
     invoke<VerifyReport>("task_verify", { id, previewToken }),
-  evidenceGet: (id) => invoke<Evidence | null>("evidence_get", { id }),
   reviewProcessQuarantines: async () => [],
   reviewProcessReconcile: async () => {
     throw new Error("review process 복구는 원격 Runner 전용입니다");
@@ -173,55 +164,18 @@ export const tauriTransport: PraxisTransport = {
   scheduleRemove: (id) => invoke("schedule_remove", { id }),
   scheduleSetEnabled: (id, enabled) => invoke("schedule_set_enabled", { id, enabled }),
   reminderAdd: (text, delayMinutes) => invoke<number>("reminder_add", { text, delayMinutes }),
-  memoryList: () => invoke<Memory[]>("memory_list"),
-  memoryArchive: (id) => invoke("memory_archive", { id }),
-  memoryPurge: (id) => invoke("memory_purge", { id }),
-  memoryAdd: (repo, kind, content) => invoke<number>("memory_add", { repo, kind, content }),
-  memoryUpdate: (id, content, kind) => invoke("memory_update", { id, content, kind }),
-  memorySetApplicationPolicy: (id, policy, expectedVersion, expectedPolicy) =>
-    invoke<boolean>("memory_set_application_policy", {
-      id,
-      policy,
-      expectedVersion,
-      expectedPolicy,
-    }),
-  memoryVersions: (id) => invoke<MemoryVersion[]>("knowledge_versions", { id }),
-  memoryRestoreVersion: (
-    id,
-    sourceVersion,
-    expectedCurrentVersion,
-    expectedStatus: MemoryStatus,
-  ) =>
-    invoke<number>("knowledge_restore_version", {
-      id,
-      sourceVersion,
-      expectedCurrentVersion,
-      expectedStatus,
-    }),
-  memoryConfirm: (id, expiresAt) => invoke<number>("knowledge_confirm", { id, expiresAt }),
-  memoryConfirmAndApprove: (id, expectedVersion) =>
-    invoke<ConfirmedApproval>("knowledge_confirm_and_approve", { id, expectedVersion }),
-  memoryAddCodeEvidence: (id, input: CodeLocationInput) =>
-    invoke<number>("knowledge_add_code_location", { id, input }),
-  memoryAddLocalDocumentEvidence: (id, input: LocalDocumentInput) =>
-    invoke<number>("knowledge_add_local_document", { id, input }),
-  memoryAddExternalDocumentEvidence: (id, input: ExternalDocumentInput) =>
-    invoke<number>("knowledge_add_external_document", { id, input }),
-  memoryEvidence: (id) => invoke<MemoryEvidence[]>("knowledge_evidence", { id }),
-  memoryRevalidate: (id) => invoke<RevalidationReport>("knowledge_revalidate", { id }),
-  knowledgeSubmitReview: (id) => invoke("knowledge_submit_review", { id }),
-  knowledgeApprove: (id) => invoke("knowledge_approve", { id }),
-  memoryUsages: (id) => invoke<MemoryUsageRow[]>("memory_usages", { id }),
-  memoryPreview: (repo, instruction) => invoke<Memory[]>("memory_preview", { repo, instruction }),
-  contextReport: (taskId) => invoke<ContextReport>("context_report", { taskId }),
-  contextFileRead: (taskId, path) => invoke<string>("context_file_read", { taskId, path }),
   skillsList: (repo) => invoke<SkillMeta[]>("skills_list", { repo }).catch(() => []),
   quickopenSearch: (query, scopes) =>
     invoke<QuickOpenTaskCandidate[]>("quickopen_search", { query, scopes }),
   sessionHomeIndex: async (repo, all, query): Promise<SessionHomeSession[]> =>
     (await invoke<SessionHomeEntry[]>("session_home_index", { repo, all, query })).map(
-      (row) => ({ ...row, host: LOCAL_HOST }),
+      (row) => ({ ...row, host: LOCAL_HOST, vendor: row.vendor ?? "claude", preview_supported: true }),
     ),
+  sessionHomePreview: (repo, vendor, sessionId) =>
+    invoke<SessionHomePreview>("session_home_preview", { repo, vendor, sessionId }).then((preview) => ({
+      ...preview,
+      meta: { ...preview.meta, vendor: preview.meta.vendor ?? vendor },
+    })),
   diffHunks: (id, range) => invoke<DiffHunk[]>("diff_hunks", { id, range }),
   annotationsList: (taskId, range) =>
     invoke<RematchedAnnotation[]>("annotations_list", { taskId, range }),

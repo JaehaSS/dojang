@@ -70,7 +70,6 @@ function CandidateMetricCard({
         <span>
           도구 {candidate.tool_calls} · 오류 {candidate.tool_errors}
         </span>
-        <span>메모리 {candidate.memory_count}</span>
         {candidate.cost_usd > 0 && <span>비용 ${candidate.cost_usd.toFixed(2)}</span>}
       </div>
     </div>

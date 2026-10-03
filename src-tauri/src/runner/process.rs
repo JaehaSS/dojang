@@ -367,12 +367,12 @@ fn consume_conversation_events(
     if task.mode != "conversation" {
         return Err("Runner conversation adapter는 conversation 작업만 지원합니다".to_string());
     }
-    // 원격은 토론을 돌리지 않는다(Q8). 거부하지 않으면 우측 면이 조용히 빠진 채 좌측만
+    // 원격은 토론을 돌리지 않는다(Q8). 거부하지 않으면 비좌측 면이 조용히 빠진 채 좌측만
     // 혼잣말을 한다 — 원격 토론이 필요해지면 그때 같은 `convo::debate` 함수를 여기서 부른다.
-    if runtime
-        .block_on(db::debate_side(&pool, task.id))
+    if !runtime
+        .block_on(db::debate_sides(&pool, task.id))
         .map_err(|error| error.to_string())?
-        .is_some()
+        .is_empty()
     {
         return Err("Runner는 토론 중인 작업을 실행할 수 없습니다".to_string());
     }

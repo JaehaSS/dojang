@@ -3,8 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CodeGraphStatus, LspTarget } from "../../lib/ipc";
-import type { EditorCodeGraphActions } from "./useCodeGraphPanel";
+import type { LspTarget } from "../../lib/ipc";
 
 const CTRL_CMD = 2048;
 const ALT = 512;
@@ -38,6 +37,10 @@ interface StubProvider {
 
 const h = vi.hoisted(() => ({
   commands: new Map<number, () => void>(),
+  // 우클릭 메뉴에 걸리는 동작 — 단축키는 commands에도 함께 꽂는다.
+  actions: new Map<string, { label: string; run: () => void }>(),
+  mouseDown: [] as ((e: unknown) => void)[],
+  mouseUp: [] as ((e: unknown) => void)[],
   providers: {} as Record<string, StubProvider>,
   // 분할에서는 칸마다 프로바이더가 하나씩 걸린다 — 몇 개가 걸렸고 누가 답하는지를 봐야 한다.
   definitionProviders: [] as StubProvider[],
@@ -50,6 +53,24 @@ const h = vi.hoisted(() => ({
   editor: {
     addCommand(key: number, handler: () => void) {
       h.commands.set(key, handler);
+    },
+    addAction(action: {
+      id: string;
+      label: string;
+      keybindings?: number[];
+      run: () => void;
+    }) {
+      h.actions.set(action.id, action);
+      for (const key of action.keybindings ?? []) h.commands.set(key, action.run);
+      return { dispose: () => undefined };
+    },
+    onMouseDown(handler: (e: unknown) => void) {
+      h.mouseDown.push(handler);
+      return { dispose: () => undefined };
+    },
+    onMouseUp(handler: (e: unknown) => void) {
+      h.mouseUp.push(handler);
+      return { dispose: () => undefined };
     },
     createContextKey: () => ({ set: () => undefined }),
     getPosition: () => ({ lineNumber: 10, column: 5 }),
@@ -109,6 +130,7 @@ vi.mock("@monaco-editor/react", async () => {
             },
           },
           editor: {
+            MouseTargetType: { CONTENT_TEXT: 6 },
             getModels: () => [],
             registerEditorOpener: (o: {
               openCodeEditor: (s: unknown, u: unknown) => boolean;
@@ -169,57 +191,6 @@ const READ_ONLY_FILE: OpenFile = {
   readOnly: true,
 };
 
-const graphStatus: CodeGraphStatus = {
-  activeState: "absent",
-  activeRunId: null,
-  indexedAt: null,
-  files: 0,
-  symbols: 0,
-  edges: 0,
-  buildState: "idle",
-  buildRunId: null,
-  detail: null,
-  incomplete: null,
-};
-
-const graphActions: EditorCodeGraphActions = {
-  scope: 1,
-  status: async () => graphStatus,
-  index: async () => ({
-    runId: 1,
-    state: "ready",
-    filesSeen: 0,
-    filesIndexed: 0,
-    filesUnchanged: 0,
-    filesSkipped: 0,
-    symbols: 0,
-    edges: 0,
-  }),
-  cancel: async () => undefined,
-  impactAt: async () => ({
-    runId: 1,
-    indexedAt: 1,
-    freshness: "ready",
-    items: [],
-    truncated: false,
-    edgesUnavailable: null,
-  }),
-  neighborhoodAt: async () => ({
-    runId: 1,
-    indexedAt: 1,
-    freshness: "ready",
-    rootId: 1,
-    nodes: [],
-    edges: [],
-    truncated: false,
-    incomplete: null,
-    edgesUnavailable: null,
-    encounteredIncomplete: [],
-  }),
-  openItem: async () => undefined,
-  openNode: async () => undefined,
-};
-
 const target = (over: Partial<LspTarget> = {}): LspTarget => ({
   path: "src/lib.rs",
   abs_path: "/w/src/lib.rs",
@@ -263,6 +234,19 @@ async function press(keybinding: number) {
   await act(async () => {}); // definition → references 폴백처럼 이어지는 라운드 대기
 }
 
+/** 에디터 본문을 눌렀다 뗀다 — 플랫폼 판정과 무관하게 ⌘·Ctrl을 함께 싣는다. */
+function click(
+  position: { lineNumber: number; column: number },
+  { modifier = true, releaseAt = position } = {},
+) {
+  const event = (at: typeof position) => ({
+    event: { metaKey: modifier, ctrlKey: modifier, leftButton: true },
+    target: { type: 6, position: at },
+  });
+  for (const handler of h.mouseDown) handler(event(position));
+  for (const handler of h.mouseUp) handler(event(releaseAt));
+}
+
 /** Monaco가 ⌘클릭·⌘hover에서 넘겨주는 모델 스텁. */
 const model = (path = FILE.path, text = "편집 중") => ({
   uri: { toString: () => `file://${path}` },
@@ -271,6 +255,9 @@ const model = (path = FILE.path, text = "편집 중") => ({
 
 beforeEach(() => {
   h.commands.clear();
+  h.actions.clear();
+  h.mouseDown = [];
+  h.mouseUp = [];
   h.providers = {};
   h.definitionProviders = [];
   h.opener = null;
@@ -479,79 +466,81 @@ describe("EditorPane references", () => {
   });
 });
 
-describe("EditorPane 코드 그래프 언어 판정", () => {
-  it("지원 Java 파일은 서버가 아직 없어도 Rust 전용 메시지 없이 그래프 제어를 보인다", async () => {
-    const javaFile = {
-      ...FILE,
-      key: fileTabKey("src/Target.java"),
-      path: "src/Target.java",
-    };
-    render({
-      files: [javaFile],
-      activeKey: javaFile.key,
-      retainedPaths: [javaFile.path],
-      codeGraph: graphActions,
-      onLspStatus: async () => ({
-        available: false,
-        server: "jdtls",
-        detail: "서버 없음",
-      }),
-    });
-
-    await act(async () => {});
-
-    expect(
-      container.querySelector('[aria-label="코드 그래프 만들기"]'),
-    ).not.toBeNull();
-    expect(container.textContent).not.toContain("Rust 파일에서만 지원");
-    expect(container.textContent).toContain("정의 이동 불가");
-  });
-
-  it("실패한 상태 조회는 확인 중으로 남기지 않고 재시도 결과만 적용한다", async () => {
-    const javaFile = {
-      ...FILE,
-      key: fileTabKey("src/Target.java"),
-      path: "src/Target.java",
-    };
-    const props = {
-      files: [javaFile],
-      activeKey: javaFile.key,
-      retainedPaths: [javaFile.path],
-      codeGraph: graphActions,
-    };
-    render({
-      ...props,
-      onLspStatus: async () => Promise.reject(new Error("jdtls 확인 실패")),
-    });
-
-    await act(async () => {});
-
-    expect(container.textContent).toContain("코드 그래프 지원 확인 실패");
-
-    render({
-      ...props,
-      onLspStatus: async () => ({
-        available: true,
-        server: "jdtls",
-        detail: null,
-      }),
-    });
-    await act(async () => {});
-
-    expect(
-      container.querySelector('[aria-label="코드 그래프 만들기"]'),
-    ).not.toBeNull();
-  });
-});
-
 describe("EditorPane — Monaco 언어 기능(⌘클릭·⌘hover·F12)", () => {
-  it("정의/구현/사용처 provider를 모두 등록한다", () => {
+  it("정의/구현 provider만 등록하고 사용처는 앱의 메뉴 항목으로 연다", () => {
     render({ onGoto: vi.fn().mockResolvedValue([]), onOpenTarget: vi.fn() });
     expect(h.providers.definition?.provideDefinition).toBeTypeOf("function");
     expect(h.providers.implementation?.provideImplementation).toBeTypeOf(
       "function",
     );
-    expect(h.providers.references?.provideReferences).toBeTypeOf("function");
+    // Monaco 자체 사용처 UI는 1건이면 바로 이동하고 열지 않은 파일은 미리보기를 못 만든다.
+    expect(h.providers.references).toBeUndefined();
+    expect(h.actions.get("praxis.findReferences")?.label).toBe("사용처 보기");
+  });
+
+  it("선언 위 ⌘클릭은 제자리 이동 대신 사용처 목록을 연다", async () => {
+    const onGoto = vi
+      .fn()
+      .mockResolvedValueOnce([target({ path: "src/main.rs", line: 2 })])
+      .mockResolvedValueOnce([target({ line: 3 })]);
+    const onReferences = vi.fn();
+    render({ onGoto, onReferences, beginReferences: () => 1, onOpenTarget: vi.fn() });
+
+    await act(async () => click({ lineNumber: 2, column: 4 }));
+    await act(async () => {});
+
+    expect(onGoto.mock.calls.map((call) => call[0])).toEqual([
+      expect.objectContaining({ kind: "definition", line: 2, column: 4 }),
+      expect.objectContaining({ kind: "references", line: 2, column: 4 }),
+    ]);
+    expect(onReferences).toHaveBeenCalledTimes(1);
+  });
+
+  it("선언이 아닌 곳의 ⌘클릭은 Monaco의 정의 이동에 맡긴다", async () => {
+    const onGoto = vi.fn().mockResolvedValue([target()]);
+    const onOpenTarget = vi.fn();
+    render({ onGoto, onOpenTarget });
+
+    await act(async () => click({ lineNumber: 2, column: 4 }));
+    await act(async () => {});
+    await act(async () => click({ lineNumber: 2, column: 4 }, { modifier: false }));
+    // ⌘-드래그는 선택이다.
+    await act(async () =>
+      click({ lineNumber: 2, column: 4 }, { releaseAt: { lineNumber: 2, column: 9 } }),
+    );
+
+    expect(onGoto).toHaveBeenCalledTimes(1);
+    // 이동은 provider 결과로 Monaco가 한다 — 여기서 한 번 더 열면 두 번 착지한다.
+    expect(onOpenTarget).not.toHaveBeenCalled();
+    expect(container.querySelector("[role=dialog]")).toBeNull();
+  });
+
+  it("⌘클릭 보조 조회가 진행 중인 ⌘B를 버리게 하지 않는다", async () => {
+    let resolveB: ((targets: LspTarget[]) => void) | undefined;
+    const onGoto = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise((done) => { resolveB = done; }))
+      .mockResolvedValueOnce([target()]);
+    const onOpenTarget = vi.fn();
+    render({ onGoto, onOpenTarget });
+
+    await act(async () => h.commands.get(CTRL_CMD | KEY_B)?.());
+    await act(async () => click({ lineNumber: 2, column: 4 }));
+    await act(async () => resolveB?.([target({ line: 5 })]));
+
+    expect(onOpenTarget).toHaveBeenCalledWith(target({ line: 5 }));
+    expect(container.textContent).not.toContain("찾는 중");
+  });
+
+  it("우클릭 메뉴의 사용처 보기는 앱의 사용처 목록을 연다", async () => {
+    const onGoto = vi.fn().mockResolvedValue([target()]);
+    const onReferences = vi.fn();
+    render({ onGoto, onReferences, beginReferences: () => 1, onOpenTarget: vi.fn() });
+
+    await act(async () => h.actions.get("praxis.findReferences")?.run());
+
+    expect(onGoto.mock.calls.map((call) => call[0].kind)).toEqual(["references"]);
+    expect(onReferences).toHaveBeenCalledTimes(1);
   });
 
   it("읽기 전용 외부 파일의 provider 요청은 보내지 않는다", async () => {

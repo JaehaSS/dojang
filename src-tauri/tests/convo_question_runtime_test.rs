@@ -122,9 +122,10 @@ fn run_with_speed(
         !ctx.control.cleanup_failed.load(Ordering::SeqCst),
         "cleanup: {result:?}"
     );
+    assert!(pid != 0, "provider did not start: {result:?}");
     assert!(
         unsafe { nix::libc::kill(-(pid as i32), 0) } != 0,
-        "provider group still alive"
+        "provider group {pid} still alive: {result:?}"
     );
     (result, events)
 }
@@ -388,4 +389,15 @@ fn service_tier_reaches_new_and_resumed_structured_turns() {
             assert!(events.iter().any(|event| matches!(event, ConvoEvent::Result {is_error:false,..})));
         }
     }
+}
+
+#[test]
+fn image_event_over_old_limit_completes_but_oversized_event_fails_and_reaps() {
+    let fixture = Fixture::new();
+    let (result, events) = run(&pool(), &fixture, "large-event", Some("test-thread"));
+    assert!(result.is_ok(), "{result:?}");
+    assert!(events.iter().any(|event| matches!(event, ConvoEvent::Result { is_error: false, .. })));
+    let (result, events) = run(&pool(), &fixture, "oversized-event", Some("test-thread"));
+    assert!(result.unwrap_err().contains("이벤트 크기 제한 초과 (16 MiB)"));
+    assert!(!events.iter().any(|event| matches!(event, ConvoEvent::Result { is_error: false, .. })));
 }

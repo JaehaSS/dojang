@@ -1,5 +1,6 @@
 import type { MouseEvent } from "react";
 import type { Task } from "../../lib/ipc";
+import type { NotificationKind } from "../../lib/notifications";
 import { LOCAL_HOST, taskKey } from "../../lib/transport";
 import { badgeLabelFor } from "../../lib/agents";
 import { taskDotColor, taskStatusLabel, taskStatusLabelShort } from "../../lib/task-status";
@@ -21,24 +22,42 @@ export interface SessionTaskProjectProps {
   onOpenMenu: (menu: TaskNavigationMenuState) => void;
   /** 그룹으로 끌어 옮기는 중인가 — 시작에 repo, 끝에 null. 클릭은 여전히 접기다. */
   onDragProject?: (repo: string | null) => void;
-  unread: ReadonlySet<string>;
+  /** 읽지 않은 알림이 있는 작업 → 그 알림의 종류. 배지 문구를 종류별로 가른다. */
+  unread: ReadonlyMap<string, NotificationKind>;
+  /** 답을 기다리는 구조화 질문이 열린 작업의 좌표 — 점·라벨을 답변 대기로 그린다. */
+  questionTasks: ReadonlySet<string>;
 }
+
+/** 배지 문구. 질문은 "새 결과"가 아니다 — 결과를 보러 갔다가 답할 것을 찾게 된다. */
+const UNREAD_LABEL: Record<NotificationKind, string> = {
+  result: "새 결과",
+  question: "질문",
+  failure: "실패",
+};
 
 /** 경로의 마지막 조각 = 프로젝트 이름. 최근 세션 행도 같은 표기를 써야 한다 — 복제하지 말 것. */
 export const repoBase = (path: string): string =>
   path.split("/").filter(Boolean).pop() ?? path;
 
 /** 점의 aria-label·title용 — 폭 제약이 없으니 완전한 문구를 쓴다. */
-const taskStatus = (task: Task, queuedPosition: Map<number, number>): string =>
+const taskStatus = (
+  task: Task,
+  queuedPosition: Map<number, number>,
+  pendingQuestion: boolean,
+): string =>
   task.state === "Queued"
     ? `대기 #${queuedPosition.get(task.id)}`
-    : taskStatusLabel(task);
+    : taskStatusLabel(task, pendingQuestion);
 
 /** 카드 본문용 — 좁은 폭에서 같은 문구가 반복되므로 짧게 적는다. */
-const taskStatusShort = (task: Task, queuedPosition: Map<number, number>): string =>
+const taskStatusShort = (
+  task: Task,
+  queuedPosition: Map<number, number>,
+  pendingQuestion: boolean,
+): string =>
   task.state === "Queued"
     ? `대기 #${queuedPosition.get(task.id)}`
-    : taskStatusLabelShort(task);
+    : taskStatusLabelShort(task, pendingQuestion);
 
 function SessionTaskCard({
   task,
@@ -47,7 +66,8 @@ function SessionTaskCard({
   queuedPosition,
   onOpen,
   onOpenMenu,
-  unread,
+  unreadKind,
+  pendingQuestion,
 }: {
   task: Task;
   selected: boolean;
@@ -55,7 +75,9 @@ function SessionTaskCard({
   queuedPosition: Map<number, number>;
   onOpen: () => void;
   onOpenMenu: (event: MouseEvent<HTMLDivElement>) => void;
-  unread: boolean;
+  unreadKind: NotificationKind | null;
+  /** 실행 중인데 답을 기다린다 — 상태는 Running이지만 사용자가 움직여야 진행된다. */
+  pendingQuestion: boolean;
 }) {
   return (
     <div
@@ -82,13 +104,15 @@ function SessionTaskCard({
           )}
           <span
             className="w-2 h-2 rounded-full shrink-0"
-            style={{ background: taskDotColor(task) }}
+            style={{ background: taskDotColor(task, pendingQuestion) }}
             role="img"
-            aria-label={`작업 상태: ${taskStatus(task, queuedPosition)}`}
-            title={taskStatus(task, queuedPosition)}
+            aria-label={`작업 상태: ${taskStatus(task, queuedPosition, pendingQuestion)}`}
+            title={taskStatus(task, queuedPosition, pendingQuestion)}
           />
           <span className="font-medium truncate">{task.instruction || task.branch}</span>
-          {unread && <span className="shrink-0 text-[10px] text-primary-bright">새 결과</span>}
+          {unreadKind && (
+            <span className="shrink-0 text-[10px] text-primary-bright">{UNREAD_LABEL[unreadKind]}</span>
+          )}
         </div>
         {badgeLabelFor(task.agent) && (
           <span className="text-[9px] px-1.5 py-0.5 rounded bg-raised text-primary-bright font-code shrink-0">
@@ -125,7 +149,9 @@ function SessionTaskCard({
             연결 끊김 · 마지막 확인
           </span>
         )}
-        <span className="shrink-0">{task.stale ? "마지막 확인" : taskStatusShort(task, queuedPosition)}</span>
+        <span className="shrink-0">
+          {task.stale ? "마지막 확인" : taskStatusShort(task, queuedPosition, pendingQuestion)}
+        </span>
       </div>
     </div>
   );
@@ -144,6 +170,7 @@ export function SessionTaskProject({
   onOpenMenu,
   onDragProject,
   unread,
+  questionTasks,
 }: SessionTaskProjectProps) {
   return (
     <div className="rounded-lg border border-border/80 bg-surface/40 overflow-hidden">
@@ -195,7 +222,8 @@ export function SessionTaskProject({
               event.preventDefault();
               onOpenMenu({ x: event.clientX, y: event.clientY, kind: "task", task });
             }}
-            unread={unread.has(taskKey(task))}
+            unreadKind={unread.get(taskKey(task)) ?? null}
+            pendingQuestion={questionTasks.has(taskKey(task))}
           />
         ))}
     </div>

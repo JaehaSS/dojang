@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import type { SkillMeta } from "../../lib/ipc";
 
 interface Props {
@@ -15,12 +16,22 @@ interface Props {
 
 /** /스킬 슬래시 자동완성 드롭다운 — AgentComposer/Composer 공유 프레젠테이셔널 컴포넌트. */
 export function SkillDropdown({ open, items, sel, onHover, onSelect }: Props) {
+  const listRef = useRef<HTMLDivElement>(null);
+  // ↑↓로 옮긴 선택이 max-h 밖으로 나가면 보이는 데까지만 끌어온다(jsdom에는 scrollIntoView가 없다).
+  useEffect(() => {
+    if (!open) return;
+    listRef.current?.querySelector<HTMLElement>('[data-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
+  }, [open, sel, items.length]);
   if (!open) return null;
   return (
-    <div className="absolute bottom-full left-0 mb-1 z-30 w-[32rem] max-h-64 overflow-auto rounded-lg border border-border-strong bg-raised py-1 shadow-xl">
+    <div
+      ref={listRef}
+      className="absolute bottom-full left-0 mb-1 z-30 w-[32rem] max-h-64 overflow-auto rounded-lg border border-border-strong bg-raised py-1 shadow-xl"
+    >
       <div className="px-3 py-1 text-xs text-text-muted">/ 스킬 · Tab으로 완성</div>
       {items.map((sk, i) => (
         <button
+          data-selected={i === sel}
           key={sk.name}
           className={`w-full text-left px-3 py-1.5 flex items-baseline gap-2 ${
             i === sel ? "bg-surface text-text" : "text-text-secondary"

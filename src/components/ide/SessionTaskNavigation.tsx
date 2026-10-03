@@ -33,6 +33,8 @@ export interface SessionTaskNavigationProps {
   onOpenTask: (task: Task) => void;
   onNewInRepo: (repo: string) => void;
   onDeleteTask: (task: Task) => void;
+  /** 우클릭 메뉴의 "<base>에 머지" — 검토 대기 워크트리 작업에만 나타난다. */
+  onMergeTask?: (task: Task) => void;
   onRemoveProject: (repo: string) => void;
   /** 워크트리가 사라진 작업 일괄 종결 — 배너는 그런 작업이 있을 때만 나타난다. */
   onDiscardOrphans: () => void;
@@ -40,7 +42,15 @@ export interface SessionTaskNavigationProps {
   groups?: ProjectGroups;
   /** 다음 그룹 상태 전체. 저장은 `App`의 몫이다(설계 0062 D-8). */
   onProjectGroupsChange?: (next: ProjectGroups) => void;
+  /**
+   * 답을 기다리는 구조화 질문이 열린 작업의 (host, id) 좌표 — attention 투영(`reason: "question"`)에서
+   * 온다. 실행은 `Running`인 채라 `tasks` 행만으로는 드러나지 않는다. 안 넘기면 상태만으로 그린다.
+   */
+  questionTasks?: ReadonlySet<string>;
 }
+
+/** 질문 관측을 넘기지 않는 호출부의 자리 — 렌더마다 새로 만들면 카드가 매번 갱신된다. */
+const NO_QUESTIONS: ReadonlySet<string> = new Set();
 
 /** ⌘를 잡고 있지 않을 때 넘기는 빈 맵 — 렌더마다 새로 만들면 카드가 매번 갱신된다. */
 const NO_SHORTCUTS: Map<string, number> = new Map();
@@ -78,9 +88,11 @@ function saveCollapsedProjects(collapsed: Set<string>): void {
 
 export function SessionTaskNavigation(props: SessionTaskNavigationProps) {
   const notifications = useNotificationSnapshot();
-  const unread = new Set(
-    (notifications.snapshot?.items ?? []).map((item) => taskKey({ host: item.host, id: item.task_id })),
+  // 값은 알림 종류다 — 배지 문구가 "새 결과"만이면 질문·실패도 결과 도착처럼 읽힌다.
+  const unread = new Map(
+    (notifications.snapshot?.items ?? []).map((item) => [taskKey({ host: item.host, id: item.task_id }), item.kind]),
   );
+  const questionTasks = props.questionTasks ?? NO_QUESTIONS;
   const activeTasks = props.tasks.filter(
     (task) => !HIDDEN_STATES.has(task.state)
       && (ACTIVE_STATES.includes(task.state) || task.stale || unread.has(taskKey(task))),
@@ -161,6 +173,7 @@ export function SessionTaskNavigation(props: SessionTaskNavigationProps) {
       onOpenMenu={setMenu}
       onDragProject={drag.onDragProject}
       unread={unread}
+      questionTasks={questionTasks}
     />
   );
 
@@ -174,6 +187,7 @@ export function SessionTaskNavigation(props: SessionTaskNavigationProps) {
         selectedKey={props.selectedKey}
         onOpenTask={props.onOpenTask}
         onOpenMenu={setMenu}
+        questionTasks={questionTasks}
       />
       <section
         aria-label="세션 작업"
@@ -233,6 +247,7 @@ export function SessionTaskNavigation(props: SessionTaskNavigationProps) {
           activeTasks={activeTasks}
           onClose={closeMenu}
           onDeleteTask={props.onDeleteTask}
+          onMergeTask={props.onMergeTask}
           onRemoveProject={props.onRemoveProject}
           groups={groups.groups}
           groupOf={(repo) => {

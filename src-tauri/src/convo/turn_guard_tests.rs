@@ -516,3 +516,137 @@ fn the_frontend_marker_is_the_same_string() {
          다르면 대화 뷰가 가드 경고를 자르지 못해 응답 전문이 중복 노출된다."
     );
 }
+
+#[test]
+fn claude_question_contract_is_one_stable_system_argument_not_user_history() {
+    let mut prompts = Vec::new();
+    for resume in [None, Some("existing-session")] {
+        let command = super::vendor_command_with_contract(
+            "claude", Vendor::Claude, "사용자 요청", resume, None, None, &[], None, None, true,
+        );
+        let args: Vec<_> = command.get_args().map(|s| s.to_string_lossy().into_owned()).collect();
+        assert_eq!(args[1], "사용자 요청");
+        assert_eq!(args.iter().filter(|a| *a == "--append-system-prompt").count(), 1);
+        let index = args.iter().position(|a| a == "--append-system-prompt").unwrap();
+        let prompt = args[index + 1].clone();
+        assert_eq!(prompt.matches(TURN_COMPLETION_GUARD).count(), 1);
+        assert_eq!(prompt.matches(super::question_local::TOOL_INSTRUCTIONS).count(), 1);
+        prompts.push(prompt);
+    }
+    assert_eq!(prompts[0], prompts[1]);
+}
+
+#[test]
+fn generic_codex_preserves_configured_developer_instructions() {
+    for resume in [None, Some("existing-session")] {
+        let command = vendor_command("codex", Vendor::Codex, "사용자 요청", resume, None);
+        let args: Vec<_> = command.get_args().map(|s| s.to_string_lossy().into_owned()).collect();
+        assert!(!args.iter().any(|s| s.contains("developer_instructions=")));
+        assert!(args.last().unwrap().starts_with(TURN_COMPLETION_GUARD));
+        assert!(args.last().unwrap().ends_with("사용자 요청"));
+    }
+}
+
+/// claude 2.1.28x는 종료 알림을 `system/task_notification` 한 줄로 낸다(2026-09-26 실측).
+/// 문자열 `<task-notification>`만 읽던 동안 이 형태를 놓쳐, 회수가 끝난 작업이 미완료로 찍혔다.
+#[test]
+fn structured_task_notification_clears_pending_and_surfaces_completion() {
+    let mut guard = SubagentTurnGuard::default();
+    guard.observe_event(&agent_spawn("tool-agent", "조사 Worker"));
+    guard.observe_event(&tool_result(
+        "tool-agent",
+        "Async agent launched successfully. agentId: internal",
+    ));
+    assert_eq!(guard.pending_count(), 1);
+
+    let completion = guard
+        .observe_raw_line(
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1d772ce","tool_use_id":"tool-agent","status":"completed","output_file":"/tmp/a.output","summary":"Agent \"조사 Worker\" finished"}"#,
+        )
+        .expect("completion event");
+    assert_eq!(guard.pending_count(), 0);
+    assert_eq!(guard.cut_count(), 0);
+    assert!(matches!(
+        completion,
+        ConvoEvent::ToolResult {
+            is_error: false,
+            tool_use_id: Some(id),
+            ..
+        } if id == "tool-agent"
+    ));
+    assert!(
+        guard.enforce_result(success_result("끝")) == success_result("끝"),
+        "회수가 끝났으면 성공 그대로여야 한다"
+    );
+}
+
+#[test]
+fn a_task_stopped_after_the_answer_counts_as_cut_work() {
+    // 모델이 답을 마친 뒤 하니스가 종료하면서 끊은 작업 — 결과를 아무도 읽지 못했다.
+    let mut guard = SubagentTurnGuard::default();
+    guard.observe_event(&bash_call("tool-bash", "npm run tauri build"));
+    guard.observe_event(&tool_result(
+        "tool-bash",
+        "Command running in background with ID: brtxt6n39.",
+    ));
+    guard.observe_event(&success_result("기다리겠습니다"));
+    guard
+        .observe_raw_line(
+            r#"{"type":"system","subtype":"task_notification","task_id":"brtxt6n39","tool_use_id":"tool-bash","status":"stopped"}"#,
+        )
+        .expect("termination event");
+    assert_eq!(guard.pending_count(), 0);
+    assert_eq!(guard.cut_count(), 1);
+
+    let ConvoEvent::Result { is_error, text, .. } = guard.enforce_result(success_result("기다리겠습니다"))
+    else {
+        panic!("Result가 아님");
+    };
+    assert!(is_error);
+    assert!(text.contains("끊은 작업"));
+    assert!(text.contains("npm run tauri build"));
+    assert!(text.contains("1건"));
+}
+
+#[test]
+fn a_task_stopped_by_the_agent_mid_turn_is_not_cut_work() {
+    // TaskStop으로 에이전트가 스스로 정리한 경우 — 응답 전이므로 하니스가 끊은 것이 아니다.
+    let mut guard = SubagentTurnGuard::default();
+    guard.observe_event(&bash_call("tool-bash", "sleep 280; echo timer"));
+    guard.observe_event(&tool_result(
+        "tool-bash",
+        "Command running in background with ID: beibhu7k5.",
+    ));
+    guard
+        .observe_raw_line(
+            r#"{"type":"system","subtype":"task_notification","task_id":"beibhu7k5","tool_use_id":"tool-bash","status":"stopped"}"#,
+        )
+        .expect("termination event");
+    assert_eq!(guard.pending_count(), 0);
+    assert_eq!(guard.cut_count(), 0);
+    assert_eq!(guard.enforce_result(success_result("끝")), success_result("끝"));
+}
+
+#[test]
+fn a_new_tool_call_after_the_answer_reopens_the_turn() {
+    // 알림으로 모델이 다시 불려 도구를 부르면 그 뒤의 stopped는 다시 에이전트의 것이다.
+    let mut guard = SubagentTurnGuard::default();
+    guard.observe_event(&bash_call("tool-bash", "sleep 280; echo timer"));
+    guard.observe_event(&tool_result(
+        "tool-bash",
+        "Command running in background with ID: beibhu7k5.",
+    ));
+    guard.observe_event(&success_result("기다리겠습니다"));
+    guard.observe_event(&ConvoEvent::ToolUse {
+        name: "TaskStop".into(),
+        summary: "beibhu7k5".into(),
+        tool_id: Some("tool-stop".into()),
+        parent_id: None,
+    });
+    guard
+        .observe_raw_line(
+            r#"{"type":"system","subtype":"task_notification","task_id":"beibhu7k5","tool_use_id":"tool-bash","status":"stopped"}"#,
+        )
+        .expect("termination event");
+    assert_eq!(guard.cut_count(), 0);
+}

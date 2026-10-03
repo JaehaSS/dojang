@@ -37,55 +37,24 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     ] {
         crate::db::add_column_if_missing(&mut *connection, "schedules", column).await?;
     }
+    cleanup_removed_retro(pool).await?;
     Ok(())
 }
 
-/// 첫 부팅에서 한 번 심는 주간 회고 스케줄 (ADR 2026-09-13).
-const RETRO_SEED_FLAG: &str = "retro_schedule_seeded";
-const RETRO_SEED_LABEL: &str = "주간 회고";
-/// 월요일 09:00 (초 분 시 일 월 요일).
-const RETRO_SEED_CRON: &str = "0 0 9 * * Mon";
-const RETRO_SEED_PAYLOAD: &str = r#"{"repo":"","agent":""}"#;
-
-/// 주간 회고 스케줄을 **최초 1회만** 심는다. 실제로 삽입했으면 `Ok(true)`.
+/// 제거된 `retro`(주간 회고) 기능의 잔재를 지운다(2026-09-28 기능 폐기, 사용자 결정).
 ///
-/// 플래그가 이미 있으면 아무것도 하지 않는다 — 사용자가 지운 스케줄이 다음 부팅에 되살아나면
-/// 삭제가 의미를 잃는다. 읽기 실패(`Err`)를 "미설정"으로 접지 않는 이유도 같다: DB가 일시적으로
-/// 실패한 부팅에서 지운 스케줄이 되살아난다(`lib.rs`의 `reflect_enabled`와 같은 판단).
-pub async fn seed_weekly_retro(pool: &SqlitePool, tz_offset_secs: i32) -> Result<bool, String> {
-    match crate::db::get_setting(pool, RETRO_SEED_FLAG).await {
-        Ok(Some(_)) => return Ok(false),
-        Ok(None) => {}
-        Err(e) => return Err(format!("{RETRO_SEED_FLAG} 조회 실패: {e}")),
+/// 플래그로 한 번만 막지 않는다 — `attention`(할 일) 제거 때처럼 DROP/DELETE 모두 이미 지워진
+/// DB에서도 무해해서(`schedules`·`settings`는 어차피 이 함수 호출 전에 항상 존재한다),
+/// 매 마이그레이션마다 다시 실행해도 비용이 없다(`db::mod::migrate`의 attention 정리와 같은 판단).
+async fn cleanup_removed_retro(pool: &SqlitePool) -> anyhow::Result<()> {
+    for statement in [
+        "DELETE FROM schedules WHERE kind = 'retro'",
+        "DELETE FROM settings WHERE key = 'retro_schedule_seeded'",
+        "DROP TABLE IF EXISTS retro_digests",
+    ] {
+        sqlx::query(statement).execute(pool).await?;
     }
-
-    let existing = crate::db::list_schedules(pool)
-        .await
-        .map_err(|e| format!("스케줄 목록 조회 실패: {e}"))?;
-    let already = existing.iter().any(|s| s.kind == "retro");
-
-    let inserted = if already {
-        false
-    } else {
-        crate::db::insert_schedule(
-            pool,
-            RETRO_SEED_LABEL,
-            RETRO_SEED_CRON,
-            "retro",
-            RETRO_SEED_PAYLOAD,
-            crate::now(),
-            tz_offset_secs,
-        )
-        .await
-        .map_err(|e| format!("주간 회고 스케줄 삽입 실패: {e}"))?;
-        true
-    };
-
-    // 삽입 여부와 무관하게 플래그를 남긴다 — "한 번 판단했다"가 기록되어야 재시도가 없다.
-    crate::db::set_setting(pool, RETRO_SEED_FLAG, "true")
-        .await
-        .map_err(|e| format!("{RETRO_SEED_FLAG} 기록 실패: {e}"))?;
-    Ok(inserted)
+    Ok(())
 }
 
 /// `base`(직전 실행 시각, 없었으면 스케줄 생성 시각) 이후 ~ `now` 사이에 도래한 cron 실행
@@ -145,8 +114,7 @@ mod tests {
 
     static DATABASE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-    /// 임시 파일 DB인 이유는 `sqlite::memory:`가 풀의 커넥션마다 별개의 빈 DB를 보기 때문이다
-    /// (`retro/tests.rs:8`과 같은 관례).
+    /// 임시 파일 DB인 이유는 `sqlite::memory:`가 풀의 커넥션마다 별개의 빈 DB를 보기 때문이다.
     async fn test_pool() -> SqlitePool {
         let sequence = DATABASE_COUNTER.fetch_add(1, Ordering::SeqCst);
         let path = crate::testtmp::dir().join(format!(
@@ -170,57 +138,50 @@ mod tests {
         pool
     }
 
-    async fn retro_count(pool: &SqlitePool) -> usize {
-        crate::db::list_schedules(pool)
+    /// 제거된 `retro` 기능이 남긴 스케줄·설정·테이블을 마이그레이션이 걷어내는지 검증한다.
+    /// 두 번 돌려도 안전해야 한다 — `migrate`가 매 부팅마다 이 정리를 다시 실행하기 때문이다.
+    #[tokio::test]
+    async fn migrate_cleans_up_removed_retro_leftovers() {
+        let pool = test_pool().await;
+        crate::db::insert_schedule(
+            &pool,
+            "주간 회고",
+            "0 0 9 * * Mon",
+            "retro",
+            r#"{"repo":"","agent":""}"#,
+            crate::now(),
+            32400,
+        )
+        .await
+        .unwrap();
+        crate::db::set_setting(&pool, "retro_schedule_seeded", "true")
             .await
-            .unwrap()
-            .iter()
-            .filter(|s| s.kind == "retro")
-            .count()
-    }
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE retro_digests (week_start INTEGER PRIMARY KEY, body TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-    #[test]
-    fn seeded_retro_cron_is_parseable() {
-        // 시드 값이 cron 크레이트 6필드 파서를 통과하지 못하면 스케줄러가 매 틱 실패한다.
-        assert!(Schedule::from_str(RETRO_SEED_CRON).is_ok());
-    }
+        migrate(&pool).await.unwrap();
+        migrate(&pool).await.unwrap(); // 두 번째도 에러 없이 통과해야 한다.
 
-    #[tokio::test]
-    async fn seeding_twice_leaves_a_single_schedule() {
-        let pool = test_pool().await;
-        assert_eq!(seed_weekly_retro(&pool, 32400).await, Ok(true));
-        assert_eq!(seed_weekly_retro(&pool, 32400).await, Ok(false));
-        assert_eq!(retro_count(&pool).await, 1);
-    }
-
-    #[tokio::test]
-    async fn deleted_retro_schedule_is_not_resurrected() {
-        let pool = test_pool().await;
-        seed_weekly_retro(&pool, 32400).await.unwrap();
-        let id = crate::db::list_schedules(&pool).await.unwrap()[0].id;
-        crate::db::remove_schedule(&pool, id).await.unwrap();
-
-        assert_eq!(seed_weekly_retro(&pool, 32400).await, Ok(false));
-        assert_eq!(retro_count(&pool).await, 0);
-    }
-
-    #[tokio::test]
-    async fn latest_task_repo_is_none_without_tasks_and_newest_with_them() {
-        let pool = test_pool().await;
-        assert_eq!(crate::db::latest_task_repo(&pool).await.unwrap(), None);
-
-        for (repo, created_at) in [("/old", BASE), ("/new", BASE + 60)] {
-            sqlx::query("INSERT INTO tasks (repo, created_at) VALUES (?, ?)")
-                .bind(repo)
-                .bind(created_at)
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
+        let schedules = crate::db::list_schedules(&pool).await.unwrap();
+        assert!(!schedules.iter().any(|s| s.kind == "retro"));
         assert_eq!(
-            crate::db::latest_task_repo(&pool).await.unwrap().as_deref(),
-            Some("/new")
+            crate::db::get_setting(&pool, "retro_schedule_seeded")
+                .await
+                .unwrap(),
+            None
         );
+        let table: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'retro_digests'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(table, None);
     }
 
     #[test]

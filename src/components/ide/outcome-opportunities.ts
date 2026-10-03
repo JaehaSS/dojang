@@ -1,8 +1,8 @@
 import type { OutcomeInsights } from "../../lib/ipc";
 
-export type OutcomeOpportunityId = "verification" | "memory_ledger" | "no_reexplanation";
+export type OutcomeOpportunityId = "verification" | "no_reexplanation";
 
-export type OutcomeOpportunityAction = "open_memory" | null;
+export type OutcomeOpportunityAction = null;
 
 export interface OutcomeOpportunity {
   id: OutcomeOpportunityId;
@@ -21,15 +21,6 @@ export function deriveOutcomeOpportunities(data: OutcomeInsights): OutcomeOpport
       reason: `검증 evidence가 있는 승인은 ${data.ready_accepted_task_count} / ${data.accepted_task_count}건입니다.`,
       action: null,
       actionLabel: null,
-    });
-  }
-  if (data.ledger_memory_task_count < data.legacy_memory_task_count) {
-    opportunities.push({
-      id: "memory_ledger",
-      title: "versioned memory 전환",
-      reason: `legacy usage ${data.legacy_memory_task_count}건, versioned ledger ${data.ledger_memory_task_count}건입니다.`,
-      action: "open_memory",
-      actionLabel: "Memory 검토 열기",
     });
   }
   if (data.task_count > 0 && data.no_reexplanation_completion_rate == null) {

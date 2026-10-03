@@ -7,8 +7,6 @@ const baseline: OutcomeInsights = {
   accepted_task_count: 12,
   goal_contract_task_count: 0,
   ready_accepted_task_count: 0,
-  legacy_memory_task_count: 7,
-  ledger_memory_task_count: 0,
   ensemble_count: 5,
   selected_ensemble_count: 2,
   ambiguous_ensemble_count: 0,
@@ -25,15 +23,10 @@ describe("deriveOutcomeOpportunities", () => {
   it("derives every observed adoption gap in causal order", () => {
     const opportunities = deriveOutcomeOpportunities(baseline);
 
-    expect(opportunities.map(({ id }) => id)).toEqual([
-      "verification",
-      "memory_ledger",
-      "no_reexplanation",
-    ]);
-    expect(opportunities.map(({ action }) => action)).toEqual([null, "open_memory", null]);
+    expect(opportunities.map(({ id }) => id)).toEqual(["verification", "no_reexplanation"]);
+    expect(opportunities.map(({ action }) => action)).toEqual([null, null]);
     expect(opportunities[0]?.reason).toContain("0 / 12");
-    expect(opportunities[1]?.reason).toContain("legacy usage 7");
-    expect(opportunities[2]?.reason).toContain("측정 대상이 0건");
+    expect(opportunities[1]?.reason).toContain("측정 대상이 0건");
   });
 
   it("reports incomplete observation coverage as the measurement goal", () => {
@@ -57,7 +50,6 @@ describe("deriveOutcomeOpportunities", () => {
       ...baseline,
       goal_contract_task_count: baseline.task_count,
       ready_accepted_task_count: baseline.accepted_task_count,
-      ledger_memory_task_count: baseline.legacy_memory_task_count,
       no_reexplanation_completion_rate: 0.8,
     };
 
@@ -71,8 +63,6 @@ describe("deriveOutcomeOpportunities", () => {
       accepted_task_count: 0,
       goal_contract_task_count: 0,
       ready_accepted_task_count: 0,
-      legacy_memory_task_count: 0,
-      ledger_memory_task_count: 0,
       no_reexplanation_completion_rate: null,
     };
 

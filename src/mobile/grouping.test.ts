@@ -20,7 +20,7 @@ function task(id: number, repo: string, state: string, updated_at = 0): Task {
 
 describe("repoName", () => {
   it("경로의 마지막 세그먼트를 쓴다", () => {
-    expect(repoName("/home/tlswogk/praxis-build")).toBe("praxis-build");
+    expect(repoName("/home/dev/praxis-build")).toBe("praxis-build");
     expect(repoName("C:\\Users\\me\\praxis")).toBe("praxis");
     expect(repoName("/trailing/slash/")).toBe("slash");
     expect(repoName("bare")).toBe("bare");

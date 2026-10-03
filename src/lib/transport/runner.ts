@@ -5,15 +5,9 @@ import type {
   BranchList,
   BrowseResult,
   ComposeOutcome,
-  ConfirmedApproval,
-  ContextReport,
-  CodeLocationInput,
   CrystallizeResult,
-  ApplicationPolicy,
   DiffHunk,
   EnsembleMatrix,
-  Evidence,
-  ExternalDocumentInput,
   FileContent,
   FileDiff,
   FsNode,
@@ -23,21 +17,15 @@ import type {
   GrillRound,
   HunkRef,
   InterviewAssessment,
-  Memory,
   MobilePairing,
   MobileSession,
-  MemoryEvidence,
-  MemoryStatus,
-  MemoryUsageRow,
-  MemoryVersion,
-  LocalDocumentInput,
   PartialApplyResult,
   QuickOpenTaskCandidate,
   RematchedAnnotation,
   ReviewAnnotation,
-  RevalidationReport,
   Schedule,
   SessionHomeEntry,
+  SessionHomePreview,
   SkillMeta,
   Task,
   TaskRow,
@@ -57,12 +45,15 @@ import type {
   TaskDiffResult,
 } from "../transport";
 import { SessionResumeError } from "../transport";
-import { createWorkflowTransport } from "../workflow/api";
 import { formatDiffStat } from "../diff";
 
 /** 범위 쿼리. 생략하면 아무것도 붙이지 않는다 — 서버 기본값(세션 전체)을 쓴다. */
-function rangeQuery(range?: DiffRange): string {
-  return range ? `?range=${range}` : "";
+function rangeQuery(range?: DiffRange, includeReview?: boolean): string {
+  const params = new URLSearchParams();
+  if (range) params.set("range", range);
+  if (includeReview) params.set("include_review", "true");
+  const query = params.toString();
+  return query ? `?${query}` : "";
 }
 
 /**
@@ -81,6 +72,10 @@ export function normalizeTaskDiff(payload: unknown): TaskDiffResult {
   return {
     files: Array.isArray(value.files) ? value.files : [],
     baseline: value.baseline ?? legacy,
+    review:
+      Array.isArray(value.review?.hunks) && Array.isArray(value.review?.annotations)
+        ? value.review
+        : undefined,
   };
 }
 import {
@@ -164,7 +159,6 @@ export class RunnerRequestError extends Error {
 /** SSH local-forward를 통해 Runner `/v1` 계약을 호출하는 typed transport. */
 export class RunnerTransport implements PraxisTransport {
   readonly kind = "remote" as const;
-  readonly workflow;
 
   /**
    * 레지스트리 키. 프로필 이름이 정본이지만, 이름 없이 만들어진 transport(모바일 PWA·테스트)도
@@ -172,6 +166,7 @@ export class RunnerTransport implements PraxisTransport {
    * 로컬 작업이 통째로 사라진다.
    */
   readonly hostId: HostId;
+  private sessionHomeCapabilities: { vendors: ("claude" | "codex")[]; preview: boolean } | null = null;
 
   constructor(
     private readonly connection: RunnerConnection,
@@ -181,7 +176,6 @@ export class RunnerTransport implements PraxisTransport {
   ) {
     this.hostId =
       connection.profileName?.trim() || `runner:${connection.endpoint.replace(/\/$/, "")}`;
-    this.workflow = createWorkflowTransport({ request: (path, init) => this.json(path, init) });
   }
 
   async taskList(): Promise<Task[]> {
@@ -222,8 +216,8 @@ export class RunnerTransport implements PraxisTransport {
     return formatDiffStat(files);
   }
 
-  async taskDiff(id: number, range?: DiffRange): Promise<TaskDiffResult> {
-    return normalizeTaskDiff(await this.json(`/v1/tasks/${id}/diff${rangeQuery(range)}`));
+  async taskDiff(id: number, range?: DiffRange, includeReview?: boolean): Promise<TaskDiffResult> {
+    return normalizeTaskDiff(await this.json(`/v1/tasks/${id}/diff${rangeQuery(range, includeReview)}`));
   }
 
   async fsTree(id: number): Promise<FsNode[]> {
@@ -305,6 +299,10 @@ export class RunnerTransport implements PraxisTransport {
     return Promise.resolve({ current: "", branches: [] });
   }
 
+  gitCheckoutBranch(): Promise<BranchList> {
+    return Promise.reject(new Error("원격 Runner에서는 브랜치를 전환할 수 없습니다 (로컬 전용)"));
+  }
+
   repositoryList(): Promise<string[]> {
     return this.json("/v1/repositories");
   }
@@ -371,7 +369,16 @@ export class RunnerTransport implements PraxisTransport {
       body.reasoning_effort = request.reasoning_effort.trim();
     }
     if (request.goal_contract != null) body.goal_contract = request.goal_contract;
-    if (request.resumeSession) body.resume_session = request.resumeSession;
+    if (request.resumeSession) {
+      if (request.resumeVendor === "codex") {
+        const capabilities = await this.loadSessionHomeCapabilities(request.repo);
+        if (!capabilities.vendors.includes("codex")) {
+          throw new Error("선택한 Runner는 Codex 세션 이어받기를 지원하지 않습니다");
+        }
+      }
+      body.resume_session = request.resumeSession;
+      if (request.resumeVendor) body.resume_vendor = request.resumeVendor;
+    }
     // 단건 반환도 태깅한다 — 여기를 빼면 생성 직후 선택이 host를 잃는다(가장 자주 지나는 경로).
     try {
       return this.own(
@@ -530,10 +537,6 @@ export class RunnerTransport implements PraxisTransport {
     });
   }
 
-  evidenceGet(id: number): Promise<Evidence | null> {
-    return this.json(`/v1/tasks/${id}/evidence`);
-  }
-
   scheduleAdd(request: ScheduleCreateRequest): Promise<number> {
     return this.json("/v1/schedules", {
       method: "POST",
@@ -558,138 +561,6 @@ export class RunnerTransport implements PraxisTransport {
     });
   }
 
-  memoryList(): Promise<Memory[]> {
-    return this.json("/v1/memories");
-  }
-
-  memoryArchive(id: number): Promise<void> {
-    return this.empty(`/v1/memories/${id}`, { method: "DELETE" });
-  }
-
-  memoryPurge(id: number): Promise<void> {
-    return this.empty(`/v1/memories/${id}/purge`, { method: "POST" });
-  }
-
-  memoryAdd(repo: string, kind: string, content: string): Promise<number> {
-    return this.json("/v1/memories", {
-      method: "POST",
-      body: JSON.stringify({ repository: repo, kind, content }),
-    });
-  }
-
-  memoryUpdate(id: number, content: string, kind: string): Promise<void> {
-    return this.empty(`/v1/memories/${id}`, {
-      method: "PUT",
-      body: JSON.stringify({ kind, content }),
-    });
-  }
-
-  memorySetApplicationPolicy(
-    id: number,
-    policy: ApplicationPolicy,
-    expectedVersion: number,
-    expectedPolicy: ApplicationPolicy,
-  ): Promise<boolean> {
-    return this.json(`/v1/memories/${id}/application-policy`, {
-      method: "PUT",
-      body: JSON.stringify({
-        policy,
-        expected_version: expectedVersion,
-        expected_policy: expectedPolicy,
-      }),
-    });
-  }
-
-  memoryVersions(id: number): Promise<MemoryVersion[]> {
-    return this.json(`/v1/memories/${id}/versions`);
-  }
-
-  memoryRestoreVersion(
-    id: number,
-    sourceVersion: number,
-    expectedCurrentVersion: number,
-    expectedStatus: MemoryStatus,
-  ): Promise<number> {
-    return this.json(`/v1/memories/${id}/versions/${sourceVersion}/restore`, {
-      method: "POST",
-      body: JSON.stringify({
-        expected_current_version: expectedCurrentVersion,
-        expected_status: expectedStatus,
-      }),
-    });
-  }
-
-  memoryConfirm(id: number, expiresAt?: number): Promise<number> {
-    return this.json(`/v1/memories/${id}/confirmations`, {
-      method: "POST",
-      body: JSON.stringify({ expires_at: expiresAt ?? null }),
-    });
-  }
-
-  memoryConfirmAndApprove(id: number, expectedVersion: number): Promise<ConfirmedApproval> {
-    return this.json(`/v1/memories/${id}/confirm-and-approve`, {
-      method: "POST",
-      body: JSON.stringify({ expected_version: expectedVersion }),
-    });
-  }
-
-  memoryAddCodeEvidence(id: number, input: CodeLocationInput): Promise<number> {
-    return this.json(`/v1/memories/${id}/evidence/code-locations`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
-  }
-
-  memoryAddLocalDocumentEvidence(id: number, input: LocalDocumentInput): Promise<number> {
-    return this.json(`/v1/memories/${id}/evidence/documents/local`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
-  }
-
-  memoryAddExternalDocumentEvidence(id: number, input: ExternalDocumentInput): Promise<number> {
-    return this.json(`/v1/memories/${id}/evidence/documents/external`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
-  }
-
-  memoryEvidence(id: number): Promise<MemoryEvidence[]> {
-    return this.json(`/v1/memories/${id}/evidence`);
-  }
-
-  memoryRevalidate(id: number): Promise<RevalidationReport> {
-    return this.json(`/v1/memories/${id}/revalidate`, { method: "POST" });
-  }
-
-  knowledgeSubmitReview(id: number): Promise<void> {
-    return this.empty(`/v1/memories/${id}/review`, { method: "POST" });
-  }
-
-  knowledgeApprove(id: number): Promise<void> {
-    return this.empty(`/v1/memories/${id}/approve`, { method: "POST" });
-  }
-
-  memoryUsages(id: number): Promise<MemoryUsageRow[]> {
-    return this.json(`/v1/memories/${id}/usages`);
-  }
-
-  memoryPreview(repo: string, instruction: string): Promise<Memory[]> {
-    return this.json("/v1/memories/preview", {
-      method: "POST",
-      body: JSON.stringify({ repository: repo, instruction }),
-    });
-  }
-
-  contextReport(taskId: number): Promise<ContextReport> {
-    return this.json(`/v1/tasks/${taskId}/context`);
-  }
-
-  contextFileRead(taskId: number, path: string): Promise<string> {
-    const query = new URLSearchParams({ path });
-    return this.json(`/v1/tasks/${taskId}/context/file?${query}`);
-  }
-
   /** 구버전 Runner에는 이 라우트가 없다 — 404는 "스킬이 없다"로 읽는다. 403(roots 밖)은 전파한다. */
   async skillsList(repo: string): Promise<SkillMeta[]> {
     const response = await this.request(`${this.endpoint()}/v1/skills?${repositoryQuery(repo)}`, {
@@ -710,10 +581,37 @@ export class RunnerTransport implements PraxisTransport {
     if (all) params.set("all", "true");
     else params.set("repository", repo);
     if (query?.trim()) params.set("query", query.trim());
-    const response = await this.json<{ sessions: SessionHomeEntry[] }>(`/v1/sessions?${params}`);
+    const response = await this.json<{ sessions: SessionHomeEntry[]; capabilities?: { vendors?: string[]; preview?: boolean } }>(`/v1/sessions?${params}`);
+    const capabilities = this.rememberSessionHomeCapabilities(response.capabilities);
     // 서버 응답은 host를 모른다 — 여기서 태깅해야 다른 호스트로의 제출을 막는 첫 겹이 선다
     // (설계 2026-09-17 결정 11, taskList의 own()과 같은 자리).
-    return response.sessions.map((row) => ({ ...row, host: this.hostId }));
+    return response.sessions.filter((row) => row.vendor == null || capabilities.vendors.includes(row.vendor)).map((row) => ({
+      ...row,
+      host: this.hostId,
+      vendor: row.vendor === "codex" ? "codex" : "claude",
+      preview_supported: capabilities.preview,
+    }));
+  }
+
+  async sessionHomePreview(repo: string, vendor: "claude" | "codex", sessionId: string): Promise<SessionHomePreview> {
+    const capabilities = await this.loadSessionHomeCapabilities(repo);
+    if (!capabilities.preview || !capabilities.vendors.includes(vendor)) {
+      throw new Error("선택한 Runner는 이 세션 미리보기를 지원하지 않습니다");
+    }
+    const params = new URLSearchParams({ repository: repo, vendor });
+    const preview = await this.json<SessionHomePreview>(`/v1/sessions/${encodeURIComponent(sessionId)}/preview?${params}`);
+    return { ...preview, meta: { ...preview.meta, vendor: preview.meta.vendor ?? vendor } };
+  }
+
+  private rememberSessionHomeCapabilities(raw?: { vendors?: string[]; preview?: boolean }): { vendors: ("claude" | "codex")[]; preview: boolean } {
+    const vendors = raw?.vendors?.filter((vendor): vendor is "claude" | "codex" => vendor === "claude" || vendor === "codex") ?? ["claude"];
+    return (this.sessionHomeCapabilities = { vendors, preview: raw?.preview === true });
+  }
+
+  private async loadSessionHomeCapabilities(repo: string): Promise<{ vendors: ("claude" | "codex")[]; preview: boolean }> {
+    if (this.sessionHomeCapabilities) return this.sessionHomeCapabilities;
+    await this.sessionHomeIndex(repo, false);
+    return this.sessionHomeCapabilities ?? { vendors: ["claude"], preview: false };
   }
 
   diffHunks(id: number, range?: DiffRange): Promise<DiffHunk[]> {

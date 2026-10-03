@@ -37,14 +37,26 @@ pub(super) fn run_in_directory(
     })
 }
 
+/// 같은 프로세스에서 병렬로 도는 리뷰가 시계 해상도(macOS는 µs)로 같은 이름을 얻지 않게 하는 순번.
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn temporary_directory() -> Result<std::path::PathBuf, String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    let tmp = std::env::temp_dir().join(format!("praxis-reviewer-{}-{nanos}", std::process::id()));
-    std::fs::create_dir(&tmp).map_err(|error| format!("temp 생성 실패: {error}"))?;
-    Ok(tmp)
+    // 순번으로 이름이 겹치지 않게 하고, 다른 프로세스가 같은 이름을 쓴 드문 경우는 순번을 올려 재시도한다.
+    let mut last = String::new();
+    for _ in 0..16 {
+        let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let tmp = std::env::temp_dir().join(format!("praxis-reviewer-{}-{nanos}-{seq}", std::process::id()));
+        match std::fs::create_dir(&tmp) {
+            Ok(()) => return Ok(tmp),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last = error.to_string(),
+            Err(error) => return Err(format!("temp 생성 실패: {error}")),
+        }
+    }
+    Err(format!("temp 생성 실패: {last}"))
 }
 
 fn write_prompt(spawned: &mut SpawnedProcess, prompt: &str) -> Result<(), String> {

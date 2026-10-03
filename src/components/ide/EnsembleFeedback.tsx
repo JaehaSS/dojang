@@ -17,15 +17,11 @@ export function EnsembleFeedback({
   return (
     <section className="m-3 mb-0 rounded-lg border border-border bg-bg p-3">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h2 className="text-sm font-medium text-text">선택·메모리 피드백</h2>
-        <span className="text-[11px] text-text-muted">
-          최근 비교 실행의 상관 관측이며 메모리 효과의 인과 증거가 아닙니다.
-        </span>
+        <h2 className="text-sm font-medium text-text">선택 피드백</h2>
+        <span className="text-[11px] text-text-muted">최근 비교 실행의 선정 결과입니다.</span>
       </div>
       <div className="mt-2 flex flex-wrap gap-2 text-xs text-text-secondary">
         <Summary label="선정 완료" value={history.selected_count} />
-        <Summary label="메모리 사용 선정" value={history.selected_with_memory} />
-        <Summary label="메모리 미사용 선정" value={history.selected_without_memory} />
         {history.pending_count > 0 && <Summary label="선택 대기" value={history.pending_count} />}
         {history.ambiguous_count > 0 && (
           <Summary label="복수 승인" value={history.ambiguous_count} tone="warning" />
@@ -96,9 +92,6 @@ function SelectedFeedback({ entry }: { entry: EnsembleFeedbackEntry }): ReactEle
         {entry.selected_agent ?? "알 수 없는 에이전트"}
       </span>
       <span className="min-w-0 truncate text-text-muted">{modelLabel(entry)}</span>
-      <span className="ml-auto shrink-0 text-text-secondary">
-        메모리 {entry.selected_memory_count} · 승인 연결 {entry.selected_approved_memory_count}
-      </span>
     </>
   );
 }
@@ -127,7 +120,7 @@ function modelLabel(entry: EnsembleFeedbackEntry): string {
 function FeedbackUnavailable(): ReactElement {
   return (
     <section className="m-3 mb-0 rounded-lg border border-border bg-bg p-3 text-xs">
-      <div className="font-medium text-text">선택·메모리 피드백</div>
+      <div className="font-medium text-text">선택 피드백</div>
       <div role="alert" className="mt-1 text-status-failed">
         피드백 이력을 불러오지 못했습니다. 기존 비교 기능은 계속 사용할 수 있습니다.
       </div>

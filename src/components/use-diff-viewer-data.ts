@@ -36,11 +36,22 @@ interface DiffSnapshot {
 /** 세 요청에 **같은 범위**를 넘긴다. 어긋나면 화면이 그리는 hunk_id와 주석이 재매칭된
  *  hunk_id가 달라져, 붙여둔 주석이 한꺼번에 고아로 보인다. */
 async function fetchDiffSnapshot(task: TaskRef, range: DiffRange): Promise<DiffSnapshot> {
+  const diff = await taskDiff(task, range, true);
+  // 새 계약은 같은 기준점에서 hunk와 주석을 함께 만든다. 구형 Runner는 review를 무시하므로
+  // 기존 세 요청 경로를 남겨 호환한다.
+  if (diff.review) {
+    return {
+      files: diff.files,
+      hunks: diff.review.hunks,
+      annotations: diff.review.annotations,
+      baseline: diff.baseline,
+      warning: diff.review.warning ?? null,
+    };
+  }
   const annotationRequest = annotationsList(task, range)
     .then((value) => ({ value, failed: false }))
     .catch(() => ({ value: [] as RematchedAnnotation[], failed: true }));
-  const [diff, hunks, annotationResult] = await Promise.all([
-    taskDiff(task, range),
+  const [hunks, annotationResult] = await Promise.all([
     diffHunks(task, range),
     annotationRequest,
   ]);
@@ -114,26 +125,50 @@ export function useDiffViewerData(task: TaskRef, enabled = true): DiffViewerData
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const requestId = useRef(0);
+  const activeLoads = useRef(new Map<string, { promise: Promise<void>; generation: number }>());
+  const currentKey = `${task.host}:${task.id}:${range}`;
+  // render에서 즉시 갱신해 작업/범위 전환 직후 끝난 이전 요청도 화면에 쓰지 못하게 한다.
+  const currentKeyRef = useRef(currentKey);
+  currentKeyRef.current = currentKey;
 
   const load = useCallback(
-    async (initial: boolean) => {
-      const currentRequest = ++requestId.current;
+    async (initial: boolean): Promise<void> => {
+      const key = `${task.host}:${task.id}:${range}`;
       if (initial) {
         setFiles(null);
         setError(null);
       }
-      try {
-        const snapshot = await fetchDiffSnapshot(task, range);
-        if (currentRequest !== requestId.current) return;
-        setFiles(snapshot.files);
-        setHunks(snapshot.hunks);
-        setAnnotations(snapshot.annotations);
-        setBaseline(snapshot.baseline);
-        setWarning(snapshot.warning);
-        setError(null);
-      } catch (cause) {
-        if (currentRequest === requestId.current) setError(String(cause));
+      const active = activeLoads.current.get(key);
+      if (active) {
+        if (active.generation === requestId.current) return active.promise;
+        // A→B→A: wait for the obsolete request, then fetch a fresh snapshot without overlap.
+        const generation = requestId.current;
+        await active.promise;
+        if (key === currentKeyRef.current && generation === requestId.current) {
+          return load(initial);
+        }
+        return;
       }
+      const generation = ++requestId.current;
+      let request!: Promise<void>;
+      request = (async () => {
+        try {
+          const snapshot = await fetchDiffSnapshot(task, range);
+          if (key !== currentKeyRef.current || generation !== requestId.current) return;
+          setFiles(snapshot.files);
+          setHunks(snapshot.hunks);
+          setAnnotations(snapshot.annotations);
+          setBaseline(snapshot.baseline);
+          setWarning(snapshot.warning);
+          setError(null);
+        } catch (cause) {
+          if (key === currentKeyRef.current && generation === requestId.current) setError(String(cause));
+        } finally {
+          if (activeLoads.current.get(key)?.promise === request) activeLoads.current.delete(key);
+        }
+      })();
+      activeLoads.current.set(key, { promise: request, generation });
+      return request;
     },
     [range, task.host, task.id],
   );

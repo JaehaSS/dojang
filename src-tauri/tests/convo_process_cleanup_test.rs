@@ -186,7 +186,7 @@ fn an_escaped_background_child_flags_the_result() {
         "긴 인터프리터 경로에 밀려 인자가 잘리면 안 된다: {text}"
     );
     assert!(
-        !text.contains("PRAXIS_TURN_TOKEN"),
+        !text.contains("_TURN_TOKEN="),
         "마커 환경변수가 명령줄에 섞여 나왔다: {text}"
     );
     std::fs::remove_dir_all(&directory).ok();

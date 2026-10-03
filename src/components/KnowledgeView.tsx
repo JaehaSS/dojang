@@ -22,7 +22,7 @@ import { InsightSection } from "./ide/settings/InsightSection";
  */
 const DEFAULT_EMBED_EXCLUDE = ["Claude Code/**"];
 
-/** 설정 › 지식 그래프 — vault 연결과 동기화. */
+/** Wiki › 연결 — Obsidian vault 연결과 동기화. 원래 설정 › 지식 그래프였다(1.0 화면 정리). */
 export function KnowledgeView() {
   const [vaults, setVaults] = useState<KnowledgeVaultEntry[]>([]);
   // 구 위키의 "문서 자료" — Wiki 채널에서 내려와 여기 붙었다(계획 2026-09-13). 펼칠 때 처음 붙인다:
@@ -83,7 +83,9 @@ export function KnowledgeView() {
   };
 
   return (
-    <div className="flex-1 overflow-auto p-6">
+    // 설정 › 지식 탭이 바깥에서 스크롤·여백(overflow-auto p-4)을 맡는다 — 여기서
+    // 다시 flex-1/overflow-auto/p-6을 쓰면 이중 여백이 된다.
+    <div>
       <div className="max-w-3xl mx-auto">
         <h2 className="text-lg font-semibold mb-1">지식 그래프</h2>
         <p className="text-sm text-text-muted mb-4">

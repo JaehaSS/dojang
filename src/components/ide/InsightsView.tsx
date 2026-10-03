@@ -1,23 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import {
+  insightCards,
   insightsCompute,
-  retroDigestGet,
+  lessonThemes,
   taskPatterns,
   type Insights,
+  type RepoLessons,
+  type SignalCard,
   type InsightsRange,
-  type RetroDigest,
+  type Task,
   type TaskPatterns,
 } from "../../lib/ipc";
+import { markSeen } from "../../lib/insight-seen";
 import { modelCost, totalCost, fmtUsd } from "../../lib/pricing";
+import { useExperimentalFeatures } from "../../lib/experimental-features";
+import { cacheReadRate } from "./insights/cache";
+import { CacheObservability } from "./insights/CacheObservability";
 import { AgentSkillPanel } from "./insights/AgentSkillPanel";
 import { AreaChart } from "./insights/AreaChart";
-import { BacklogPanel } from "./insights/BacklogPanel";
+import { DiscoveryCards } from "./insights/DiscoveryCards";
 import { Heatmap } from "./insights/Heatmap";
+import { Icon } from "./icons";
+import { LessonThemes } from "./insights/LessonThemes";
 import { Punchcard } from "./insights/Punchcard";
 import { PlanCalendar } from "./insights/PlanCalendar";
-import { RetroPanel } from "./insights/RetroPanel";
 import { StackedBar } from "./insights/StackedBar";
-import { SummaryLanes } from "./insights/SummaryLanes";
 import { TaskPatternPanel } from "./insights/TaskPatternPanel";
 import { DeltaChip, Metric, RankBar, SectionHeader } from "./insights/parts";
 import { OutcomeInsightsPanel } from "./OutcomeInsightsPanel";
@@ -38,57 +45,60 @@ const RANGES: { v: InsightsRange; label: string }[] = [
 ];
 
 /**
- * 질문 축 5섹션 (설계 0054 DR-1).
+ * 발견 공간 3섹션 (설계 2026-09-28 §4, 슬라이스 T5).
  *
- * 이전에는 대상 축 6섹션(활동/분해/스킬/리듬/계획/AX 결과)이었다. 대상으로 나누면
- * **사용자가 질문을 스스로 만들어야** 숫자가 의미를 갖는다 — 그 부담을 화면으로 옮겼다.
+ * 이전에는 질문 축 4섹션(요약/지출/작업/방식, 설계 0054 DR-1)이었다. 요약 레인(`SummaryLanes`)을
+ * 발견 섹션(신호 카드)이 대체하면서 그 자리가 사라졌고, 남은 지출·작업·방식은 "근거 자료" 하나로
+ * 묶여 기본 접힌다 — 카드·교훈 주제가 먼저 오고, 손으로 다시 세고 싶을 때만 편다.
  */
 const SECTIONS = [
-  { id: "summary", label: "요약" },
-  { id: "cost", label: "지출" },
-  { id: "tasks", label: "작업" },
-  { id: "how", label: "방식" },
-  { id: "retro", label: "회고" },
+  { id: "discovery", label: "발견" },
+  { id: "lessons", label: "교훈 주제" },
+  { id: "evidence", label: "근거 자료" },
 ];
 
-/** 캐시 히트율 — 읽어온 캐시가 전체 입력성 토큰에서 차지하는 비율. */
-const cacheHitRate = (m: { cache_read_tokens: number; cache_creation_tokens: number; input_tokens: number }) =>
-  fmtPct(m.cache_read_tokens, m.cache_read_tokens + m.cache_creation_tokens + m.input_tokens);
+/** 근거 자료 안에 있어 펼쳐야만 스크롤 대상이 보이는 하위 섹션 id. */
+const EVIDENCE_SUBSECTIONS = new Set(["cost", "tasks", "how"]);
 
 interface InsightsViewProps {
-  onOpenMemory?: () => void;
-  /** 메모리 › 자기개선 탭을 여는 통로 — 제안 승인·거부는 거기서만 한다(ADR 0191). */
-  onOpenSelfImprove?: () => void;
   /** 계획 섹션에서 정본 편집처(Home)로 보내는 링크. 없으면 링크를 숨긴다. */
   onOpenHome?: () => void;
-  /** 회고를 읽었을 때 — 사이드바 신선도 점을 끄는 통로(설계 0054 DR-6). */
-  onRetroSeen?: (weekStart: number) => void;
+  /** 발견 카드의 `Tasks` 근거가 가리키는 작업을 찾는 대상(§8, 슬라이스 T4). */
+  tasks?: Task[];
+  /** 발견 카드에서 작업 근거 행을 눌렀을 때 그 작업을 연다. */
+  onOpenTask?: (task: Task) => void;
+  /** 발견 카드의 "조사 작업 시작" — 작성기를 문장으로 미리 채우되 전송하지 않는다. */
+  onStartResearch?: (instruction: string, repo: string | null) => void;
 }
 
-/** 사용량 인사이트 — 요약 → 지출 → 작업 → 방식 → 회고 순의 단일 스크롤 리포트. */
+/** 사용량 인사이트 — 발견 → 교훈 주제 → 근거 자료 순의 단일 스크롤 리포트(ADR 0033). */
 export function InsightsView({
-  onOpenMemory,
-  onOpenSelfImprove,
   onOpenHome,
-  onRetroSeen,
+  tasks = [],
+  onOpenTask,
+  onStartResearch,
 }: InsightsViewProps = {}): ReactElement {
+  const advancedFeatures = useExperimentalFeatures();
   const [range, setRange] = useState<InsightsRange>("all");
   const [data, setData] = useState<Insights | null>(null);
   const [patterns, setPatterns] = useState<TaskPatterns | null>(null);
-  const [retro, setRetro] = useState<RetroDigest | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [cards, setCards] = useState<SignalCard[]>([]);
+  const [lessons, setLessons] = useState<RepoLessons[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [active, setActive] = useState(SECTIONS[0].id);
+  // 근거 자료 — 기본 접힘(설계 §4). 발견·교훈 주제가 먼저 읽히게 두고, 다시 세고 싶을 때만 편다.
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // 근거 자료 하위 섹션으로 점프했는데 아직 접혀 있으면, 펼침이 반영된 다음 프레임에
+  // 스크롤해야 한다 — 접힌 채로는 대상 엘리먼트가 화면에 없다(§4 "펼치고 그 위치로 스크롤").
+  const pendingJumpRef = useRef<string | null>(null);
 
   useEffect(() => {
     let alive = true;
-    setLoading(true);
     setErr(null);
     insightsCompute(range)
       .then((d) => alive && setData(d))
-      .catch((e) => alive && setErr(String(e)))
-      .finally(() => alive && setLoading(false));
+      .catch((e) => alive && setErr(String(e)));
     return () => {
       alive = false;
     };
@@ -105,16 +115,38 @@ export function InsightsView({
     };
   }, [range]);
 
-  // 회고는 범위 칩과 무관하다 — 주 단위로 고정된 산출물이라 한 번만 읽는다.
+  // 발견 공간 신호 카드 — 독립적으로 로드한다. 실패하거나 비어 있으면 섹션 자체가
+  // 사라질 뿐, 다른 패널을 막지 않는다.
   useEffect(() => {
     let alive = true;
-    retroDigestGet(null)
-      .then((d) => alive && setRetro(d))
-      .catch(() => alive && setRetro(null));
+    // 이전 구간의 카드가 새 구간 문장처럼 남지 않게 먼저 비운다 — S6이 파일 집계를 기다린다.
+    setCards([]);
+    insightCards(range, -new Date().getTimezoneOffset() * 60)
+      .then((c) => {
+        if (!alive) return;
+        setCards(c);
+        // 이 화면을 열어 카드를 봤다는 사실 자체가 "읽음"이다(§4) — 사이드바 점은
+        // 이 (signal, repo) 쌍을 더는 새 발견으로 세지 않는다.
+        markSeen(c);
+      })
+      .catch(() => alive && setCards([]));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [range]);
+
+  // 교훈 주제 — `docs/lessons.json` 투영이 있는 저장소만 온다(§6.3). 신호 카드와 같은 원칙으로
+  // 독립 로드하고, 실패·공백이면 섹션 자체가 사라질 뿐 다른 패널을 막지 않는다.
+  useEffect(() => {
+    let alive = true;
+    setLessons([]);
+    lessonThemes(range, -new Date().getTimezoneOffset() * 60)
+      .then((r) => alive && setLessons(r))
+      .catch(() => alive && setLessons([]));
+    return () => {
+      alive = false;
+    };
+  }, [range]);
 
   // 스크롤 스파이 — 단일 스크롤에서도 "지금 어느 섹션인지"를 헤더가 알려준다.
   useEffect(() => {
@@ -134,11 +166,32 @@ export function InsightsView({
       if (el) obs.observe(el);
     }
     return () => obs.disconnect();
-  }, [data, patterns, retro]);
+  }, [data, patterns]);
 
-  const jump = useCallback((id: string) => {
+  const scrollToId = useCallback((id: string) => {
     scrollRef.current?.querySelector(`#${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, []);
+
+  /** 근거 자료 하위 섹션이면 먼저 펼치고, 펼침이 DOM에 반영된 뒤 스크롤한다(§4). */
+  const jump = useCallback(
+    (id: string) => {
+      if (EVIDENCE_SUBSECTIONS.has(id) && !evidenceOpen) {
+        pendingJumpRef.current = id;
+        setEvidenceOpen(true);
+        return;
+      }
+      scrollToId(id);
+    },
+    [evidenceOpen, scrollToId],
+  );
+
+  useEffect(() => {
+    if (!evidenceOpen || pendingJumpRef.current == null) return;
+    const id = pendingJumpRef.current;
+    pendingJumpRef.current = null;
+    // 펼침 직후 한 프레임은 아직 레이아웃이 반영되지 않아 대상이 화면 밖에 있을 수 있다.
+    requestAnimationFrame(() => scrollToId(id));
+  }, [evidenceOpen, scrollToId]);
 
   const cost = useMemo(() => (data ? totalCost(data.models) : null), [data]);
   const maxProjectTokens = useMemo(
@@ -160,7 +213,7 @@ export function InsightsView({
       on ? "bg-raised text-primary-bright" : "text-text-secondary hover:text-text"
     }`;
 
-  /** 트랜스크립트 기반 섹션(요약·지출·방식)이 쓸 수 있는 상태인가. */
+  /** 트랜스크립트 기반 섹션(지출·방식)이 쓸 수 있는 상태인가. */
   const hasUsage = data != null && data.messages > 0;
 
   return (
@@ -193,26 +246,45 @@ export function InsightsView({
       </div>
 
       <div className="max-w-5xl mx-auto px-7 pb-20">
+        {/* ── 발견 ────────────────────────────── */}
+        <div id="discovery" className="scroll-mt-20">
+          <DiscoveryCards
+            cards={cards}
+            onDismissed={(key) => setCards((cs) => cs.filter((c) => c.key !== key))}
+            tasks={tasks}
+            onOpenTask={onOpenTask ?? (() => {})}
+            onJumpToSpend={() => jump("cost")}
+            onStartResearch={onStartResearch ?? (() => {})}
+          />
+        </div>
+
+        {/* ── 교훈 주제 ────────────────────────── */}
+        <div id="lessons" className="scroll-mt-20">
+          <LessonThemes repos={lessons} />
+        </div>
+
         {err && <div className="text-status-failed text-sm mt-6 font-code">{err}</div>}
 
-        {/* ── 요약 ──────────────────────────────
-            질문 4레인. 셋 다 갖춰지기 전에는 레인이 각자 "집계 중"을 띄운다 — 요약 때문에
-            아래 섹션 전체가 막히면 안 된다. */}
-        <section className="pt-6">
-          <SectionHeader id="summary" title="요약" hint="질문 넷" />
-          {loading && !data ? (
-            <div className="text-text-muted text-sm py-8 text-center">집계 중…</div>
-          ) : data ? (
-            <SummaryLanes insights={data} patterns={patterns} retro={retro} onJump={jump} />
-          ) : (
-            <div className="text-text-muted text-sm border border-border rounded-lg p-6">
-              사용량 집계를 읽지 못했습니다.
-            </div>
-          )}
-        </section>
+        {/* ── 근거 자료 ────────────────────────────
+            현행 지출 · 작업 · 방식 리포트를 한 곳에 묶는다. 발견 · 교훈 주제가 먼저 읽히도록
+            기본 접힘이고, `jump()`가 하위 섹션(§ cost·tasks·how)으로 보낼 때만 스스로 편다(§4). */}
+        <section className="pt-12">
+          <button
+            type="button"
+            id="evidence"
+            data-testid="evidence-toggle"
+            onClick={() => setEvidenceOpen((v) => !v)}
+            aria-expanded={evidenceOpen}
+            className="w-full flex items-center justify-between gap-2 mb-3 scroll-mt-20 text-left"
+          >
+            <h2 className="text-lg font-semibold">근거 자료</h2>
+            <Icon name={evidenceOpen ? "chevronDown" : "chevronRight"} size={14} />
+          </button>
+
+          {evidenceOpen && <div data-testid="evidence-body">
 
         {/* ── 지출 ────────────────────────────── */}
-        <section className="pt-12">
+        <section className="pt-0">
           <SectionHeader
             id="cost"
             title="지출"
@@ -222,6 +294,7 @@ export function InsightsView({
                 : undefined
             }
           />
+          {data && advancedFeatures && <CacheObservability data={data} />}
           {!hasUsage ? (
             <div className="text-text-muted text-sm border border-border rounded-lg p-8 text-center">
               이 기간에 사용 기록이 없습니다.
@@ -282,7 +355,7 @@ export function InsightsView({
                 <div className="text-xs text-text-secondary mb-2">모델 점유율 (토큰)</div>
                 <StackedBar
                   segments={data.models.map((m) => ({
-                    key: m.model,
+                    key: `${m.provider}:${m.model}`,
                     label: prettyModel(m.model),
                     value: m.total_tokens,
                   }))}
@@ -295,7 +368,7 @@ export function InsightsView({
                     <tr className="text-xs text-text-secondary border-b border-border">
                       <th className="text-left font-medium px-3 py-2">모델</th>
                       <th className="text-right font-medium px-3 py-2">토큰</th>
-                      <th className="text-right font-medium px-3 py-2">캐시 히트</th>
+                      <th className="text-right font-medium px-3 py-2">캐시 읽기 비율</th>
                       <th className="text-right font-medium px-3 py-2">세션</th>
                       <th className="text-right font-medium px-3 py-2">메시지</th>
                       <th className="text-right font-medium px-3 py-2">비용</th>
@@ -305,15 +378,20 @@ export function InsightsView({
                     {data.models.map((m) => {
                       const c = modelCost(m);
                       return (
-                        <tr key={m.model} className="border-b border-border last:border-0">
+                        <tr key={`${m.provider}:${m.model}`} className="border-b border-border last:border-0">
                           <td className="px-3 py-2 truncate max-w-[180px]" title={m.model}>
-                            {prettyModel(m.model)}
+                            {prettyModel(m.model)} <span className="text-xs text-text-muted">{m.provider}</span>
                           </td>
                           <td className="px-3 py-2 text-right font-code">
                             {fmtTokens(m.total_tokens)}
                           </td>
                           <td className="px-3 py-2 text-right font-code text-text-secondary">
-                            {cacheHitRate(m)}
+                            <span title="관측된 입력 토큰 중 캐시에서 읽은 토큰의 비율">
+                              {cacheReadRate(m)}
+                            </span>
+                            <span className="block text-xs text-text-muted">
+                              관측 {fmtInt(m.cache_observed_messages ?? 0)} · 미관측 {fmtInt(m.cache_unknown_messages ?? 0)}
+                            </span>
                           </td>
                           <td className="px-3 py-2 text-right font-code text-text-secondary">
                             {fmtInt(m.sessions)}
@@ -363,13 +441,12 @@ export function InsightsView({
           <TaskPatternPanel data={patterns} />
 
           {/* 계획은 사용량이 아니라 day_items를 읽으므로 range 칩과 독립이다(설계 0023).
-              작업 섹션 안에 두는 이유는 "무엇을 했나"의 다른 얼굴이기 때문이다. */}
+              작업 섹션 안에 두는 이유는 "무엇을 했나"의 다른 얼굴이기 때문이다.
+              백로그(적체)는 홈이 정본이라 여기서 뺐다 — 편집 가능한 화면과 읽기 전용 화면에
+              같은 목록이 둘 있으면 어느 쪽을 봐야 하는지 갈린다(1.0 화면 정리). */}
           <div className="pt-8">
             <div className="text-xs text-text-secondary mb-3">계획 · 읽기 전용</div>
             <PlanCalendar onOpenHome={onOpenHome} />
-            {/* 백로그는 캘린더에 도트로 찍히지 않는다(날짜가 없으니까). 그래서 유일하게
-                안 보이는 계획이 되고, 안 보이는 계획은 무덤이 된다 (플랜 0054). */}
-            <BacklogPanel onOpenHome={onOpenHome} />
           </div>
         </section>
 
@@ -398,22 +475,20 @@ export function InsightsView({
           )}
 
           {/* AX 결과는 접어둔다. goal_contract를 쓴 작업이 사실상 없어 지표 다수가 0에
-              수렴하지만, 지표가 0인 것과 기능이 필요 없는 것은 다르다(설계 0054 DR-8). */}
-          <details className="mt-8 border border-border rounded-lg bg-surface">
-            <summary className="cursor-pointer select-none px-4 py-2.5 text-sm text-text-secondary">
-              AX 결과 — 작업 DB 기반 채택·성과 지표
-            </summary>
-            <div className="px-4 pb-4">
-              <OutcomeInsightsPanel range={range} onOpenMemory={onOpenMemory} />
-            </div>
-          </details>
+              수렴하지만, 지표가 0인 것과 기능이 필요 없는 것은 다르다(설계 0054 DR-8).
+              개발자용 실험 지표라 "고급·실험 기능 표시"가 꺼져 있으면 통째로 숨긴다. */}
+          {advancedFeatures && (
+            <details className="mt-8 border border-border rounded-lg bg-surface">
+              <summary className="cursor-pointer select-none px-4 py-2.5 text-sm text-text-secondary">
+                AX 결과 — 작업 DB 기반 채택·성과 지표
+              </summary>
+              <div className="px-4 pb-4">
+                <OutcomeInsightsPanel range={range} />
+              </div>
+            </details>
+          )}
         </section>
-
-        {/* ── 회고 ──────────────────────────────
-            범위 칩과 무관하다 — 주 단위로 고정된 산출물이다. */}
-        <section className="pt-12">
-          <SectionHeader id="retro" title="회고" hint="주간 · 서술은 생성, 수치는 집계" />
-          <RetroPanel initial={retro} onSeen={onRetroSeen} onOpenSelfImprove={onOpenSelfImprove} />
+          </div>}
         </section>
       </div>
     </div>

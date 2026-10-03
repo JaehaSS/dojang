@@ -16,18 +16,10 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
 }));
 vi.mock("../../lib/ipc", () => ({
-  codegraphCancel: vi.fn(),
-  codegraphImpactAt: vi.fn(),
-  codegraphIndex: vi.fn(),
-  codegraphStatus: vi.fn(),
   lspGoto: vi.fn(),
   lspStatus: vi.fn(),
   openLocalFile: mocks.openLocalFile,
   resolveAbsPath: mocks.resolveAbsPath,
-}));
-vi.mock("../../lib/code-wiki-ipc", () => ({
-  codewikiGenerate: vi.fn(),
-  codewikiStatus: vi.fn(),
 }));
 vi.mock("../../lib/transport", () => ({
   LOCAL_HOST: "local",

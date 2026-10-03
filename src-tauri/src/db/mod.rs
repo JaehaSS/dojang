@@ -330,6 +330,9 @@ pub async fn init_pool(db_path: &str) -> anyhow::Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE tasks ADD COLUMN resumed_session TEXT")
         .execute(&pool)
         .await;
+    add_column_if_missing(&pool, "tasks", "resumed_vendor TEXT").await?;
+    sqlx::query("UPDATE tasks SET resumed_vendor = 'claude' WHERE resumed_session IS NOT NULL AND resumed_vendor IS NULL")
+        .execute(&pool).await?;
     // 대화 이벤트 영속화 — 재진입/재시작 시 트랜스크립트 복원 (event = ConvoEvent 또는 user 메시지 JSON).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS convo_events (\
@@ -378,8 +381,8 @@ pub async fn init_pool(db_path: &str) -> anyhow::Result<SqlitePool> {
     .await?;
     // 토론 세션의 **우측 한 행**. 좌측(`tasks.agent`·`model`·`convo_session_id`)을 이중화하지
     // 않는다 — 두 원천이 생기면 전환·턴 에필로그가 한쪽만 갱신해 어긋난다(설계 §4-1).
-    // "토론 중"은 `status` 컬럼이 아니라 **이 행의 존재**로 파생된다. `side`는 값이 하나뿐이어도
-    // 남긴다: 3자 토론이 오면 PK 마이그레이션이 필요 없다.
+    // "토론 중"은 `status` 컬럼이 아니라 **이 행의 존재**로 파생된다. 자리마다 한 행이다
+    // (`right`, 3자면 `third`까지) — PK에 `side`를 둔 덕에 3자 토론에 마이그레이션이 없었다.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS convo_debate_sides (\
            task_id           INTEGER NOT NULL, \
@@ -436,68 +439,10 @@ pub async fn init_pool(db_path: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_task_output_task_sequence ON task_output(task_id, sequence)")
         .execute(&pool)
         .await?;
-    // 영수증은 **작업 시작마다 하나**다. 대화 후속 턴은 같은 task가 다시 시작하는 것이라,
-    // task_id를 기본키로 두면 두 번째 턴이 UNIQUE 위반으로 시작 게이트에서 막힌다.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS task_start_receipts (\
-           id INTEGER PRIMARY KEY AUTOINCREMENT, \
-           task_id INTEGER NOT NULL, \
-           projection_id INTEGER NOT NULL, \
-           source_checks_json TEXT NOT NULL, \
-           created_at INTEGER NOT NULL)",
-    )
-    .execute(&pool)
-    .await?;
-    // 구버전 DB(task_id PRIMARY KEY)를 시작별 영수증 스키마로 옮긴다.
-    // 트리거보다 **먼저** 돌아야 한다 — 트리거 이름이 구 테이블에 붙어 있으면
-    // 아래 CREATE TRIGGER IF NOT EXISTS가 조용히 건너뛰고, 재구축에서 사라진다.
-    migrate_task_start_receipts(&pool).await?;
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_task_start_receipts_task \
-         ON task_start_receipts(task_id)",
-    )
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS task_start_receipts_immutable \
-         BEFORE UPDATE ON task_start_receipts BEGIN \
-           SELECT RAISE(ABORT, 'task start receipt is immutable'); \
-         END",
-    )
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS task_start_receipts_no_delete \
-         BEFORE DELETE ON task_start_receipts BEGIN \
-           SELECT RAISE(ABORT, 'task start receipt cannot be deleted'); \
-         END",
-    )
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS task_start_receipt_checks (\
-           task_id INTEGER NOT NULL, \
-           check_id INTEGER NOT NULL UNIQUE, \
-           PRIMARY KEY (task_id, check_id))",
-    )
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS task_start_receipt_checks_immutable \
-         BEFORE UPDATE ON task_start_receipt_checks BEGIN \
-           SELECT RAISE(ABORT, 'task start evidence link is immutable'); \
-         END",
-    )
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS task_start_receipt_checks_no_delete \
-         BEFORE DELETE ON task_start_receipt_checks BEGIN \
-           SELECT RAISE(ABORT, 'task start evidence link cannot be deleted'); \
-         END",
-    )
-    .execute(&pool)
-    .await?;
+    // task_start_receipts·task_start_receipt_checks(옛 시작 영수증 원장)는 더는 만들지 않는다 — 검증할 메모리
+    // 투영 원장(memory_projection_journal)이 파일형 메모리(P1)로 대체되며 사라졌고,
+    // 시작 승격은 이제 영수증 없이 항상 통과한다(runner::queue::verify_and_promote_start).
+    // 기존 사용자 DB에 남은 표는 지우지 않는다(ADR: 데이터 삭제는 사용자 명령으로만).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS task_process_receipts (\
            id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -575,6 +520,26 @@ pub async fn init_pool(db_path: &str) -> anyhow::Result<SqlitePool> {
     // 크론 스케줄러(schedules) 마이그레이션은 schedule::migrate로 분리 — lib.rs `.setup()`에서 호출.
     // 구 텔레그램 테이블(channels/channel_secrets)은 2026-09-13 제거 — 기존 DB에 남아도 무해.
     crate::convo::interaction::migrate(&pool).await.map_err(anyhow::Error::msg)?;
+    // 2026-09-26 제거된 attention(할 일) 기능의 잔재를 걷는다. 트리거는 tasks·interaction
+    // 갱신마다 attention_* 테이블에 쓰므로, 테이블만 지우면 이후 모든 작업 갱신이 "no such table"로
+    // 죽는다 — 트리거를 먼저, 테이블을 그다음에 지운다. 둘 다 IF EXISTS라 새 DB에서도 무해하다.
+    for statement in [
+        "DROP TRIGGER IF EXISTS attention_task_after_update",
+        "DROP TRIGGER IF EXISTS attention_task_resumed",
+        "DROP TRIGGER IF EXISTS attention_interaction_open",
+        "DROP TRIGGER IF EXISTS attention_interaction_close",
+        "DROP TABLE IF EXISTS attention_dismissals",
+        "DROP TABLE IF EXISTS attention_failure_handled",
+        "DROP TABLE IF EXISTS attention_baselines",
+        "DROP TABLE IF EXISTS attention_occurrences",
+        "DROP TABLE IF EXISTS attention_condition_states",
+    ] {
+        sqlx::query(statement).execute(&pool).await?;
+    }
+    crate::task_results::migrate(&pool).await?;
+    crate::project_plan::migrate(&pool).await?;
+    crate::pipeline::db::migrate(&pool).await?;
+    crate::task_review::migrate(&pool).await?;
     Ok(pool)
 }
 
@@ -1531,6 +1496,8 @@ pub async fn switch_convo_agent(
     if task.state != state::AWAITING_REVIEW || task.mode != "conversation" {
         return Err(anyhow::anyhow!("검토 대기 중인 대화 작업만 에이전트를 바꿀 수 있습니다"));
     }
+    crate::convo::interaction::rebind_for_agent_tx(&mut tx, id, agent)
+        .await.map_err(anyhow::Error::msg)?;
     // 모델 관측은 작업 행의 현재 agent가 아니라 관측 당시의 agent에 귀속돼야 한다. 이미
     // 찍힌 agent는 보존해 여러 번 전환해도 과거 카탈로그가 다시 덮이지 않게 한다.
     sqlx::query(
@@ -1609,19 +1576,23 @@ pub async fn adopt_conversation(
     if id == source_id {
         anyhow::bail!("작업이 자기 자신을 이어받을 수 없습니다");
     }
-    sqlx::query(
-        "UPDATE tasks SET resumed_from = ?, \
-           convo_session_id = (SELECT convo_session_id FROM tasks WHERE id = ?), \
-           service_tier = (SELECT source.service_tier FROM tasks source WHERE source.id = ? AND source.agent IS tasks.agent AND COALESCE(source.model, '') = COALESCE(tasks.model, '')), \
-           updated_at = ? WHERE id = ?",
-    )
-    .bind(source_id)
-    .bind(source_id)
-    .bind(source_id)
-    .bind(now)
-    .bind(id)
-    .execute(pool)
-    .await?;
+    let updated = sqlx::query(
+        "UPDATE tasks SET resumed_from = ?1, \
+           convo_session_id = (SELECT convo_session_id FROM tasks WHERE id = ?1), \
+           service_tier = (SELECT source.service_tier FROM tasks source WHERE source.id = ?1 AND source.agent IS tasks.agent AND COALESCE(source.model, '') = COALESCE(tasks.model, '')), \
+           updated_at = ?2 WHERE id = ?3 \
+           AND EXISTS (SELECT 1 FROM tasks source WHERE source.id = ?1 AND COALESCE(source.agent, 'claude') = COALESCE(tasks.agent, 'claude')) \
+           AND NOT EXISTS (SELECT 1 FROM tasks live JOIN tasks source ON source.id = ?1 \
+             WHERE live.id != ?3 AND live.id != ?1 AND live.state NOT IN (?4, ?5, ?6) \
+             AND source.convo_session_id IS NOT NULL AND source.convo_session_id != '' \
+             AND ((live.convo_session_id = source.convo_session_id AND COALESCE(live.agent, 'claude') = COALESCE(source.agent, 'claude')) \
+               OR (live.resumed_session = source.convo_session_id AND live.resumed_vendor = COALESCE(source.agent, 'claude'))))",
+    ).bind(source_id).bind(now).bind(id)
+    .bind(state::DONE).bind(state::FAILED).bind(state::DISCARDED)
+    .execute(pool).await?;
+    if updated.rows_affected() == 0 {
+        anyhow::bail!("세션 승계 충돌 또는 공급자 불일치");
+    }
     let (inherited,): (Option<String>,) =
         sqlx::query_as("SELECT convo_session_id FROM tasks WHERE id = ?")
             .bind(id)
@@ -1659,7 +1630,7 @@ pub async fn resume_chain(pool: &SqlitePool, id: i64) -> anyhow::Result<Vec<i64>
     Ok(chain)
 }
 
-/// 토론 사이드 한 행. 우측만 저장되므로 `task_id` 하나로 찾는다.
+/// 토론 사이드 한 행 — 좌측이 아닌 자리 하나. 좌측의 원천은 `tasks`다.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct DebateSideRow {
     pub task_id: i64,
@@ -1669,38 +1640,60 @@ pub struct DebateSideRow {
     pub vendor_session_id: Option<String>,
 }
 
-/// 이 작업의 토론 사이드 행(없으면 None = 토론 중이 아님).
-pub async fn debate_side(
-    pool: &SqlitePool,
-    task_id: i64,
-) -> anyhow::Result<Option<DebateSideRow>> {
-    sqlx::query_as("SELECT * FROM convo_debate_sides WHERE task_id = ? ORDER BY side LIMIT 1")
-        .bind(task_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(Into::into)
+/// 이 작업의 토론 사이드 행 전부, 자리 순서(빈 배열 = 토론 중이 아님).
+///
+/// 정렬은 SQL이 아니라 `Side::index()`로 한다 — `ORDER BY side`는 알파벳 순이 자리 순과
+/// 우연히 맞을 뿐이다. 알 수 없는 자리 값이나 빈틈 있는 조합(`third`만 등)은 **오류다**:
+/// 받아들이면 "마지막 자리"가 틀어져 라운드가 오르지 않는다(설계 2026-09-23 D1).
+pub async fn debate_sides(pool: &SqlitePool, task_id: i64) -> anyhow::Result<Vec<DebateSideRow>> {
+    let rows: Vec<DebateSideRow> =
+        sqlx::query_as("SELECT * FROM convo_debate_sides WHERE task_id = ?")
+            .bind(task_id)
+            .fetch_all(pool)
+            .await?;
+    let mut seated = rows
+        .into_iter()
+        .map(|row| {
+            crate::convo::Side::parse(&row.side)
+                .map(|side| (side, row.clone()))
+                .ok_or_else(|| anyhow::anyhow!("알 수 없는 토론 자리: {}", row.side))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if seated.is_empty() {
+        return Ok(Vec::new());
+    }
+    seated.sort_by_key(|(side, _)| side.index());
+    let seats = std::iter::once(crate::convo::Side::Left)
+        .chain(seated.iter().map(|(side, _)| *side))
+        .collect::<Vec<_>>();
+    if !crate::convo::debate::valid_seats(&seats) {
+        anyhow::bail!("토론 자리 조합이 어긋났습니다: {seats:?}");
+    }
+    Ok(seated.into_iter().map(|(_, row)| row).collect())
 }
 
-/// 토론 사이드 행 생성. 벤더 세션은 아직 없다 — 그 면의 첫 턴이 판다.
-/// 같은 `(task_id, side)` 재삽입은 PK 충돌로 **실패한다**: 이미 도는 토론을 조용히 덮으면
-/// 살아 있는 우측 세션 id가 사라진다.
-pub async fn insert_debate_side(
+/// 토론 사이드 행들을 한 트랜잭션으로 생성. 벤더 세션은 아직 없다 — 그 자리의 첫 턴이 판다.
+/// 같은 `(task_id, side)` 재삽입은 PK 충돌로 **실패하고** 아무 행도 남지 않는다: 이미 도는
+/// 토론을 조용히 덮으면 살아 있는 사이드 세션 id가 사라진다.
+pub async fn insert_debate_sides(
     pool: &SqlitePool,
     task_id: i64,
-    side: crate::convo::Side,
-    agent: &str,
-    model: Option<&str>,
+    sides: &[(crate::convo::Side, &str, Option<&str>)],
 ) -> anyhow::Result<()> {
-    sqlx::query(
-        "INSERT INTO convo_debate_sides (task_id, side, agent, model, vendor_session_id) \
-         VALUES (?, ?, ?, ?, NULL)",
-    )
-    .bind(task_id)
-    .bind(side.as_str())
-    .bind(agent)
-    .bind(model)
-    .execute(pool)
-    .await?;
+    let mut tx = pool.begin().await?;
+    for (side, agent, model) in sides {
+        sqlx::query(
+            "INSERT INTO convo_debate_sides (task_id, side, agent, model, vendor_session_id) \
+             VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind(task_id)
+        .bind(side.as_str())
+        .bind(*agent)
+        .bind(*model)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1722,15 +1715,10 @@ pub async fn set_debate_side_session(
     Ok(())
 }
 
-/// 사이드 행 삭제 = 토론 종료. 없어도 성공한다(멱등).
-pub async fn delete_debate_side(
-    pool: &SqlitePool,
-    task_id: i64,
-    side: crate::convo::Side,
-) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM convo_debate_sides WHERE task_id = ? AND side = ?")
+/// 사이드 행 전부 삭제 = 토론 종료. 없어도 성공한다(멱등).
+pub async fn delete_debate_sides(pool: &SqlitePool, task_id: i64) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM convo_debate_sides WHERE task_id = ?")
         .bind(task_id)
-        .bind(side.as_str())
         .execute(pool)
         .await?;
     Ok(())
@@ -1923,21 +1911,20 @@ pub async fn convo_event_count(pool: &SqlitePool, task_id: i64) -> anyhow::Resul
 /// 술어는 `convo_session_id`·`resumed_session` 양쪽을 본다(설계 2026-09-17 결정 5) — 턴
 /// 에필로그가 `convo_session_id`를 매 턴 덮어쓰므로(`set_convo_session`), 그것만 보면 외부
 /// 승계 작업이 몇 턴 지난 뒤에는 이 가드에서 조용히 빠진다.
-pub async fn live_task_with_session(
-    pool: &SqlitePool,
-    session_id: &str,
+pub async fn live_task_with_session(pool: &SqlitePool, session_id: &str) -> anyhow::Result<Option<i64>> {
+    live_task_with_session_vendor(pool, "claude", session_id).await
+}
+
+pub async fn live_task_with_session_vendor(
+    pool: &SqlitePool, vendor: &str, session_id: &str,
 ) -> anyhow::Result<Option<i64>> {
     let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM tasks WHERE (convo_session_id = ? OR resumed_session = ?) \
-         AND state NOT IN (?, ?, ?) ORDER BY id ASC LIMIT 1",
-    )
-    .bind(session_id)
-    .bind(session_id)
-    .bind(state::DONE)
-    .bind(state::FAILED)
-    .bind(state::DISCARDED)
-    .fetch_optional(pool)
-    .await?;
+        "SELECT id FROM tasks WHERE ((convo_session_id = ?1 AND COALESCE(agent, 'claude') = ?2) \
+         OR (resumed_session = ?1 AND resumed_vendor = ?2)) \
+         AND state NOT IN (?3, ?4, ?5) ORDER BY id ASC LIMIT 1",
+    ).bind(session_id).bind(vendor)
+    .bind(state::DONE).bind(state::FAILED).bind(state::DISCARDED)
+    .fetch_optional(pool).await?;
     Ok(row.map(|(id,)| id))
 }
 
@@ -1987,42 +1974,31 @@ impl From<anyhow::Error> for AdoptError {
 /// 돌려준다 — 실패가 이미 확정된 뒤의 조회라 TOCTOU가 없다. 그 사이 대상 작업이 끝나는 등
 /// 드문 경우로 충돌 행을 못 찾으면 일반 DB 에러로 돌려준다.
 pub async fn adopt_external_session(
-    pool: &SqlitePool,
-    task_id: i64,
-    session_id: &str,
-    now: i64,
+    pool: &SqlitePool, task_id: i64, session_id: &str, now: i64,
 ) -> Result<(), AdoptError> {
-    let result = sqlx::query(
-        "UPDATE tasks SET convo_session_id = ?1, resumed_session = ?1, updated_at = ?2 \
-         WHERE id = ?3 AND NOT EXISTS ( \
-           SELECT 1 FROM tasks live \
-           WHERE live.id != ?3 \
-             AND (live.convo_session_id = ?1 OR live.resumed_session = ?1) \
-             AND live.state NOT IN (?4, ?5, ?6) \
-         )",
-    )
-    .bind(session_id)
-    .bind(now)
-    .bind(task_id)
-    .bind(state::DONE)
-    .bind(state::FAILED)
-    .bind(state::DISCARDED)
-    .execute(pool)
-    .await
-    .map_err(|error| AdoptError::Db(error.into()))?;
+    adopt_external_session_vendor(pool, task_id, "claude", session_id, now).await
+}
 
-    if result.rows_affected() > 0 {
-        return Ok(());
+pub async fn adopt_external_session_vendor(
+    pool: &SqlitePool, task_id: i64, vendor: &str, session_id: &str, now: i64,
+) -> Result<(), AdoptError> {
+    if !matches!(vendor, "claude" | "codex") {
+        return Err(AdoptError::Db(anyhow::anyhow!("지원하지 않는 세션 공급자")));
     }
-
-    match live_task_with_session(pool, session_id)
-        .await
-        .map_err(AdoptError::Db)?
-    {
-        Some(conflict_id) => Err(AdoptError::Conflict(conflict_id)),
-        None => Err(AdoptError::Db(anyhow::anyhow!(
-            "세션 승계에 실패했습니다 — 대상 작업을 찾을 수 없습니다"
-        ))),
+    let result = sqlx::query(
+        "UPDATE tasks SET convo_session_id = ?1, resumed_session = ?1, resumed_vendor = ?7, updated_at = ?2 \
+         WHERE id = ?3 AND COALESCE(agent, 'claude') = ?7 AND NOT EXISTS ( \
+           SELECT 1 FROM tasks live WHERE live.id != ?3 \
+             AND ((live.convo_session_id = ?1 AND COALESCE(live.agent, 'claude') = ?7) \
+                  OR (live.resumed_session = ?1 AND live.resumed_vendor = ?7)) \
+             AND live.state NOT IN (?4, ?5, ?6))",
+    ).bind(session_id).bind(now).bind(task_id)
+    .bind(state::DONE).bind(state::FAILED).bind(state::DISCARDED).bind(vendor)
+    .execute(pool).await.map_err(|e| AdoptError::Db(e.into()))?;
+    if result.rows_affected() > 0 { return Ok(()); }
+    match live_task_with_session_vendor(pool, vendor, session_id).await.map_err(AdoptError::Db)? {
+        Some(id) => Err(AdoptError::Conflict(id)),
+        None => Err(AdoptError::Db(anyhow::anyhow!("세션 승계 대상 또는 공급자가 일치하지 않습니다"))),
     }
 }
 
@@ -2389,66 +2365,17 @@ pub async fn claim_oldest_queued_task(pool: &SqlitePool, now: i64) -> anyhow::Re
     Ok(None)
 }
 
-/// 구버전 `task_start_receipts`(task_id PRIMARY KEY)를 시작별 영수증 스키마로 재구축한다.
+/// Starting lease를 Running으로 승격한다.
 ///
-/// 기존 행은 그대로 옮긴다 — 원장은 지우지 않는다는 것이 이 테이블의 계약이다(ADR 0029).
-/// SQLite는 기본키를 바꿀 수 없으므로 rename → 재생성 → 복사 → drop 순서를 쓴다.
-/// `DROP TABLE`은 DELETE 트리거를 발화시키지 않으므로 no-delete 계약과 충돌하지 않는다.
-async fn migrate_task_start_receipts(pool: &SqlitePool) -> anyhow::Result<()> {
-    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
-        .bind("task_start_receipts")
-        .fetch_all(pool)
-        .await?;
-    if columns.iter().any(|name| name == "id") {
-        return Ok(());
-    }
-    let mut transaction = pool.begin().await?;
-    // rename하면 기존 트리거도 함께 따라간다. 이후 DROP으로 테이블과 함께 사라진다.
-    sqlx::query("ALTER TABLE task_start_receipts RENAME TO task_start_receipts_legacy")
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query(
-        "CREATE TABLE task_start_receipts (\
-           id INTEGER PRIMARY KEY AUTOINCREMENT, \
-           task_id INTEGER NOT NULL, \
-           projection_id INTEGER NOT NULL, \
-           source_checks_json TEXT NOT NULL, \
-           created_at INTEGER NOT NULL)",
-    )
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO task_start_receipts (task_id, projection_id, source_checks_json, created_at) \
-         SELECT task_id, projection_id, source_checks_json, created_at \
-         FROM task_start_receipts_legacy ORDER BY task_id",
-    )
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query("DROP TABLE task_start_receipts_legacy")
-        .execute(&mut *transaction)
-        .await?;
-    transaction.commit().await?;
-    Ok(())
-}
-
-/// 검증된 Starting lease만 immutable receipt와 함께 Running으로 승격한다.
-///
-/// `receipt`가 `None`이면 파일형 메모리 투영이다(설계 2026-09-13) — 검증할 원장이 없어
-/// 영수증을 만들 재료 자체가 없다. 그때는 상태 전이만 하고 영수증 행을 남기지 않는다.
+/// 메모리 정본은 창고 안 파일이다(설계 2026-09-13, P1) — 검증할 투영 원장이 없으므로
+/// 시작 영수증 없이 항상 승격한다. 옛 DB 투영(P2) 재검증(`validate_start_receipt`)은
+/// `memory_projection_journal`·`memory_evidence`가 사라지며 함께 제거됐다.
 pub async fn promote_starting_task(
     pool: &SqlitePool,
     task_id: i64,
-    receipt: Option<(i64, &str)>,
     now: i64,
 ) -> anyhow::Result<bool> {
-    let check_ids: Vec<i64> = match receipt {
-        Some((_, source_checks_json)) => serde_json::from_str(source_checks_json)?,
-        None => Vec::new(),
-    };
     let mut transaction = pool.begin().await?;
-    if let Some((projection_id, _)) = receipt {
-        validate_start_receipt(&mut transaction, task_id, projection_id, &check_ids, now).await?;
-    }
     let result = sqlx::query(
         "UPDATE tasks SET state = ?, updated_at = ? WHERE id = ? AND state = ? \
          AND NOT EXISTS (SELECT 1 FROM review_process_leases lease WHERE lease.task_id = tasks.id)",
@@ -2464,25 +2391,6 @@ pub async fn promote_starting_task(
         return Ok(false);
     }
     crate::notifications::clear_cancel_tx(&mut transaction, task_id).await?;
-    for check_id in &check_ids {
-        sqlx::query("INSERT INTO task_start_receipt_checks (task_id, check_id) VALUES (?, ?)")
-            .bind(task_id)
-            .bind(check_id)
-            .execute(&mut *transaction)
-            .await?;
-    }
-    if let Some((projection_id, source_checks_json)) = receipt {
-        sqlx::query(
-            "INSERT INTO task_start_receipts \
-             (task_id, projection_id, source_checks_json, created_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(task_id)
-        .bind(projection_id)
-        .bind(source_checks_json)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
-    }
     sqlx::query(
         "INSERT INTO runner_events (task_id, ts, kind, detail) VALUES (?, ?, 'running', NULL)",
     )
@@ -2492,73 +2400,6 @@ pub async fn promote_starting_task(
     .await?;
     transaction.commit().await?;
     Ok(true)
-}
-
-async fn validate_start_receipt(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    task_id: i64,
-    projection_id: i64,
-    check_ids: &[i64],
-    now: i64,
-) -> anyhow::Result<()> {
-    let journal: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM memory_projection_journal \
-         WHERE id = ? AND task_id = ? AND state = 'applied'",
-    )
-    .bind(projection_id)
-    .bind(task_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    if journal.is_none() {
-        anyhow::bail!("start receipt does not match an applied task projection");
-    }
-    let expected: Vec<i64> = sqlx::query_scalar(
-        "SELECT e.id FROM memory_evidence e JOIN memory_injections i \
-           ON i.memory_id = e.memory_id AND i.version = e.version \
-         WHERE i.task_id = ? AND i.projection_id = ?",
-    )
-    .bind(task_id)
-    .bind(projection_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    let unique_checks = check_ids.iter().collect::<std::collections::HashSet<_>>();
-    if expected.len() != check_ids.len() || unique_checks.len() != check_ids.len() {
-        anyhow::bail!("start receipt does not cover projected evidence exactly once");
-    }
-    let mut actual = std::collections::HashSet::new();
-    for check_id in check_ids {
-        actual.insert(validate_start_check(tx, task_id, projection_id, *check_id, now).await?);
-    }
-    if actual != expected.into_iter().collect() {
-        anyhow::bail!("start receipt evidence identities do not match the projection");
-    }
-    Ok(())
-}
-
-async fn validate_start_check(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    task_id: i64,
-    projection_id: i64,
-    check_id: i64,
-    now: i64,
-) -> anyhow::Result<i64> {
-    let evidence_id: Option<i64> = sqlx::query_scalar(
-        "SELECT c.evidence_id FROM memory_evidence_checks c \
-         JOIN memory_evidence e ON e.id = c.evidence_id \
-         JOIN memory_injections i ON i.memory_id = c.memory_id AND i.version = c.version \
-         WHERE c.id = ? AND c.status = 'valid' AND c.checked_at = ? \
-           AND e.status = 'valid' AND e.checked_at = ? \
-           AND i.task_id = ? AND i.projection_id = ?",
-    )
-    .bind(check_id)
-    .bind(now)
-    .bind(now)
-    .bind(task_id)
-    .bind(projection_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    evidence_id
-        .ok_or_else(|| anyhow::anyhow!("start receipt contains untrusted or unrelated check"))
 }
 
 pub async fn fail_starting_task(
@@ -2893,16 +2734,6 @@ pub async fn observed_models(pool: &SqlitePool) -> anyhow::Result<Vec<ObservedMo
     .fetch_all(pool)
     .await?;
     Ok(rows)
-}
-
-/// 가장 최근에 만들어진 작업의 repo — 저장소를 지정하지 않은 스케줄이 돌 자리를 고를 때 쓴다.
-/// 작업이 하나도 없으면 `None`.
-pub async fn latest_task_repo(pool: &SqlitePool) -> anyhow::Result<Option<String>> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT repo FROM tasks WHERE repo != '' ORDER BY created_at DESC LIMIT 1")
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.map(|(r,)| r))
 }
 
 /// 이미 사용된 repo 경로들(중복 제거) — 외부기원(봇/크론) 작업의 repo 화이트리스트 근거.

@@ -6,73 +6,12 @@ import {
   type ActivityItem,
   type SubagentEntry,
 } from "../../lib/activity";
-import { proposalRefine, type ConvoStatus, type Task } from "../../lib/ipc";
+import type { ConvoStatus, Task } from "../../lib/ipc";
 import { Icon } from "./icons";
 import { WorkContextPanel, type WorkContextDiff } from "./WorkContextPanel";
 
 /** 플로팅 채널은 좁은 폭의 오버레이라 목록 섹션을 접는다(설계 0018 D3). */
 export type ActivityDensity = "rail" | "panel";
-
-/** 회고 호출 결과 — 자리를 고정해 버튼 위치가 흔들리지 않게 한 줄로만 표시한다. */
-type RefineState =
-  | { kind: "idle" }
-  | { kind: "running" }
-  | { kind: "created" }
-  | { kind: "empty" }
-  | { kind: "error"; message: string };
-
-const refineMessage = (s: RefineState): string | null => {
-  switch (s.kind) {
-    case "created":
-      return "제안이 올라왔습니다 — 자기개선 화면에서 검토하세요.";
-    case "empty":
-      return "회고할 대화 내용이 없습니다.";
-    case "error":
-      return s.message;
-    default:
-      return null;
-  }
-};
-
-/** 사용자 호출형 반성 — 자동 캡처(opt-in)를 켜지 않아도 이 작업만 회고한다. */
-function RefineButton({ taskId, disabled }: { taskId: number; disabled: boolean }): ReactElement {
-  const [state, setState] = useState<RefineState>({ kind: "idle" });
-  const message = refineMessage(state);
-
-  const run = async () => {
-    setState({ kind: "running" });
-    try {
-      const id = await proposalRefine(taskId);
-      setState(id == null ? { kind: "empty" } : { kind: "created" });
-    } catch (e) {
-      setState({ kind: "error", message: String(e) });
-    }
-  };
-
-  return (
-    <div className="shrink-0 border-t border-border px-3 py-2">
-      <button
-        type="button"
-        className="h-7 w-full rounded-md text-xs text-text-secondary hover:bg-border hover:text-text disabled:opacity-50"
-        onClick={run}
-        disabled={disabled || state.kind === "running"}
-        // 비용이 드는 호출이라 무엇이 일어나는지 미리 알린다.
-        title="이 대화를 claude로 회고해 검토용 제안을 만듭니다 (비용 발생)"
-      >
-        {state.kind === "running" ? "회고하는 중…" : "이 작업 회고하기"}
-      </button>
-      {message && (
-        <div
-          className={`mt-1 text-[11px] break-words ${
-            state.kind === "error" ? "text-status-failed" : "text-text-muted"
-          }`}
-        >
-          {message}
-        </div>
-      )}
-    </div>
-  );
-}
 
 interface Props {
   task: Task;
@@ -293,9 +232,6 @@ export function ActivityPanel({
           )}
         </section>
       )}
-
-      {/* 회고는 좁은 채널 오버레이에 넣기엔 결과 문구가 길다 — 패널 밀도에서만. */}
-      {!rail && <RefineButton taskId={task.id} disabled={busy} />}
 
       {/* 플로팅 채널 아래에 세션이 있으므로 별도 진입점은 패널 밀도에서만 노출. */}
       {!rail && onOpenConversation && (

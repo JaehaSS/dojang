@@ -97,10 +97,11 @@ vi.mock("../../lib/use-theme", () => ({ useTheme: () => ({ id: "praxis-dark", ki
 
 // Monaco는 jsdom에서 뜨지 않는다. 창 배선을 보는 테스트이므로 받은 props만 드러낸다.
 vi.mock("../QuickOpen", () => ({
-  QuickOpen: (props: { open: boolean; scopes?: string[]; editorSearch?: { scopeLabel: string; contentAvailable: boolean } }) =>
+  QuickOpen: (props: { open: boolean; scopes?: string[]; initialEditorTab?: string; editorSearch?: { scopeLabel: string; contentAvailable: boolean } }) =>
     props.open ? (
       <div
         data-testid="quick-open"
+        data-initial-tab={props.initialEditorTab ?? "all"}
         data-scopes={(props.scopes ?? []).join(",")}
         data-search-scope={props.editorSearch?.scopeLabel ?? ""}
         data-content-search={String(props.editorSearch?.contentAvailable ?? false)}
@@ -770,6 +771,59 @@ describe("EditorWindow", () => {
       await Promise.resolve();
     });
     await shiftTap();
+
+    expect(container?.querySelector("[data-testid=quick-open]")).toBeNull();
+  });
+
+  it("Shift 더블탭은 전체 범위로 연다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, session());
+    await shiftTap();
+    await shiftTap();
+
+    expect(container?.querySelector("[data-testid=quick-open]")?.getAttribute("data-initial-tab")).toBe("all");
+  });
+
+  /** macOS에서 ⌥F는 `ƒ`를 입력한다 — 에디터가 키를 받기 전에 캡처 단계에서 가로채야 한다. */
+  const altF = () =>
+    new KeyboardEvent("keydown", { key: "ƒ", code: "KeyF", altKey: true, bubbles: true, cancelable: true });
+
+  it("⌥F가 Quick Open을 파일 범위로 열고, 에디터에는 글자를 넘기지 않는다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, session());
+    const editor = document.createElement("textarea");
+    const reached = vi.fn();
+    editor.addEventListener("keydown", reached);
+    container?.append(editor);
+    editor.focus();
+
+    const event = altF();
+    await act(async () => {
+      editor.dispatchEvent(event);
+      await Promise.resolve();
+    });
+
+    const quick = container?.querySelector("[data-testid=quick-open]");
+    expect(quick).not.toBeNull();
+    expect(quick?.getAttribute("data-initial-tab")).toBe("file");
+    expect(event.defaultPrevented).toBe(true);
+    expect(reached).not.toHaveBeenCalled();
+  });
+
+  it("다른 수식키가 섞인 F는 파일 찾기가 아니다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, session());
+
+    for (const extra of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }]) {
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyF", altKey: true, ...extra }));
+        await Promise.resolve();
+      });
+    }
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "f", code: "KeyF" }));
+      await Promise.resolve();
+    });
 
     expect(container?.querySelector("[data-testid=quick-open]")).toBeNull();
   });

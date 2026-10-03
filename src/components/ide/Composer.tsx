@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Icon, type IconName } from "./icons";
 import { RepoPicker, type RecentRepo } from "./RepoPicker";
 import { BranchPicker } from "./BranchPicker";
@@ -15,6 +15,7 @@ import {
   gitStatus,
   gitInit,
   gitBranches,
+  gitCheckoutBranch,
   type BranchList,
   useWorktreeOverrideGet,
   useWorktreeOverrideClear,
@@ -50,6 +51,7 @@ import type { InterviewState } from "../../lib/interview";
 import type { GrillState } from "../../lib/grill";
 import { InterviewPanel } from "./InterviewPanel";
 import { useTextareaUndo } from "./useTextareaUndo";
+import { EnglishPromptAssistPanel, useEnglishPromptAssist } from "./useEnglishPromptAssist";
 import {
   isolationChipState,
   isolationForced,
@@ -58,16 +60,22 @@ import {
   type IsolationChoice,
 } from "./new-task-isolation";
 import { stageLabel, ensembleLabel, elapsedLabel, type CreationState } from "../../lib/creation-stage";
-import { VaultReferences } from "../knowledge-vault/VaultReferences";
 import { QUESTION_AGENTS } from "../../lib/conversation-interaction";
+import type { SessionStyle } from "../../lib/session-style";
+
+/** off: 대화(턴마다 `-p`) · questions: 대화 + 질문 응답 · approvals: 대화 + 질문 응답 + 실행 전 승인(Claude만).
+ *  터미널/대화 자체는 설정 › 작업 실행의 세션 방식이 정한다(`session-style.ts`). */
+type InteractionMode = "off" | "questions" | "approvals";
 
 interface Props {
   serviceTier?: "default" | "fast";
   onServiceTierChange?: (value: "default" | "fast") => void;
   questionsEnabled?: boolean;
   onQuestionsEnabledChange?: (value: boolean) => void;
-  vaultClientRef?: string;
-  onVaultMutationPendingChange?: (pending: boolean) => void;
+  approvalsEnabled?: boolean;
+  onApprovalsEnabledChange?: (value: boolean) => void;
+  /** 설정의 세션 방식. 터미널이면 대화 세부 선택 대신 터미널 표시만 둔다 — 이어받기는 대화로만 잇는다. */
+  sessionStyle?: SessionStyle;
   /** 새 세션이 살 환경. 생성 시점에 고정되므로 여기서만 고를 수 있다 (ADR 0133). */
   host: HostId;
   setHost: (host: HostId) => void;
@@ -139,8 +147,6 @@ const Chip = ({ icon, label }: { icon: IconName; label: string }) => (
 
 /** 홈 하단 컴포저 — 레포/브랜치/워크트리 칩 + 지시문 입력으로 새 작업 생성. */
 export function Composer({
-  vaultClientRef,
-  onVaultMutationPendingChange,
   host,
   repo,
   setRepo,
@@ -158,6 +164,9 @@ export function Composer({
   onServiceTierChange,
   questionsEnabled = false,
   onQuestionsEnabledChange,
+  approvalsEnabled = false,
+  onApprovalsEnabledChange,
+  sessionStyle = "conversation",
   instruction,
   setInstruction,
   interview,
@@ -194,6 +203,8 @@ export function Composer({
     ref: inputRef,
     resetKey: host,
   });
+  // 호스트를 바꾸면 초안이 갈리므로 진행 중인 ⌘J 결과를 버린다 — 되돌리기와 같은 좌표.
+  const assist = useEnglishPromptAssist({ value: instruction, onChange: setInstruction, draftKey: host });
   const [skillOpen, setSkillOpen] = useState(false);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [skillSel, setSkillSel] = useState(0);
@@ -212,11 +223,6 @@ export function Composer({
   const [initBusy, setInitBusy] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const [pasteError, setPasteError] = useState<string | null>(null);
-  const [vaultMutationPending, setVaultMutationPending] = useState(false);
-  const handleVaultMutationPending = useCallback((pending: boolean) => {
-    setVaultMutationPending(pending);
-    onVaultMutationPendingChange?.(pending);
-  }, [onVaultMutationPendingChange]);
   // 경과초 — 낭독되는 단계 문구와 분리된 aria-hidden 보조 정보라 250ms마다 갱신해도 된다.
   const [elapsedMs, setElapsedMs] = useState(0);
   useEffect(() => {
@@ -242,6 +248,10 @@ export function Composer({
   const forced = isolationForced("local", agents.length);
   const chipState = isolationChipState(wtOverride, useWorktree);
   const [branches, setBranches] = useState<BranchList>(emptyBranches);
+  const [checkingOut, setCheckingOut] = useState(false);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const repoRef = useRef(repo);
+  repoRef.current = repo;
   // 격리 실행은 선택 base에서 분기하고, 직접 실행은 선택 브랜치로 체크아웃한 뒤 시작한다.
   const canPickBranch = isRepo === true && branches.branches.length > 0;
 
@@ -364,6 +374,7 @@ export function Composer({
 
   // base 후보 브랜치 — 레포를 바꿀 때마다 다시 읽는다.
   useEffect(() => {
+    setCheckoutError(null);
     if (!repo.trim() || !connected) {
       setBranches(emptyBranches);
       return;
@@ -381,6 +392,23 @@ export function Composer({
       stale = true;
     };
   }, [repo, connected]);
+
+  // 피커에서 바로 체크아웃한다. 전환 뒤에는 고른 base를 비워 새 현재 브랜치를 따르게 한다.
+  const checkoutBranch = async (branch: string) => {
+    const target = repo;
+    setCheckingOut(true);
+    setCheckoutError(null);
+    try {
+      const list = await gitCheckoutBranch(target, branch);
+      if (repoRef.current !== target) return;
+      setBranches(list);
+      setBaseBranch("");
+    } catch (error) {
+      if (repoRef.current === target) setCheckoutError(String(error));
+    } finally {
+      setCheckingOut(false);
+    }
+  };
 
   // 레포별 격리 오버라이드 — 레포를 바꿀 때마다 다시 읽는다.
   useEffect(() => {
@@ -478,6 +506,8 @@ export function Composer({
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (undo.onKeyDown(e)) return;
+    // ⌘J 영어로 다듬기 — 조합 중이면 스스로 무시한다. 생성 중(readOnly)에는 초안을 바꾸지 않는다.
+    if (!busy && assist.onKeyDown(e)) return;
     // Shift+Enter는 메뉴가 열려 있어도 브라우저 기본 줄바꿈을 그대로 허용한다.
     if (e.key === "Enter" && e.shiftKey) return;
     // /스킬 드롭다운 (↑↓/Tab/Esc — Enter는 태스크 생성으로 fallthrough).
@@ -510,7 +540,18 @@ export function Composer({
     if (canCreate) onCreate();
   };
 
-  const canCreate = !busy && !vaultMutationPending && connected && !!repo.trim() && !!instruction.trim();
+  const canCreate = !busy && connected && !!repo.trim() && !!instruction.trim();
+  const showResume = hostCapabilities(activeHost).sessionHomeResume;
+  const showInteraction = host === LOCAL_HOST && agents.length === 1 && QUESTION_AGENTS.includes(agents[0]) && !!onQuestionsEnabledChange;
+  const canApprove = agents[0] === "claude" && !!onApprovalsEnabledChange;
+  // 이어받기는 대화 세션만 이을 수 있다 — 설정이 터미널이어도 이어받기는 대화 선택을 보인다.
+  const terminalSession = showInteraction && sessionStyle === "terminal" && !resumeSession;
+  // 승인은 질문 응답 위에서만 성립하므로 두 체크박스 대신 한 선택으로 묶는다.
+  const interactionMode: InteractionMode = !questionsEnabled ? "off" : canApprove && approvalsEnabled ? "approvals" : "questions";
+  const setInteractionMode = (mode: InteractionMode) => {
+    onQuestionsEnabledChange?.(mode === "questions" || mode === "approvals");
+    onApprovalsEnabledChange?.(mode === "approvals");
+  };
   return (
     <div className="border-t border-border px-4 pt-2 pb-3 bg-bg shrink-0">
       <div className="composer-toolbar mb-2">
@@ -527,44 +568,11 @@ export function Composer({
             branches={branches.branches}
             onPick={setBaseBranch}
             direct={!forced && chipState?.on === false}
+            onCheckout={checkoutBranch}
+            checkingOut={checkingOut || busy}
           />
         )}
         <AgentPicker agents={agents} onChange={setAgents} />
-        {hostCapabilities(activeHost).sessionHomeResume && (
-          resumeSession ? (
-            <span className={chip}>
-              <Icon name="clock" size={13} />
-              <span
-                className="max-w-[160px] truncate"
-                title={resumeSession.title?.trim() || resumeSession.first_message?.trim() || resumeSession.session_id}
-              >
-                {resumeSession.title?.trim() ||
-                  resumeSession.first_message?.trim() ||
-                  resumeSession.session_id.slice(0, 8)}
-              </span>
-              <button
-                type="button"
-                className="text-text-muted hover:text-text"
-                aria-label="이어받기 세션 해제"
-                onClick={() => onResumeSessionChange(null)}
-              >
-                <Icon name="x" size={12} />
-              </button>
-            </span>
-          ) : (
-            <button
-              type="button"
-              className="flex items-center gap-1 text-xs text-text-secondary border border-border rounded-md px-2 py-1 hover:border-border-strong"
-              onClick={() => setSessionPickerOpen(true)}
-            >
-              <Icon name="clock" size={13} />
-              세션 이어받기
-            </button>
-          )
-        )}
-        {host === LOCAL_HOST && agents.length === 1 && QUESTION_AGENTS.includes(agents[0]) && onQuestionsEnabledChange && <label className="text-xs text-text-secondary flex items-center gap-1.5">
-          <input type="checkbox" checked={questionsEnabled} disabled={busy} onChange={(e)=>onQuestionsEnabledChange(e.target.checked)} />질문 응답 (실험)
-        </label>}
         {/* 세션 모델 오버라이드 — 앙상블(2개+)은 벤더별 기본을 따르므로 단일 선택일 때만 노출 */}
         {agents.length === 1 && (
           <ModelPicker agent={agents[0]} model={model} onChange={setModel} />
@@ -634,6 +642,9 @@ export function Composer({
         </div>
       )}
       {initError && <div className="mb-2 text-xs text-status-failed">{initError}</div>}
+      {checkoutError && (
+        <div className="mb-2 text-xs text-status-failed">브랜치 전환 실패: {checkoutError}</div>
+      )}
       {pasteError && (
         <div className="mb-2 text-xs text-status-failed">이미지 첨부 실패: {pasteError}</div>
       )}
@@ -660,7 +671,7 @@ export function Composer({
         onInterviewRetry={onInterviewRetry}
         onClose={onInterviewClose}
       />
-      {agents.length === 1 && <VaultReferences host={activeHost} repo={repo} query={instruction} clientRef={vaultClientRef} onVaultMutationPendingChange={handleVaultMutationPending} />}
+      <EnglishPromptAssistPanel state={assist.state} onDismiss={assist.clear} />
       <div className="relative">
         <SkillDropdown open={skillOpen} items={skills} sel={skillSel} onHover={setSkillSel} onSelect={insertSkill} />
         <MentionDropdown
@@ -677,7 +688,7 @@ export function Composer({
             ref={inputRef}
             rows={1}
             className="flex-1 max-h-52 resize-none bg-transparent outline-none text-md leading-relaxed text-text placeholder:text-text-muted"
-            placeholder="작업을 설명하세요 — Enter 생성 · Shift+Enter 줄바꿈 · @파일 · /스킬 · 이미지 붙여넣기"
+            placeholder="작업을 설명하세요 — Enter 생성 · Shift+Enter 줄바꿈 · @파일 · /스킬 · 이미지 붙여넣기 · ⌘J 영어로"
             value={instruction}
             onChange={undo.onChange}
             onKeyDown={onKeyDown}
@@ -700,6 +711,66 @@ export function Composer({
             </span>
           </button>
         </div>
+        {/* 무엇을·어디서(위 도구줄)와 달리, 세션이 어떻게 흘러갈지를 정하는 옵션은 입력창 아래에 둔다.
+            한 줄에 모두 두면 Claude 질문 세션에서 도구줄이 두 줄로 넘어갔다. */}
+        {(showResume || showInteraction) && (
+          <div className="composer-toolbar mt-1.5">
+            {showResume && (
+              resumeSession ? (
+                <span className={chip}>
+                  <Icon name="clock" size={13} />
+                  <span
+                    className="max-w-[160px] truncate"
+                    title={resumeSession.title?.trim() || resumeSession.first_message?.trim() || resumeSession.session_id}
+                  >
+                    {resumeSession.title?.trim() ||
+                      resumeSession.first_message?.trim() ||
+                      resumeSession.session_id.slice(0, 8)}
+                  </span>
+                  <button
+                    type="button"
+                    className="text-text-muted hover:text-text"
+                    aria-label="이어받기 세션 해제"
+                    onClick={() => onResumeSessionChange(null)}
+                  >
+                    <Icon name="x" size={12} />
+                  </button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="flex items-center gap-1 text-xs text-text-secondary border border-border rounded-md px-2 py-1 hover:border-border-strong"
+                  onClick={() => setSessionPickerOpen(true)}
+                >
+                  <Icon name="clock" size={13} />
+                  세션 이어받기
+                </button>
+              )
+            )}
+            {terminalSession ? (
+              <span
+                className="text-xs text-text-secondary"
+                title="실제 CLI를 앱 터미널에서 그대로 씁니다. 작업 화면에서는 터미널 안에서만 입력합니다. 설정 › 작업 실행 › 세션 방식에서 바꿉니다."
+              >
+                터미널 세션
+              </span>
+            ) : showInteraction && (
+              <label title="대화: 턴마다 CLI를 -p로 실행해 말풍선으로 보여 줍니다. 질문 응답: 에이전트가 선택지 질문으로 답을 받아 이어갑니다. 실행 전 승인: 파일 수정·명령 실행 전에 허용 여부를 묻습니다(Claude만).">
+                <select
+                  aria-label="세션 방식"
+                  value={interactionMode}
+                  disabled={busy}
+                  onChange={(e) => setInteractionMode(e.target.value as InteractionMode)}
+                >
+                  <option value="off">대화</option>
+                  <option value="questions">대화 · 질문 응답</option>
+                  {/* 실행 전 승인 — Claude 질문 세션만 CLI의 권한 프롬프트를 앱으로 받을 수 있다. */}
+                  {canApprove && <option value="approvals">대화 · 질문 응답 · 실행 전 승인</option>}
+                </select>
+              </label>
+            )}
+          </div>
+        )}
         {busy && (
           <div className="mt-1 flex items-center gap-2 text-xs text-text-secondary">
             <span role="status" aria-live="polite">
@@ -718,9 +789,8 @@ export function Composer({
           projects={projects}
           onSelect={(session) => {
             onResumeSessionChange(session);
-            // Phase 1은 claude 단일 이어받기만 지원한다(설계 2026-09-17) — 앙상블·다른
-            // 벤더로 이 세션을 이어받을 수 없다.
-            setAgents(["claude"]);
+            // 공급자 간 문맥 이관은 하지 않는다. 고른 세션의 원래 에이전트로만 이어받는다.
+            setAgents([session.vendor ?? "claude"]);
             setSessionPickerOpen(false);
           }}
           onClose={() => setSessionPickerOpen(false)}

@@ -177,22 +177,6 @@ async fn reviewable(pool: &SqlitePool, task: &db::Task) -> anyhow::Result<()> {
         0
     };
     anyhow::ensure!(pending == 0, "기존 Runner 승인 복구를 먼저 처리하세요");
-    // Legacy projection retirement follows its saved path, even after a task moves.
-    // Do not rebind a task while that journal can still write to the original.
-    let has_memory: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_projection_journal'")
-        .fetch_one(pool).await?;
-    if has_memory > 0 {
-        let pending: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM memory_projection_journal WHERE task_id=? AND state != 'retired'",
-        )
-        .bind(task.id)
-        .fetch_one(pool)
-        .await?;
-        anyhow::ensure!(
-            pending == 0,
-            "기존 메모리 투영 복구를 먼저 처리하세요. 원본 경로를 참조하는 기록이 남아 있습니다."
-        );
-    }
     Ok(())
 }
 
@@ -255,7 +239,7 @@ fn prepare_git(task: &db::Task, worktree: &Worktree, exclude_mcp: bool) -> anyho
     let hooks = git::managed_dir(&journal, &["empty-hooks"])?;
     let root = git::managed_dir(&worktree.repo, &[".praxis", "worktrees"])?;
     let path = root.join(format!("repair-{id}"));
-    let branch = format!("praxis/repair-{id}");
+    let branch = format!("dojang/repair-{id}");
     git::git(
         &worktree.repo,
         &[

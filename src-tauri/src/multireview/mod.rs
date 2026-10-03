@@ -9,6 +9,8 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+pub mod verdict;
+
 /// 리뷰 이력 메타(목록용) — result_json은 포함하지 않는다. 조회는 `get_review`.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ReviewMeta {
@@ -71,6 +73,12 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     let _ = sqlx::query("ALTER TABLE reviews ADD COLUMN prompt_synthesis TEXT")
         .execute(pool)
         .await;
+    let _ = sqlx::query("ALTER TABLE reviews ADD COLUMN pipeline_run_id INTEGER")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE reviews ADD COLUMN pipeline_step TEXT")
+        .execute(pool)
+        .await;
     let _ = sqlx::query("ALTER TABLE reviews ADD COLUMN model_info TEXT NOT NULL DEFAULT '{\"items\":[],\"synthesis\":null}'").execute(pool).await;
     Ok(())
 }
@@ -113,6 +121,62 @@ pub async fn insert_review(
     .await?
     .last_insert_rowid();
     Ok(id)
+}
+
+/// 파이프라인 리뷰 결과 저장 — `insert_review`와 같은 행에 run/step 연결 컬럼을 채운다.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_pipeline_review(
+    pool: &SqlitePool,
+    repo: &str,
+    source_kind: &str,
+    source_ref: &str,
+    focus: &str,
+    result_json: &str,
+    ok_count: i64,
+    total: i64,
+    content: &str,
+    prompt_review: &str,
+    prompt_synthesis: Option<&str>,
+    model_info_json: &str,
+    pipeline_run_id: i64,
+    pipeline_step: &str,
+    now: i64,
+) -> anyhow::Result<i64> {
+    let id = insert_review(
+        pool, now, repo, source_kind, source_ref, focus, result_json, ok_count, total, content,
+        prompt_review, prompt_synthesis, model_info_json,
+    )
+    .await?;
+    sqlx::query("UPDATE reviews SET pipeline_run_id = ?, pipeline_step = ? WHERE id = ?")
+        .bind(pipeline_run_id)
+        .bind(pipeline_step)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+
+/// 파이프라인 run에 속한 리뷰 메타 + 단계.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PipelineReviewMeta {
+    #[sqlx(flatten)]
+    #[serde(flatten)]
+    pub meta: ReviewMeta,
+    pub pipeline_step: String,
+}
+
+pub async fn list_pipeline_reviews(
+    pool: &SqlitePool,
+    run_id: i64,
+) -> anyhow::Result<Vec<PipelineReviewMeta>> {
+    Ok(sqlx::query_as::<_, PipelineReviewMeta>(
+        "SELECT id, created_at, repo, source_kind, source_ref, focus, ok_count, total, \
+         COALESCE(pipeline_step, '') AS pipeline_step \
+         FROM reviews WHERE pipeline_run_id = ? ORDER BY id ASC",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 /// 리뷰 이력 목록(최신순) — result_json은 제외한 메타만.

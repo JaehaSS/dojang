@@ -271,6 +271,115 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+// ── 쓰기 API (발견 공간 §8 "메모리에 남기기", T4) ────────────────────
+//
+// 지금까지 이 모듈에는 쓰기 API가 없었다(투영·종료 기록·목록만). 카드 행동 "메모리에
+// 남기기"가 처음 붙이는 쓰기다 — 경로는 `memory_root` + `user_path`/`repo_path`로만
+// 만들고, 커맨드가 경로 인자를 직접 받지 않는다(설계 §8).
+
+/// 메모리에 남길 대상 — 저장소에 묶이지 않는 신호는 `User`, 저장소에 묶인 신호는 그
+/// 저장소의 `MEMORY.md`(`Repo`)다(설계 §8 O2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind")]
+pub enum MemoryTarget {
+    User,
+    Repo { repo: String },
+}
+
+/// 추가 결과. 상한을 넘기면 쓰지 않고 `Full`을 돌려준다 — 호출자는 그 경로를 에디터로
+/// 열어 사람이 합치게 한다(설계 §8 "가득 찼다 — 합친 뒤 다시 시도").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind")]
+pub enum AppendOutcome {
+    Appended,
+    Full { path: String },
+}
+
+/// 줄바꿈을 공백으로 접고 앞뒤 공백을 정리한다. 결과가 비면 `None` — 빈 문장은 남기지 않는다.
+fn sanitize_line(text: &str) -> Option<String> {
+    let collapsed = text
+        .replace(['\n', '\r'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed)
+    }
+}
+
+/// 대상의 파일 경로 + 상한. `Repo`는 **알려진 작업 저장소만** 받는다 — 임의 경로를 써 주는
+/// 통로가 되지 않게 `db::known_repos`로 검증한다(설계 §8, 커맨드가 경로 인자를 받지 않는다).
+async fn resolve_target(
+    pool: &SqlitePool,
+    root: &Path,
+    target: &MemoryTarget,
+) -> anyhow::Result<(PathBuf, Caps)> {
+    match target {
+        MemoryTarget::User => Ok((user_path(root), user_caps(pool).await)),
+        MemoryTarget::Repo { repo } => {
+            let repo = repo.trim();
+            if repo.is_empty() {
+                anyhow::bail!("저장소 경로가 비어 있습니다");
+            }
+            let known = crate::db::known_repos(pool).await?;
+            if !known.iter().any(|r| r == repo) {
+                anyhow::bail!("알 수 없는 저장소입니다: {repo}");
+            }
+            Ok((repo_path(root, &repo_key(repo)), caps(pool).await))
+        }
+    }
+}
+
+/// `MEMORY.md`/`USER.md`에 한 줄(`- {text}`) 추가. 상한(줄 수·바이트)을 넘기면 **쓰지 않고**
+/// `Full`을 돌려준다 — 상한을 넘겨 쓰면 `read_capped`가 잘라내 조용히 사라지기 때문이다.
+///
+/// 에이전트가 같은 세션에서 이 파일을 고치는 중일 수 있으므로 읽고-고쳐-쓰기 대신 append
+/// 모드로만 연다. 파일이 없거나 부모 폴더가 없으면 만든다(`project`가 창고를 새로 여는 것과
+/// 같은 취급).
+pub async fn append(
+    pool: &SqlitePool,
+    data_dir: &Path,
+    target: &MemoryTarget,
+    text: &str,
+) -> anyhow::Result<AppendOutcome> {
+    let line = sanitize_line(text).ok_or_else(|| anyhow::anyhow!("빈 문장은 남길 수 없습니다"))?;
+    let root = memory_root(pool, data_dir).await;
+    let (path, caps) = resolve_target(pool, &root, target).await?;
+
+    let existing = std::fs::read(&path).unwrap_or_default();
+    let existing_lines = if existing.is_empty() {
+        0
+    } else {
+        existing.iter().filter(|&&b| b == b'\n').count() as u32
+            + u32::from(!existing.ends_with(b"\n"))
+    };
+    let needs_leading_newline = !existing.is_empty() && !existing.ends_with(b"\n");
+    let addition = format!(
+        "{}- {line}\n",
+        if needs_leading_newline { "\n" } else { "" }
+    );
+    let new_lines = existing_lines + 1;
+    let new_bytes = existing.len() as u64 + addition.len() as u64;
+    if new_lines > caps.lines || new_bytes > caps.bytes {
+        return Ok(AppendOutcome::Full {
+            path: path.to_string_lossy().into_owned(),
+        });
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    file.write_all(addition.as_bytes())?;
+    Ok(AppendOutcome::Appended)
+}
+
 /// 컨텍스트 파일에 들어갈 managed block. 설계 §3의 모양 그대로다.
 ///
 /// 파일이 하나도 없어도 블록을 싣는다 — **규칙이 곧 "여기에 써라"**이기 때문이다(R2).
@@ -286,7 +395,7 @@ pub fn render_block(
     let repo_file = format!("{root_display}/{repo_key}/{REPO_FILE}");
     let user_file = format!("{root_display}/{USER_FILE}");
     let mut body = String::new();
-    body.push_str(&format!("# Praxis Memory (파일 정본: {repo_file})\n\n"));
+    body.push_str(&format!("# Dojang Memory (파일 정본: {repo_file})\n\n"));
     body.push_str("## 규칙\n");
     body.push_str(
         "- 이 블록은 위 파일의 사본이다. 배운 것을 남기려면 **그 파일을 직접 고쳐라** (add / replace / remove).\n",
@@ -330,10 +439,20 @@ fn section(capped: Option<&Capped>, missing: &str) -> String {
     }
 }
 
+/// `Capped`가 실제로 보여줄 본문을 가졌는지 — 공백뿐이면 "없음"과 같다(`section`과 같은 기준).
+fn has_content(capped: Option<&Capped>) -> bool {
+    capped.is_some_and(|c| !c.body.trim().is_empty())
+}
+
 /// 작업 시작 투영(R1–R3). 파일을 읽어 블록을 쓰고 상태 행을 갱신한다.
 ///
 /// 실패는 파일 쓰기 실패뿐이다 — 읽기 실패(깨진 인코딩 등)는 "없음"으로 접는다.
 /// 메모리 파일 하나 때문에 작업이 시작되지 못하는 쪽이 더 나쁘다.
+///
+/// 반환값은 **규칙만 있는 블록과 실제 메모리가 실린 블록을 가른다** — `true`는 사용자·레포
+/// `Capped` 중 하나라도 공백이 아닌 본문을 가졌다는 뜻이다. 블록 자체는 이 값과 무관하게
+/// 항상 쓴다(규칙 섹션은 메모리가 비어도 유용하다). 호출자는 이 값으로 "메모리 안내 후
+/// 재설명 없음" 인사이트의 마커(`followup_observation::insert_observation_start`)를 남긴다.
 #[allow(clippy::too_many_arguments)]
 pub async fn project(
     pool: &SqlitePool,
@@ -343,7 +462,7 @@ pub async fn project(
     targets: &[&str],
     task_id: i64,
     now: i64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let root = memory_root(pool, data_dir).await;
     let caps = caps(pool).await;
     let user_caps = user_caps(pool).await;
@@ -352,6 +471,7 @@ pub async fn project(
     let repo_file = repo_path(&root, &key);
     let user = read_tolerant(&user_file, &user_caps);
     let repo_capped = read_tolerant(&repo_file, &caps);
+    let had_content = has_content(user.as_ref()) || has_content(repo_capped.as_ref());
     let block = render_block(
         &root,
         &key,
@@ -381,7 +501,7 @@ pub async fn project(
         Some(task_id),
     )
     .await?;
-    Ok(())
+    Ok(had_content)
 }
 
 /// 작업이 끝나면 worktree 컨텍스트 파일에서 메모리 블록만 걷어낸다.
@@ -671,7 +791,7 @@ async fn status_rows(pool: &SqlitePool) -> anyhow::Result<Vec<StatusRow>> {
 /// 옛 파이프라인이 쌓아 둔 행을 **한 번만** 지운다(설계 §7 O2, 사용자 결정).
 ///
 /// 플래그가 이미 있으면 아무것도 하지 않는다 — 사용자가 다시 만든 데이터를 다음 부팅이
-/// 지우면 삭제가 아니라 파괴다(`schedule::seed_weekly_retro`와 같은 판단).
+/// 지우면 삭제가 아니라 파괴다(첫 부팅 1회성 시드에 플래그를 남기는 판단과 같다).
 pub async fn purge_legacy_once(pool: &SqlitePool) -> anyhow::Result<bool> {
     const FLAG: &str = "legacy_memory_purged";
     if crate::db::get_setting(pool, FLAG).await?.is_some() {
@@ -721,7 +841,10 @@ pub async fn purge_legacy_once(pool: &SqlitePool) -> anyhow::Result<bool> {
             .execute(pool)
             .await?;
     }
-    // 뗀 트리거를 되돌린다 — DDL은 전부 `IF NOT EXISTS`라 나머지는 no-op이다.
+    // 지금의 `migrate`는 위에서 뗀 옛 트리거를 다시 만들지 않는다(P2 제거, 설계 2026-09-13) —
+    // 표는 빈 채로 남고, 그 뒤로는 아무도 쓰지 않으니 보호가 없어도 안전하다. 여기 남은
+    // 호출은 파일형 메모리의 상태 색인(`memory_files`)만 만들고, 그 DDL도 `IF NOT EXISTS`라
+    // 이 시점에도 안전히 no-op으로 실행되기 때문이다.
     super::migrate(pool).await?;
     crate::db::set_setting(pool, FLAG, "true").await?;
     Ok(true)
@@ -809,7 +932,9 @@ mod tests {
         );
         assert!(block.starts_with(MARK_START));
         assert!(block.trim_end().ends_with(MARK_END));
-        assert!(block.contains("# Praxis Memory (파일 정본: /vault/memory/praxis-3f9a1c2e/MEMORY.md)"));
+        assert!(
+            block.contains("# Dojang Memory (파일 정본: /vault/memory/praxis-3f9a1c2e/MEMORY.md)")
+        );
         assert!(block.contains("## 규칙"));
         assert!(block.contains("상한 100줄 / 8KB (USER.md는 40줄 / 3KB)"));
         assert!(block.contains("(없음 — /vault/memory/USER.md 를 만들면 실린다)"));
@@ -889,7 +1014,7 @@ mod tests {
         assert_eq!(first, second, "같은 블록을 두 번 써도 같은 파일이어야 한다");
         assert_eq!(second.matches(MARK_START).count(), 1);
         let removed = crate::projector::remove_managed_block(&second, MARK_START, MARK_END);
-        assert!(!removed.contains("Praxis Memory"));
+        assert!(!removed.contains("Dojang Memory"));
         assert!(removed.contains("사용자 소유 문단."));
     }
 
@@ -951,9 +1076,10 @@ mod tests {
         std::fs::write(root.join(&key).join(REPO_FILE), "- 관례 한 줄\n").unwrap();
         std::fs::write(root.join(USER_FILE), "- 한국어로 답한다\n").unwrap();
 
-        project(&pool, &dir, repo, &worktree, &["CLAUDE.md"], 7, 1_700_000_000)
+        let had_content = project(&pool, &dir, repo, &worktree, &["CLAUDE.md"], 7, 1_700_000_000)
             .await
             .unwrap();
+        assert!(had_content, "USER.md·MEMORY.md 둘 다 본문이 있으면 true");
 
         let written = std::fs::read_to_string(worktree.join("CLAUDE.md")).unwrap();
         assert!(written.contains("- 관례 한 줄"));
@@ -980,6 +1106,45 @@ mod tests {
         let repo_row = rows.iter().find(|row| row.kind == KIND_REPO).unwrap();
         assert_eq!(repo_row.lines, 2);
         assert_eq!(repo_row.last_projected_at, Some(1_700_000_000));
+        pool.close().await;
+    }
+
+    /// "메모리 안내 후 재설명 없음" 인사이트의 마커(`followup_observation::insert_observation_start`)는
+    /// 이 반환값을 보고서만 남긴다 — 파일이 없거나 공백뿐이면 안내한 것이 없으니 false여야 한다.
+    #[tokio::test]
+    async fn project_reports_whether_any_file_had_content() {
+        let dir = tmp("project-empty");
+        let root = dir.join("memory");
+        let worktree = dir.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let pool = pool().await;
+        crate::db::set_setting(&pool, SETTING_ROOT, root.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        let repo = "/Users/me/work/praxis";
+
+        // 창고 자체가 없다 — USER.md·MEMORY.md 둘 다 없음.
+        let had_content = project(&pool, &dir, repo, &worktree, &["CLAUDE.md"], 1, 1_700_000_000)
+            .await
+            .unwrap();
+        assert!(!had_content, "파일이 없으면 false");
+
+        // 공백뿐인 파일도 "없음"과 같다(`section`의 기준과 동일).
+        let key = repo_key(repo);
+        std::fs::create_dir_all(root.join(&key)).unwrap();
+        std::fs::write(root.join(&key).join(REPO_FILE), "   \n").unwrap();
+        std::fs::write(root.join(USER_FILE), "\n").unwrap();
+        let had_content = project(&pool, &dir, repo, &worktree, &["CLAUDE.md"], 2, 1_700_000_001)
+            .await
+            .unwrap();
+        assert!(!had_content, "공백뿐이면 false");
+
+        // 둘 중 하나(MEMORY.md)에만 본문이 생기면 true.
+        std::fs::write(root.join(&key).join(REPO_FILE), "- 관례 한 줄\n").unwrap();
+        let had_content = project(&pool, &dir, repo, &worktree, &["CLAUDE.md"], 3, 1_700_000_002)
+            .await
+            .unwrap();
+        assert!(had_content, "MEMORY.md에 본문이 있으면 true");
         pool.close().await;
     }
 
@@ -1017,10 +1182,45 @@ mod tests {
         assert!(!worktree.join("AGENTS.md").exists());
     }
 
+    /// 지금의 `memory::migrate`는 이 표들을 더는 만들지 않는다(P2 제거, 설계 2026-09-13) —
+    /// 여기서 만드는 DDL은 옛 앱 버전이 실제로 남겼을 법한 사용자 DB를 흉내낸 것으로,
+    /// `purge_legacy_once`가 지금도 그런 잔존 DB를 다뤄야 하기 때문에 원시 SQL로 재현한다.
+    async fn seed_legacy_schema(pool: &SqlitePool) {
+        sqlx::raw_sql(
+            "CREATE TABLE memories ( \
+               id INTEGER PRIMARY KEY AUTOINCREMENT, tier TEXT NOT NULL, scope_key TEXT, \
+               kind TEXT NOT NULL, content TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 0.5, \
+               created_at INTEGER NOT NULL); \
+             CREATE VIRTUAL TABLE memories_fts USING fts5(content, content='memories', content_rowid='id'); \
+             CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN \
+               INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content); END; \
+             CREATE TABLE memory_events ( \
+               id INTEGER PRIMARY KEY AUTOINCREMENT, memory_id INTEGER NOT NULL, action TEXT NOT NULL, \
+               actor_kind TEXT NOT NULL, created_at INTEGER NOT NULL); \
+             CREATE TRIGGER memory_events_no_delete BEFORE DELETE ON memory_events BEGIN \
+               SELECT RAISE(ABORT, 'memory event cannot be deleted'); END;",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn purge_runs_once_and_empties_the_legacy_tables() {
         let pool = pool().await;
-        crate::selfimprove::migrate(&pool).await.unwrap();
+        // si_proposals는 옛 자기개선 제안 표다(selfimprove 모듈은 1.0에서 제거됐다) — 이
+        // 테스트는 그 표가 남은 옛 사용자 DB를 흉내내야 하므로, 지운 모듈 대신 같은 모양의
+        // DDL을 직접 심는다.
+        sqlx::query(
+            "CREATE TABLE si_proposals ( \
+               id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, kind TEXT NOT NULL, \
+               content TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'proposed', \
+               created_at INTEGER NOT NULL);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_legacy_schema(&pool).await;
         sqlx::query(
             "INSERT INTO memories (tier, scope_key, kind, content, confidence, created_at) \
              VALUES ('project', '/repo', 'fact', '옛 메모리', 0.5, 1)",
@@ -1057,15 +1257,167 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ghosts, 0);
-        // 삭제금지 트리거는 되살아난다.
+        // 삭제금지 트리거는 되살아나지 않는다 — 지금의 `migrate`는 이 트리거를 더는 만들지
+        // 않는다(P2 제거). 아무도 이 표에 다시 쓰지 않으므로 보호가 없어도 안전하다.
         let restored: Option<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master WHERE type='trigger' AND name='memory_events_no_delete'",
         )
         .fetch_optional(&pool)
         .await
         .unwrap();
-        assert!(restored.is_some());
+        assert!(restored.is_none());
         assert!(!purge_legacy_once(&pool).await.unwrap(), "두 번은 돌지 않는다");
+        pool.close().await;
+    }
+
+    // ── append (T4 "메모리에 남기기") ────────────────────────────────
+
+    #[tokio::test]
+    async fn append_writes_one_line_to_user_md() {
+        let dir = tmp("append-user");
+        let root = dir.join("memory");
+        let pool = pool().await;
+        crate::db::set_setting(&pool, SETTING_ROOT, root.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+
+        let outcome = append(&pool, &dir, &MemoryTarget::User, "회고에서 배운 것")
+            .await
+            .unwrap();
+        assert_eq!(outcome, AppendOutcome::Appended);
+        let body = std::fs::read_to_string(root.join(USER_FILE)).unwrap();
+        assert_eq!(body, "- 회고에서 배운 것\n");
+
+        // 두 번째 줄은 append 모드로만 붙는다 — 첫 줄을 다시 읽어 고치지 않는다.
+        let outcome = append(&pool, &dir, &MemoryTarget::User, "두 번째 문장")
+            .await
+            .unwrap();
+        assert_eq!(outcome, AppendOutcome::Appended);
+        let body = std::fs::read_to_string(root.join(USER_FILE)).unwrap();
+        assert_eq!(body, "- 회고에서 배운 것\n- 두 번째 문장\n");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn append_writes_one_line_to_repo_memory_md() {
+        let dir = tmp("append-repo");
+        let root = dir.join("memory");
+        let pool = pool().await;
+        crate::db::set_setting(&pool, SETTING_ROOT, root.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        let repo = "/Users/me/work/praxis";
+        sqlx::query(
+            "INSERT INTO tasks (repo, branch, base, worktree_path, instruction, state, \
+               created_at, updated_at) VALUES (?, 'main', 'base', ?, 'instruction', 'done', 1, 1)",
+        )
+        .bind(repo)
+        .bind(repo)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let target = MemoryTarget::Repo {
+            repo: repo.to_string(),
+        };
+        let outcome = append(&pool, &dir, &target, "저장소 전용 교훈")
+            .await
+            .unwrap();
+        assert_eq!(outcome, AppendOutcome::Appended);
+        let body = std::fs::read_to_string(root.join(repo_key(repo)).join(REPO_FILE)).unwrap();
+        assert_eq!(body, "- 저장소 전용 교훈\n");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn append_rejects_unknown_repo() {
+        let dir = tmp("append-unknown-repo");
+        let root = dir.join("memory");
+        let pool = pool().await;
+        crate::db::set_setting(&pool, SETTING_ROOT, root.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+
+        let target = MemoryTarget::Repo {
+            repo: "/no/such/repo".to_string(),
+        };
+        let error = append(&pool, &dir, &target, "문장").await.unwrap_err();
+        assert!(error.to_string().contains("알 수 없는"), "{error}");
+        assert!(
+            !root.join(repo_key("/no/such/repo")).exists(),
+            "검증에 실패하면 폴더조차 만들지 않는다"
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn append_strips_newlines_and_collapses_whitespace() {
+        let dir = tmp("append-newlines");
+        let root = dir.join("memory");
+        let pool = pool().await;
+        crate::db::set_setting(&pool, SETTING_ROOT, root.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+
+        append(
+            &pool,
+            &dir,
+            &MemoryTarget::User,
+            "첫 줄\n두 번째 줄\r\n  세 번째  ",
+        )
+        .await
+        .unwrap();
+        let body = std::fs::read_to_string(root.join(USER_FILE)).unwrap();
+        assert_eq!(body, "- 첫 줄 두 번째 줄 세 번째\n");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn append_rejects_empty_text() {
+        let dir = tmp("append-empty");
+        let root = dir.join("memory");
+        let pool = pool().await;
+        crate::db::set_setting(&pool, SETTING_ROOT, root.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+
+        let error = append(&pool, &dir, &MemoryTarget::User, "   \n \r\n ")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("빈 문장"), "{error}");
+        assert!(!root.join(USER_FILE).exists(), "쓰지 않는다");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn append_returns_full_and_does_not_write_when_cap_is_exceeded() {
+        let dir = tmp("append-full");
+        let root = dir.join("memory");
+        std::fs::create_dir_all(&root).unwrap();
+        let pool = pool().await;
+        crate::db::set_setting(&pool, SETTING_ROOT, root.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        // 사용자 상한은 줄 40 · 바이트 3072(DEFAULT_USER_CAP_*). 줄 상한을 1로 낮춰
+        // 한 줄만 있어도 가득 차게 만든다.
+        crate::db::set_setting(&pool, SETTING_USER_CAP_LINES, "1")
+            .await
+            .unwrap();
+        let existing = "- 이미 가득 찬 파일\n";
+        std::fs::write(root.join(USER_FILE), existing).unwrap();
+
+        let outcome = append(&pool, &dir, &MemoryTarget::User, "새 문장")
+            .await
+            .unwrap();
+        match outcome {
+            AppendOutcome::Full { path } => {
+                assert_eq!(path, root.join(USER_FILE).to_string_lossy());
+            }
+            other => panic!("Full을 기대했다: {other:?}"),
+        }
+        // 파일은 바이트 하나도 바뀌지 않는다 — 쓰기 전에 상한을 먼저 본다.
+        let after = std::fs::read(root.join(USER_FILE)).unwrap();
+        assert_eq!(after, existing.as_bytes());
         pool.close().await;
     }
 }

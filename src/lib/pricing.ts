@@ -26,6 +26,9 @@ export function priceFor(model: string): Price | null {
 
 /** 모델 한 종의 USD 비용. 단가 없으면 null. */
 export function modelCost(s: ModelStat): number | null {
+  // Claude's public token pricing is the only supported heuristic here. A cache-incomplete
+  // sample must stay partial rather than lending a precise-looking dollar amount to mixed logs.
+  if (s.provider !== "claude" || (s.cache_unknown_messages ?? 0) > 0) return null;
   const p = priceFor(s.model);
   if (!p) return null;
   return (

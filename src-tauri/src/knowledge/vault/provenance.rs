@@ -20,7 +20,7 @@ pub struct DraftPolicySource {
     pub document_id: String,
     pub revision_id: String,
     pub revision_hash: String,
-    grant_fingerprint: String,
+    pub(crate) grant_fingerprint: String,
     pub scope: String,
 }
 
@@ -171,17 +171,17 @@ pub async fn restrictive_draft_policy_seen(
     binding: &ProjectBinding,
     client_ref: &str,
 ) -> anyhow::Result<bool> {
-    let exists: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM vault_draft_policies \
+    let input_mode: Option<String> = sqlx::query_scalar(
+        "SELECT input_mode FROM vault_draft_policies \
          WHERE binding_id = ? AND binding_epoch = ? AND client_ref = ? \
-         AND input_mode IN ('task_only', 'private_attachment') LIMIT 1",
+         ORDER BY rowid DESC LIMIT 1",
     )
     .bind(&binding.id)
     .bind(&binding.epoch)
     .bind(client_ref)
     .fetch_optional(pool)
     .await?;
-    Ok(exists.is_some())
+    Ok(matches!(input_mode.as_deref(), Some("task_only" | "private_attachment")))
 }
 
 pub async fn pending_restrictive_draft_policy(

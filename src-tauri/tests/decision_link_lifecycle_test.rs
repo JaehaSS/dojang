@@ -37,9 +37,6 @@ async fn completed_decision(pool: &sqlx::SqlitePool) -> i64 {
     let provenance = ApprovalProvenance {
         task_id,
         instruction_digest: decision::provenance::digest("sealed"),
-        start_receipts: vec![],
-        memory_versions: vec![],
-        evidence_checks: vec![],
         verification_run: None,
         commit_sha: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(),
     };

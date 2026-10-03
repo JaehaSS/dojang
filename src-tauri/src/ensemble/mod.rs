@@ -85,7 +85,7 @@ pub fn build_judge_prompt(
 /// 부적합 → None.
 pub fn parse_judgment(raw: &str, nonce: &str, valid_agents: &[String]) -> Option<Judgment> {
     let after = raw.split(nonce).nth(1)?;
-    let json = crate::challenge::extract_json_object(after)?;
+    let json = crate::jsonextract::extract_json_object(after)?;
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let winner = v.get("winner")?.as_str()?.trim().to_string();
     if !valid_agents.iter().any(|a| a == &winner) {
@@ -264,7 +264,7 @@ fn format_refs(refs: &[HunkRef]) -> String {
 /// ensemble 조합 병합(B-3): 심판 추천 후보(`winner_task_id`) worktree를 베이스로, 타 후보의
 /// 선택 hunk를 patch 합성(`partial::compose_patch` 재사용, DR-P1)해 파일 단위로 순차 forward
 /// 적용(`git apply --3way`)한다. 절차: ① 선택 검증 ② 배타 그룹 위반 검사(방어적 이중 검사)
-/// ③ 체크포인트(`praxis: pre-compose`, `Worktree::checkpoint_commit` 재사용) ④ forward apply.
+/// ③ 체크포인트(`dojang: pre-compose`, `Worktree::checkpoint_commit` 재사용) ④ forward apply.
 /// 실패 시 실패 hunk 목록과 함께 체크포인트로 완전히 원복한다(fail-closed, 자동 해결 없음).
 /// winner 자신의 hunk가 선택에 섞여 있으면 이미 베이스에 있으므로 조용히 건너뛴다.
 pub fn compose(
@@ -321,7 +321,7 @@ pub fn compose(
     }
 
     let checkpoint = winner
-        .checkpoint_commit("praxis: pre-compose")
+        .checkpoint_commit("dojang: pre-compose")
         .map_err(|e| ComposeError::Git(e.to_string()))?;
 
     let mut failed: Vec<HunkRef> = Vec::new();

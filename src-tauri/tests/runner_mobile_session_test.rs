@@ -16,6 +16,7 @@ use praxis_lib::db;
 use praxis_lib::runner::auth::{self, RunnerAuth};
 use praxis_lib::runner::config::RunnerConfig;
 use praxis_lib::runner::events::EventHub;
+use praxis_lib::runner::actions::RunnerTaskActions;
 use praxis_lib::runner::http::{self, RunnerHttpState};
 use praxis_lib::runner::queue::QueueWorker;
 use praxis_lib::runner::session;
@@ -126,7 +127,7 @@ async fn 쿠키_자격의_상태변경은_자기_오리진에서만_통과한다
     let session_cookie = pair_device(&address).await;
     let client = reqwest::Client::new();
     // 인증만 격리해서 보려고 존재하지 않는 task를 고른다 — 통과하면 404, 막히면 403.
-    let url = format!("http://{address}/v1/tasks/999999/cancel");
+    let url = format!("http://{address}/v1/tasks/999999/message");
 
     let no_origin = client
         .post(&url)
@@ -200,7 +201,8 @@ async fn 모바일_scope는_파일_편집과_기기_관리를_못_한다() {
         .send()
         .await
         .unwrap();
-    assert_eq!(write.status(), 403, "모바일은 파일을 수정할 수 없다");
+    // 모바일 서피스에는 쓰기 라우트 자체가 없다(Runner 제거, 1.0). 정책(403)이든 부재(404)든 성공만 아니면 된다.
+    assert!(!write.status().is_success(), "모바일은 파일을 수정할 수 없다: {}", write.status());
 
     // 폰이 스스로 기기를 늘릴 수 있으면 회수가 무의미해진다.
     let pairing = client
@@ -372,7 +374,7 @@ async fn serve(pool: sqlx::SqlitePool) -> (SocketAddr, tokio::task::JoinHandle<(
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
-            http::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            http::mobile_surface_router(state, std::sync::Arc::new(RunnerTaskActions)).into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
         .unwrap();

@@ -208,7 +208,7 @@ export function MobilePairingCard({ transport }: Props) {
         <input
           aria-label="Mobile base URL"
           className="w-full bg-bg border border-border rounded px-2 py-1.5 text-sm text-text outline-none focus:border-primary font-code"
-          placeholder="mini1.tail41b650.ts.net"
+          placeholder="my-mac.example.ts.net"
           value={baseUrl}
           onChange={(event) => commitBaseUrl(event.target.value)}
         />

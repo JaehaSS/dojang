@@ -129,6 +129,31 @@ async fn terminal_state_recheck_rejects_persistence() {
         .is_none());
 }
 
+#[tokio::test]
+async fn non_git_checks_keep_their_outcome_without_claiming_current_source() {
+    let fixture = fixture("test = \"printf '3 passed'\"\n").await;
+    std::fs::remove_dir_all(fixture.root.join(".git")).unwrap();
+    let preview = verify::preview(&fixture.pool, fixture.task_id, &fixture.root)
+        .await
+        .unwrap();
+    let report = verify::run(
+        fixture.pool.clone(),
+        fixture.claims.clone(),
+        fixture.task_id,
+        fixture.root.clone(),
+        preview.preview_token,
+    )
+    .await
+    .unwrap();
+    assert!(!report.ready);
+    assert_eq!(report.summary.unwrap().passed, 3);
+    let result = praxis_lib::task_results::snapshot(&fixture.pool, fixture.task_id)
+        .await
+        .unwrap();
+    assert_eq!(result.receipts[0].outcome, "passed");
+    assert_eq!(result.receipts[0].freshness, "unknown");
+}
+
 struct Fixture {
     pool: sqlx::SqlitePool,
     task_id: i64,
@@ -143,6 +168,21 @@ async fn fixture(spec: &str) -> Fixture {
         std::process::id()
     ));
     std::fs::create_dir_all(root.join(".praxis")).unwrap();
+    std::fs::write(root.join(".gitignore"), "test.sqlite*\n").unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "test@example.invalid"],
+        vec!["config", "user.name", "Test"],
+        vec!["add", ".gitignore"],
+        vec!["commit", "-qm", "initial"],
+    ] {
+        assert!(std::process::Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
     write_spec(&root, spec);
     let db_path = root.join("test.sqlite").to_string_lossy().into_owned();
     let pool = db::init_pool(&db_path).await.unwrap();

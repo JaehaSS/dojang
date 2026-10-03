@@ -18,7 +18,6 @@ const claude: CandidateBenchmarkMetrics = {
   tokens_in: 1234,
   tokens_out: 56,
   cost_usd: 0.42,
-  memory_count: 3,
 };
 
 const codex: CandidateBenchmarkMetrics = {
@@ -31,18 +30,16 @@ const codex: CandidateBenchmarkMetrics = {
   completed_turns: 1,
   failed_turns: 1,
   cost_usd: 0,
-  memory_count: 0,
 };
 
 describe("EnsembleMetrics", () => {
-  it("renders comparable activity, reliability, token, tool, memory, and available cost data", () => {
+  it("renders comparable activity, reliability, token, tool, and available cost data", () => {
     const html = renderToStaticMarkup(<EnsembleMetrics metrics={[claude, codex]} />);
 
     expect(html).toContain("실험 지표");
     expect(html).toContain("1m 05s");
     expect(html).toContain("입력 1,234 · 출력 56");
     expect(html).toContain("도구 8 · 오류 1");
-    expect(html).toContain("메모리 3");
     expect(html).toContain("$0.42");
     expect(html).toContain("claude-opus-4-8 · 관측됨");
     expect(html).toContain("요청 opus");

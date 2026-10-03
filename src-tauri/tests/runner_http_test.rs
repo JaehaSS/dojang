@@ -10,6 +10,7 @@ use praxis_lib::db;
 use praxis_lib::runner::auth::RunnerAuth;
 use praxis_lib::runner::config::RunnerConfig;
 use praxis_lib::runner::events::EventHub;
+use praxis_lib::runner::actions::RunnerTaskActions;
 use praxis_lib::runner::http::{self, RunnerHttpState};
 use praxis_lib::runner::queue::QueueWorker;
 use praxis_lib::runner::{create_queued_task, QueuedTaskRequest};
@@ -98,73 +99,6 @@ async fn versioned_health_tasks_schedule_and_event_replay_are_read_only() {
         db::get_task(&pool, task_id).await.unwrap().unwrap().state,
         db::state::CREATED
     );
-
-    server.abort();
-    let _ = std::fs::remove_file(db_path);
-    let _ = std::fs::remove_file(token_path);
-}
-
-#[tokio::test]
-async fn quickopen_endpoint_matches_query_and_filters_by_scope() {
-    let (pool, db_path) = test_pool("quickopen").await;
-    praxis_lib::schedule::migrate(&pool).await.unwrap();
-    db::insert_task(
-        &pool,
-        "/tmp",
-        "b1",
-        "main",
-        "/tmp/w1",
-        "fix login bug",
-        None,
-        None,
-        "terminal",
-        1,
-    )
-    .await
-    .unwrap();
-    db::insert_task(
-        &pool,
-        "/tmp",
-        "b2",
-        "main",
-        "/tmp/w2",
-        "fix login redirect",
-        None,
-        None,
-        "conversation",
-        2,
-    )
-    .await
-    .unwrap();
-    let (address, server, token_path) = serve(pool.clone()).await;
-    let client = authenticated_client();
-
-    let all: Vec<serde_json::Value> = client
-        .get(format!("http://{address}/v1/quickopen?query=login"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        all.len(),
-        2,
-        "runner도 local과 동일한 db::quickopen_search를 공유"
-    );
-
-    let sessions_only: Vec<serde_json::Value> = client
-        .get(format!(
-            "http://{address}/v1/quickopen?query=login&scopes=session"
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(sessions_only.len(), 1);
-    assert_eq!(sessions_only[0]["scope"], "session");
 
     server.abort();
     let _ = std::fs::remove_file(db_path);
@@ -564,87 +498,6 @@ async fn authenticated_file_and_diff_handlers_enforce_repository_roots() {
         "hunks: {hunks:?}"
     );
 
-    // B-1: 주석 저장/목록/재전송 — local(commands.rs)과 동일한 형식을 runner HTTP로도 노출.
-    let hunk_id = hunks[0]["id"].as_str().unwrap().to_string();
-    let created: serde_json::Value = client
-        .post(format!("http://{address}/v1/tasks/{task_id}/annotations"))
-        .json(&serde_json::json!({
-            "hunk_id": hunk_id,
-            "path": "note.txt",
-            "line": 1,
-            "side": "new",
-            "body_md": "고쳐줘"
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(created["status"], "draft");
-    let annotation_id = created["id"].as_str().unwrap().to_string();
-
-    let updated: serde_json::Value = client
-        .post(format!("http://{address}/v1/tasks/{task_id}/annotations"))
-        .json(&serde_json::json!({
-            "id": annotation_id,
-            "hunk_id": hunk_id,
-            "path": "note.txt",
-            "line": 1,
-            "side": "new",
-            "body_md": "코멘트 수정"
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        updated["body_md"], "코멘트 수정",
-        "draft 본문 자동 저장(onBlur)"
-    );
-
-    let listed: serde_json::Value = client
-        .get(format!("http://{address}/v1/tasks/{task_id}/annotations"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let listed = listed.as_array().unwrap();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(
-        listed[0]["matched_hunk_id"], hunk_id,
-        "현재 diff에 hunk_id로 재매칭됨"
-    );
-    assert_eq!(listed[0]["orphaned"], false);
-
-    // task는 mode=terminal이라 대화 재개 가드가 동기적으로 거부 — status는 draft로 롤백된다
-    // (실제 벤더 프로세스는 전혀 건드리지 않음 — resolve/spawn 이전에 거부).
-    let resend = client
-        .post(format!(
-            "http://{address}/v1/tasks/{task_id}/annotations/resend"
-        ))
-        .json(&serde_json::json!({ "ids": [annotation_id] }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resend.status(), reqwest::StatusCode::CONFLICT);
-    let after_rollback: serde_json::Value = client
-        .get(format!("http://{address}/v1/tasks/{task_id}/annotations"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        after_rollback[0]["status"], "draft",
-        "resume 동기 가드 실패는 status를 draft로 롤백한다(부분 갱신 금지)"
-    );
-
     let denied = client
         .get(format!("http://{address}/v1/files/tree"))
         .query(&[("repository", &"/tmp".to_string())])
@@ -657,64 +510,6 @@ async fn authenticated_file_and_diff_handlers_enforce_repository_roots() {
     let _ = std::fs::remove_file(db_path);
     let _ = std::fs::remove_file(token_path);
     let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn skills_endpoint_lists_repository_skills_and_enforces_roots() {
-    let (pool, db_path) = test_pool("skills").await;
-    let root = temp_root::dir().join(format!(
-        "praxis-runner-http-skills-{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::SeqCst)
-    ));
-    let outside = temp_root::dir().join(format!(
-        "praxis-runner-http-outside-{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::SeqCst)
-    ));
-    let skill_dir = root.join(".claude").join("skills").join("remote-demo");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::create_dir_all(&outside).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: remote-demo\ndescription: 원격 세션 스킬 목록 픽스처\n---\n\n본문\n",
-    )
-    .unwrap();
-    let root = root.canonicalize().unwrap();
-    let root_text = root.to_string_lossy().into_owned();
-    let (address, server, token_path) = serve_with_roots(pool, vec![root.clone()]).await;
-    let client = authenticated_client();
-
-    let skills: serde_json::Value = client
-        .get(format!("http://{address}/v1/skills"))
-        .query(&[("repository", &root_text)])
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let listed = skills.as_array().expect("목록은 배열이다");
-    let demo = listed
-        .iter()
-        .find(|entry| entry["name"] == "remote-demo")
-        .unwrap_or_else(|| panic!("저장소 스킬이 목록에 없다: {listed:?}"));
-    assert_eq!(demo["description"], "원격 세션 스킬 목록 픽스처");
-    assert_eq!(demo["global"], false, "저장소 스킬은 프로젝트 스코프다");
-
-    let denied = client
-        .get(format!("http://{address}/v1/skills"))
-        .query(&[("repository", &outside.to_string_lossy().into_owned())])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
-
-    server.abort();
-    let _ = std::fs::remove_file(db_path);
-    let _ = std::fs::remove_file(token_path);
-    let _ = std::fs::remove_dir_all(root);
-    let _ = std::fs::remove_dir_all(outside);
 }
 
 #[tokio::test]
@@ -782,237 +577,10 @@ async fn task_finalization_endpoints_merge_or_discard_review_worktrees() {
         "approved\n"
     );
 
-    db::append_task_output(&pool, discarded, 3, "discard output")
-        .await
-        .unwrap();
-    let delete = client
-        .delete(format!("http://{address}/v1/tasks/{discarded}"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(delete.status(), reqwest::StatusCode::NO_CONTENT);
-    assert!(db::get_task(&pool, discarded).await.unwrap().is_none());
-    assert!(db::list_runner_events_after(&pool, 0, 100)
-        .await
-        .unwrap()
-        .iter()
-        .all(|event| event.task_id != discarded));
-    assert!(db::list_task_output_after(&pool, 0, 100)
-        .await
-        .unwrap()
-        .iter()
-        .all(|output| output.task_id != discarded));
-
     server.abort();
     let _ = std::fs::remove_file(db_path);
     let _ = std::fs::remove_file(token_path);
     let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn runner_memory_and_context_endpoints_use_the_server_owned_store() {
-    let (pool, db_path) = test_pool("memory").await;
-    let root = git_repository("memory").canonicalize().unwrap();
-    let root_text = root.to_string_lossy().into_owned();
-    let (address, server, token_path) = serve_with_roots(pool.clone(), vec![root.clone()]).await;
-    let client = authenticated_client();
-
-    let memory_id: i64 = client
-        .post(format!("http://{address}/v1/memories"))
-        .json(&serde_json::json!({
-            "repository": root_text,
-            "kind": "decision",
-            "content": "runner memory endpoint"
-        }))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    client
-        .post(format!(
-            "http://{address}/v1/memories/{memory_id}/evidence/code-locations"
-        ))
-        .json(&serde_json::json!({
-            "relative_path": "note.txt",
-            "line_start": 1,
-            "line_end": 1
-        }))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-    for path in [
-        format!("/v1/memories/{memory_id}/confirmations"),
-        format!("/v1/memories/{memory_id}/review"),
-        format!("/v1/memories/{memory_id}/approve"),
-    ] {
-        client
-            .post(format!("http://{address}{path}"))
-            .json(&serde_json::json!({ "expires_at": null }))
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap();
-    }
-    let outside = root.with_extension("outside");
-    std::fs::create_dir_all(&outside).unwrap();
-    let hidden_id = praxis_lib::memory::create_candidate(
-        &pool,
-        praxis_lib::memory::tier::PROJECT,
-        Some(outside.to_string_lossy().as_ref()),
-        praxis_lib::memory::knowledge_type::CLAIM,
-        "out of scope",
-        Some("test"),
-        1,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        client
-            .post(format!(
-                "http://{address}/v1/memories/{hidden_id}/confirmations"
-            ))
-            .json(&serde_json::json!({ "expires_at": null }))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        reqwest::StatusCode::BAD_REQUEST
-    );
-    let memories: serde_json::Value = client
-        .get(format!("http://{address}/v1/memories"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(memories[0]["status"], "verified");
-    assert_eq!(memories[0]["evidence_count"], 2);
-    assert_eq!(memories[0]["blocking_evidence_count"], 0);
-    assert_eq!(memories.as_array().unwrap().len(), 1);
-    assert_eq!(memories[0]["scope_key"], root.to_string_lossy().as_ref());
-    let preview: serde_json::Value = client
-        .post(format!("http://{address}/v1/memories/preview"))
-        .json(&serde_json::json!({
-            "repository": root,
-            "instruction": "runner memory endpoint"
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(preview.as_array().unwrap().len(), 1);
-
-    let task: db::Task = client
-        .post(format!("http://{address}/v1/tasks"))
-        .json(&serde_json::json!({
-            "repository": root_text,
-            "instruction": "runner memory endpoint",
-            "agent": "claude",
-            "mode": "terminal"
-        }))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let report: serde_json::Value = client
-        .get(format!("http://{address}/v1/tasks/{}/context", task.id))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(report["memory_count"], 1);
-    assert_eq!(report["memory_counts"]["scope_total"], 1);
-    assert_eq!(report["memory_counts"]["actionable"], 0);
-    assert_eq!(report["memory_counts"]["verified"], 1);
-    assert_eq!(report["memory_counts"]["eligible"], 1);
-    // 파일형 투영(설계 2026-09-13)은 DB 원장을 남기지 않는다 — 보고서의 투영 칸은 비어 있다.
-    assert!(report["projection"].is_null(), "{report}");
-    // 보고서는 벤더 × {글로벌, 프로젝트} 후보를 모두 싣는다 — 지금 투영이 쓰는 파일은
-    // AGENTS.md 하나뿐(ADR 2026-09-19)이라 위치로 고르면 없는 파일이나 글로벌 파일을 집는다.
-    // 블록을 실제로 가진 것이 이 작업의 컨텍스트 파일이다.
-    let context_path = report["vendors"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|v| v["files"].as_array().unwrap())
-        .find(|f| f["has_praxis_block"] == true)
-        .and_then(|f| f["path"].as_str())
-        .expect("투영된 컨텍스트 파일이 보고서에 있어야 한다");
-    let content: String = client
-        .get(format!(
-            "http://{address}/v1/tasks/{}/context/file",
-            task.id
-        ))
-        .query(&[("path", context_path)])
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    // 컨텍스트 파일에는 창고 파일의 사본(규칙 포함)이 실린다.
-    assert!(content.contains("Praxis Memory"), "{content}");
-    let evidence: serde_json::Value = client
-        .get(format!("http://{address}/v1/memories/{memory_id}/evidence"))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(evidence.as_array().unwrap().len(), 2);
-    std::fs::write(root.join("note.txt"), "changed\n").unwrap();
-    let revalidation: serde_json::Value = client
-        .post(format!(
-            "http://{address}/v1/memories/{memory_id}/revalidate"
-        ))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(revalidation["stale"], true);
-    let stale_memories: serde_json::Value = client
-        .get(format!("http://{address}/v1/memories"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(stale_memories[0]["evidence_count"], 2);
-    assert_eq!(stale_memories[0]["blocking_evidence_count"], 1);
-
-    server.abort();
-    let _ = std::fs::remove_file(db_path);
-    let _ = std::fs::remove_file(token_path);
-    let _ = std::fs::remove_dir_all(root);
-    let _ = std::fs::remove_dir_all(outside);
 }
 
 #[tokio::test]
@@ -1132,152 +700,6 @@ async fn conversation_message_rejects_terminal_tasks() {
     let _ = std::fs::remove_file(token_path);
 }
 
-/// 원격 세션도 대화 도중 모델을 바꾼다 — 데스크톱 `task_model_set`의 짝이다.
-///
-/// 진행 중인 턴은 안 바뀐다. 다음 턴이 행을 새로 읽으므로 여기서 쓴 값이 그때 실린다.
-#[tokio::test]
-async fn conversation_model_override_is_replaced_for_the_next_turn() {
-    let (pool, db_path) = test_pool("model").await;
-    let convo_id = db::insert_task(
-        &pool,
-        "/tmp",
-        "branch",
-        "main",
-        "/tmp",
-        "first ask",
-        Some("claude"),
-        None,
-        "conversation",
-        1,
-    )
-    .await
-    .unwrap();
-    db::update_state(&pool, convo_id, db::state::AWAITING_REVIEW, 2)
-        .await
-        .unwrap();
-    db::set_task_model(&pool, convo_id, "haiku").await.unwrap();
-    let (address, server, token_path) = serve(pool.clone()).await;
-    let client = authenticated_client();
-
-    let replaced = client
-        .put(format!("http://{address}/v1/tasks/{convo_id}/model"))
-        .json(&serde_json::json!({ "model": "  opus  " }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(replaced.status(), reqwest::StatusCode::NO_CONTENT);
-    assert_eq!(
-        db::get_task(&pool, convo_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .model
-            .as_deref(),
-        Some("opus")
-    );
-    // 데스크톱과 같은 본체를 지나므로 컨텍스트 무효화도 함께 적재된다 — 이것이 없으면 원격
-    // 게이지가 옛 모델의 윈도로 잔량을 계산한다.
-    assert!(db::list_convo_events(&pool, convo_id)
-        .await
-        .unwrap()
-        .iter()
-        .any(|event| event.contains("model_change")));
-
-    // 빈 문자열은 해제다 — 원격만 벤더 기본으로 못 돌아가면 세션 헤더가 막다른 길이 된다.
-    let cleared = client
-        .put(format!("http://{address}/v1/tasks/{convo_id}/model"))
-        .json(&serde_json::json!({ "model": "" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(cleared.status(), reqwest::StatusCode::NO_CONTENT);
-    assert!(db::get_task(&pool, convo_id)
-        .await
-        .unwrap()
-        .unwrap()
-        .model
-        .unwrap_or_default()
-        .trim()
-        .is_empty());
-
-    // 없는 작업을 400으로 돌려주면 클라이언트가 "모델 이름이 틀렸다"로 읽는다.
-    let missing = client
-        .put(format!("http://{address}/v1/tasks/9999/model"))
-        .json(&serde_json::json!({ "model": "opus" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
-
-    server.abort();
-    let _ = std::fs::remove_file(db_path);
-    let _ = std::fs::remove_file(token_path);
-}
-
-/// 커스텀 에이전트는 `agent_args`의 커스텀 분기가 model을 아예 싣지 않는다 — 저장해도 CLI에
-/// 닿지 못한다. 데스크톱과 같은 게이트가 원격에도 걸려야 두 경로가 갈라지지 않는다.
-#[tokio::test]
-async fn model_override_is_refused_for_a_custom_agent() {
-    let (pool, db_path) = test_pool("model-custom").await;
-    let convo_id = db::insert_task(
-        &pool,
-        "/tmp",
-        "branch",
-        "main",
-        "/tmp",
-        "first ask",
-        Some("mybin --foo"),
-        None,
-        "conversation",
-        1,
-    )
-    .await
-    .unwrap();
-    let (address, server, token_path) = serve(pool.clone()).await;
-
-    let refused = authenticated_client()
-        .put(format!("http://{address}/v1/tasks/{convo_id}/model"))
-        .json(&serde_json::json!({ "model": "opus" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
-    assert!(refused
-        .text()
-        .await
-        .unwrap()
-        .contains("모델을 바꿀 수 없는 에이전트입니다"));
-    assert!(db::get_task(&pool, convo_id)
-        .await
-        .unwrap()
-        .unwrap()
-        .model
-        .unwrap_or_default()
-        .is_empty());
-
-    server.abort();
-    let _ = std::fs::remove_file(db_path);
-    let _ = std::fs::remove_file(token_path);
-}
-
-#[tokio::test]
-async fn terminal_input_requires_an_active_pty_session() {
-    let (pool, db_path) = test_pool("input").await;
-    let (address, server, token_path) = serve(pool).await;
-
-    let response = authenticated_client()
-        .post(format!("http://{address}/v1/tasks/42/input"))
-        .json(&serde_json::json!({ "data": "hello\r" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
-
-    server.abort();
-    let _ = std::fs::remove_file(db_path);
-    let _ = std::fs::remove_file(token_path);
-}
-
 async fn test_pool(label: &str) -> (sqlx::SqlitePool, String) {
     let suffix = COUNTER.fetch_add(1, Ordering::SeqCst);
     let db_path = temp_root::dir()
@@ -1317,6 +739,7 @@ async fn create_review_task(
             mode: "terminal".to_string(),
             goal_contract: None,
             resume_session: None,
+            resume_vendor: None,
         },
         1,
     )
@@ -1369,6 +792,7 @@ async fn create_review_task_with_contract(
                 non_goals: vec![],
             }),
             resume_session: None,
+            resume_vendor: None,
         },
         1,
     )
@@ -1452,7 +876,8 @@ async fn serve_with_roots(
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
-            http::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            http::mobile_surface_router(state, std::sync::Arc::new(RunnerTaskActions))
+                .into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
         .unwrap();

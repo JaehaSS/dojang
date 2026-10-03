@@ -7,7 +7,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { homeDir } from "@tauri-apps/api/path";
 import { TerminalView } from "./components/TerminalView";
-import { WikiView } from "./components/WikiView";
 import { vaultLocalComposerSend } from "./lib/knowledge-vault-ipc";
 import { DiffSessionScope } from "./components/DiffSessionContext";
 import { PreviewTab } from "./components/ide/PreviewTab";
@@ -18,9 +17,8 @@ import {
   type ToolbarMessage,
 } from "./lib/preview-workbench/window-events";
 import { ToolbarHost } from "./lib/preview-workbench/toolbar-host";
-import { Sidebar, WIKI_LOCAL_ONLY_REASON, type View } from "./components/ide/Sidebar";
+import { Sidebar, type View } from "./components/ide/Sidebar";
 import { HomeView } from "./components/ide/HomeView";
-import { WorkflowPanel } from "./components/ide/workflow/WorkflowPanel";
 import { projectEditorOpen } from "./lib/project-editor-ipc";
 import { EnsembleView } from "./components/ide/EnsembleView";
 import { ConflictResolver } from "./components/ide/ConflictResolver";
@@ -38,7 +36,7 @@ import { DebateView } from "./components/ide/DebateView";
 import { endsSequence } from "./components/ide/debate-rounds";
 import { applyStateOverrides, noteStateOverride, type StateOverrides } from "./lib/task-state-overlay";
 import type { DebateEventLike } from "./components/ide/debate-rounds";
-import { MIN_DEBATE_SESSION_WIDTH, MIN_SESSION_WIDTH } from "./components/ide/workspace-split-width";
+import { debateSessionWidth, MIN_SESSION_WIDTH } from "./components/ide/workspace-split-width";
 import {
   FLOATING_CHANNEL_HEADER_INSET,
   FLOATING_CHANNEL_RESERVED,
@@ -74,6 +72,8 @@ import { subagentRootMap, subagentThreadRootOf, subagentThreads } from "./lib/ac
 import { TerminalDock } from "./components/ide/TerminalDock";
 import { UsageBar } from "./components/ide/UsageBar";
 import { InsightsView } from "./components/ide/InsightsView";
+import { VocabView } from "./components/ide/VocabView";
+import { PipelineView } from "./components/ide/pipeline/PipelineView";
 import { Composer } from "./components/ide/Composer";
 import { refreshMessage, type BaseRefreshEvent } from "./lib/base-refresh";
 import type { CreatingEvent, CreationState } from "./lib/creation-stage";
@@ -95,6 +95,9 @@ import { useSessionDraft } from "./components/ide/useSessionDraft";
 import { FileTree } from "./components/ide/FileTree";
 import { ChangedFileCount, ChangesList } from "./components/ide/ChangesList";
 import { previewTabsEnabled, setPreviewTabsEnabled } from "./lib/preview-tabs";
+import { useExperimentalFeatures } from "./lib/experimental-features";
+import { useSessionStyle } from "./lib/session-style";
+import { useQuestionThreads } from "./lib/use-question-threads";
 import { fileTabKey } from "./lib/tab-key";
 import { useTreeFileOps } from "./components/ide/useTreeFileOps";
 import { ContextMenuShell } from "./components/ide/ContextMenuShell";
@@ -118,7 +121,7 @@ import { formatCapturesPrompt } from "./lib/designmode/prompt";
 import { pushCapture } from "./lib/designmode/store";
 import { buildAskPayload } from "./lib/selection-ask";
 import { SettingsPanel, type SettingsTab } from "./components/ide/SettingsPanel";
-import { NotificationInbox } from "./components/ide/NotificationInbox";
+import { TaskResultPanel } from "./components/ide/TaskResultPanel";
 import { CapsulePanel } from "./components/ide/CapsulePanel";
 import { Menu } from "./components/ide/Menu";
 import { Icon } from "./components/ide/icons";
@@ -149,7 +152,7 @@ import {
   convoStatus,
   convoInterrupt,
   debateRoundCapGet,
-  debateSide,
+  debateSides,
   type DebateSide,
   type ConvoStatus,
   type ConvoEvent,
@@ -166,9 +169,9 @@ import {
   grillSaveNote,
   useWorktreeGet,
   taskRef,
-  retroDigestList,
+  insightCards,
 } from "./lib/ipc";
-import { hasUnread, loadSeenWeek } from "./lib/retro-seen";
+import { countUnseen } from "./lib/insight-seen";
 import type { HostFailure } from "./lib/task-list-merge";
 import { hostCapabilities, LOCAL_ONLY_REASON } from "./lib/host-capabilities";
 import { HostScopeProvider } from "./lib/host-scope";
@@ -178,7 +181,7 @@ import {
   applyTreeMetrics,
   normalizeEditorSettings,
 } from "./lib/editor-settings";
-import { normalizeAgentSelection } from "./lib/agents";
+import { singleAgentSelection } from "./lib/agents";
 import { isTerminalState, taskStatusLabel, taskTextClass, taskTone } from "./lib/task-status";
 import { inferAgentRole } from "./lib/agent-role";
 import { normalizeReasoningEffort } from "./lib/models";
@@ -209,6 +212,7 @@ import { applyTheme, counterpartOf } from "./lib/themes";
 import { useTheme } from "./lib/use-theme";
 import { useDeferredTaskRemoval } from "./components/ide/useDeferredTaskRemoval";
 import { useNotificationCollector, useNotificationSnapshot } from "./lib/use-notification-snapshot";
+import { usePendingQuestions } from "./lib/use-pending-questions";
 import { notificationAcknowledge, type InboxItem } from "./lib/notifications";
 import { RemovalUndoBar } from "./components/ide/RemovalUndoBar";
 import { VoiceHUD, type VoiceHudState } from "./components/ide/VoiceHUD";
@@ -294,7 +298,8 @@ function App() {
   } | null>(null);
   const popupNotificationRef = useRef<(payload: EditorNotificationPayload) => void>(() => {});
   const notifications = useNotificationSnapshot();
-  const { reconcile: reconcileNotifications, errors: notificationErrors } = useNotificationCollector(
+  const pendingQuestionIds = usePendingQuestions();
+  const { reconcile: reconcileNotifications } = useNotificationCollector(
     notifications.snapshot,
     notifications.setSnapshot,
     notifications.setError,
@@ -325,8 +330,6 @@ function App() {
     }
   });
   const [view, setView] = useState<View>("home");
-  /** Wiki를 특정 필터로 열 때 지목하는 탭 — 메모리는 Wiki 공간의 세 번째 필터다(설계 2026-09-13 §5). */
-  const [wikiInitialTab, setWikiInitialTab] = useState<"memory" | undefined>(undefined);
   /** 퀵오픈이 스킬 항목으로 설정을 열 때 지목하는 탭 — ADR 0191 결정 4. */
   const [settingsTab, setSettingsTab] = useState<SettingsTab | undefined>();
   const viewRef = useRef<View>(view);
@@ -351,12 +354,12 @@ function App() {
   useEffect(() => {
     setBaseBranch("");
   }, [repo]);
-  // 리드 에이전트 집합(pluggable) — 1개=인터랙티브 단일, 2개+=헤드리스 앙상블. localStorage(JSON) 영속.
+  // 리드 에이전트(pluggable). localStorage(JSON) 영속. 앙상블(2개+) 생성 진입점은 1.0에서 닫았다 — 항상 1개.
   const [agents, setAgentsState] = useState<string[]>(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem("praxis-agents") || "null");
       if (Array.isArray(parsed) && parsed.length && parsed.every((x) => typeof x === "string"))
-        return normalizeAgentSelection(parsed);
+        return singleAgentSelection(parsed);
     } catch {
       /* ignore */
     }
@@ -364,7 +367,14 @@ function App() {
   });
   // 세션 단위 모델 오버라이드 ("" = 설정의 벤더 기본). 다음 작업 생성에만 쓰이므로 비영속.
   const [model, setModel] = useState("");
+  // "고급·실험 기능 표시"가 꺼져 있으면 Design Mode 등을 숨긴다(설정 › 모양새).
+  const advancedFeatures = useExperimentalFeatures();
+  // 질문 응답 — 에이전트가 선택지 질문을 던지고 답을 받아 이어가는 질문형 세션. 정식 기능이라 토글과 무관하다.
   const [questionsEnabled,setQuestionsEnabled]=useState(false);
+  // 실행 전 승인 — Claude 질문 세션에서 파일 수정·명령 실행 전에 CLI처럼 허용 여부를 묻는다.
+  const [approvalsEnabled,setApprovalsEnabled]=useState(false);
+  // 세션 방식(설정 › 작업 실행) — 터미널이면 턴마다 `-p`로 도는 대화 대신 실제 CLI를 PTY로 띄운다.
+  const sessionStyle = useSessionStyle();
   const [serviceTier, setServiceTier] = useState<"default" | "fast">("default");
   // Codex 세션 단위 reasoning override ("" = Codex 설정 기본값).
   const [reasoningEffort, setReasoningEffort] = useState("");
@@ -378,12 +388,16 @@ function App() {
     );
   };
   const setAgents = (a: string[]) => {
-    const next = normalizeAgentSelection(a);
+    const next = singleAgentSelection(a);
     // 에이전트 선택이 바뀌면 모델 오버라이드 초기화 — 다른 벤더에 무효한 모델이 넘어가는 것을 방지.
     if (next[0] !== agents[0] || next.length !== agents.length) {
       setModel("");
       setReasoningEffort("");
       setServiceTier("default");
+      // 원래 공급자와 다른 에이전트로는 같은 벤더 세션을 승계할 수 없다.
+      setResumeSession((current) =>
+        current && (next.length !== 1 || next[0] !== (current.vendor ?? "claude")) ? null : current,
+      );
     }
     setAgentsState(next);
     localStorage.setItem("praxis-agents", JSON.stringify(next));
@@ -411,17 +425,7 @@ function App() {
   );
   const [instruction, setInstruction] = useState("");
   const [vaultDraftVersion, setVaultDraftVersion] = useState(0);
-  const vaultClientRef = useMemo(() => crypto.randomUUID(), [composerHost, repo, vaultDraftVersion]);
-  const vaultCreatePendingRef = useRef(false);
-  const [vaultFollowupPending, setVaultFollowupPending] = useState(false);
-  const vaultFollowupPendingRef = useRef(false);
-  const onVaultCreatePending = useCallback((pending: boolean) => {
-    vaultCreatePendingRef.current = pending;
-  }, []);
-  const onVaultFollowupPending = useCallback((pending: boolean) => {
-    vaultFollowupPendingRef.current = pending;
-    setVaultFollowupPending(pending);
-  }, []);
+  const vaultClientRef = useMemo(() => crypto.randomUUID(), [composerHost, repo, vaultDraftVersion, agents, view, selectedKey, activeEnsemble]);
   const composerDraftsRef = useRef(new Map<HostId, {
     repo: string; instruction: string; agents: string[]; model: string; reasoningEffort: string; serviceTier: "default" | "fast";
   }>());
@@ -505,7 +509,6 @@ function App() {
     changeFile,
     saveFile,
     reloadFile,
-    reloadIfClean,
     closeTab,
     closeTabsForPath,
     flushDirty,
@@ -529,7 +532,6 @@ function App() {
     gotoSymbol,
     askLspStatus,
     openLspTarget,
-    codeGraph,
   } = useEditorActions({ taskId: selectedId, host: selectedHost, onError: setErr, openFile });
   // 열려 있는 서브 에이전트 탭(Task tool_id) — 작업 전환 시 리셋 (openTask가 centerTab도 복구).
   const [subTabs, setSubTabs] = useState<string[]>([]);
@@ -541,7 +543,9 @@ function App() {
   /** 같은 이벤트의 원본 — 아이템에는 `speaker`가 남지 않아 토론 뷰가 라운드를 못 가른다. */
   const [convoEvents, setConvoEvents] = useState<DebateEventLike[]>([]);
   /** 우측 자리 — 있으면 이 작업은 토론 중이다. 좌측은 여전히 `tasks`가 원천이다. */
-  const [debateRight, setDebateRight] = useState<DebateSide | null>(null);
+  /** 비좌측 자리들. `null`이면 토론이 아니다 — 빈 배열을 두지 않아 기존 `!= null` 판정이 그대로 선다. */
+  const [debateSeats, setDebateSeats] = useState<DebateSide[] | null>(null);
+  const vaultFollowupClientRef = useMemo(() => `vault-followup:${selectedId}:${crypto.randomUUID()}`, [selectedKey, selectedId, view, debateSeats, activeEnsemble]);
   const [debateRoundCap, setDebateRoundCap] = useState(3);
   const completeNotificationResult = (taskId: number, requestId: string | null, loaded: boolean) => {
     const pending = notificationResultRef.current;
@@ -686,21 +690,29 @@ function App() {
   }, []);
   // 좌측 내비 접힘 — 풀화면으로 대화에 집중할 때. ⌥⌘B 또는 사이드바 상단 버튼으로 토글.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  // 읽지 않은 주간 회고 — 사이드바 신선도 점(설계 0054 DR-6).
-  // 적체 건수가 아니라 새 다이제스트일 때만 켠다. 만성 배지는 두 주면 무시된다.
-  const [retroUnread, setRetroUnread] = useState(false);
-  useEffect(() => {
-    let alive = true;
-    retroDigestList(1)
-      .then((list) => {
-        if (!alive) return;
-        setRetroUnread(hasUnread(list[0]?.week_start ?? null, loadSeenWeek()));
-      })
-      .catch(() => alive && setRetroUnread(false));
-    return () => {
-      alive = false;
-    };
+  // 인사이트 사이드바 점 — 아직 보지 않은 발견 카드 수(설계 2026-09-28 §4, 슬라이스 T5).
+  // 예전 회고 신선도 점(retroUnread, #565에서 회고와 함께 폐기)과 같은 자리이지만, 켜지는
+  // 조건이 "새 다이제스트"가 아니라 "아직 안 본 카드가 있다"이다. `insightCards("all", tz)`는
+  // 파일 무거운 지출 스캔을 건너뛰어(설계 §5.3 "all"은 S1·S6을 내지 않는다) 앱 시작마다
+  // 불러도 싸다 — 이 배지는 사실상 S2·L1만 센다.
+  const [insightsUnread, setInsightsUnread] = useState(0);
+  const refreshInsightsUnread = useCallback(() => {
+    insightCards("all", -new Date().getTimezoneOffset() * 60)
+      .then((cards) => setInsightsUnread(countUnseen(cards)))
+      .catch(() => setInsightsUnread(0));
   }, []);
+  useEffect(() => {
+    refreshInsightsUnread();
+  }, [refreshInsightsUnread]);
+  // 인사이트 화면을 나가면 다시 센다 — 그 사이 InsightsView가 보여준 카드를 "봤다"로
+  // 남겼을 것이므로 점이 꺼져야 한다.
+  const prevViewForInsightsRef = useRef(view);
+  useEffect(() => {
+    if (prevViewForInsightsRef.current === "insights" && view !== "insights") {
+      refreshInsightsUnread();
+    }
+    prevViewForInsightsRef.current = view;
+  }, [view, refreshInsightsUnread]);
   // 우측 도구 패널 — 열린 도구 탭과 활성 탭을 분리해 데스크톱 앱처럼 전환한다.
   // 작업정보 플로팅 채널의 펼침 여부 — 컨텍스트 게이지가 토글한다(설계 0044).
   // 상태는 위 useSessionPanels가 세션별로 들고 있다.
@@ -776,10 +788,14 @@ function App() {
     cancel: (turnId) => getTransport(selectedHost).sideQuestionCancel(selectedId, turnId),
     reset: (generation) => getTransport(selectedHost).sideQuestionReset(selectedId, generation),
   }), [selectedHost, selectedId]);
+  const questionThreads = useQuestionThreads(selectedKey, selected?.mode === "conversation", sideQuestionApi);
+  const hasQuestionThread = questionThreads.has;
   const agentInputRef = useRef(agentInput);
   agentInputRef.current = agentInput;
   const [diffStat, setDiffStat] = useState<string | null>(null);
   const [contextDiff, setContextDiff] = useState<WorkContextDiff>({ state: "loading" });
+  const [resultTask, setResultTask] = useState<number | null>(null);
+  const closeResult = useCallback(() => setResultTask(null), []);
   const [capsule, setCapsule] = useState<Capsule | null>(null);
   const [capsuleBusy, setCapsuleBusy] = useState(false);
   // Quick Open(⌘K/⌘P) 오버레이 — fileScopeOnly=true면 file 스코프로 고정(⌘P 프리셋).
@@ -1280,7 +1296,7 @@ function App() {
     };
   }, [selectedId, selectedHost, selectedKey, selectedConnected, notificationLoadRequest, refreshTree, refreshContextDiff]);
 
-  /** 우측 자리 조회 — "토론 중"은 컬럼이 아니라 이 행의 존재로 파생한다. 원격은 토론을 돌리지 않는다. */
+  /** 비좌측 자리 조회 — "토론 중"은 컬럼이 아니라 이 행의 존재로 파생한다. 원격은 토론을 돌리지 않는다. */
   const refreshDebateSide = useCallback(() => {
     // 상한은 전역 설정이라 세션을 따라다니지 않는다 — 자리를 읽는 김에 분모도 다시 읽는다.
     void debateRoundCapGet().then(setDebateRoundCap).catch(() => {});
@@ -1289,15 +1305,15 @@ function App() {
     // 것뿐인데 창 전체가 폴백으로 바뀐다(원장 #450의 "먹통"). 이웃 effect들(위 복원, 아래 원격
     // 리플레이)은 모두 `selectedConnected`를 먼저 보므로 여기만 어긋나 있었다.
     if (selectedId == null || !selectedConnected || getTransport(selectedHost).kind !== "local") {
-      setDebateRight(null);
+      setDebateSeats(null);
       return;
     }
     const taskId = selectedId;
-    void debateSide(taskId)
-      .then((side) => {
-        if (selectedRef.current?.id === taskId) setDebateRight(side);
+    void debateSides(taskId)
+      .then((seats) => {
+        if (selectedRef.current?.id === taskId) setDebateSeats(seats.length > 0 ? seats : null);
       })
-      .catch(() => setDebateRight(null));
+      .catch(() => setDebateSeats(null));
   }, [selectedId, selectedHost, selectedConnected]);
   useEffect(() => refreshDebateSide(), [refreshDebateSide]);
 
@@ -1466,6 +1482,21 @@ function App() {
     onNotification: (payload) => popupNotificationRef.current(payload),
     onError: setErr,
   });
+
+  // 파일 탭을 보던 코드 열은 팝아웃과 함께 닫는다. 파일 탭만 빠지면 열이 첫 탭(작업정보)으로
+  // 물러나, 떠 있던 채널이 부르지도 않은 옆 열로 옮겨 가고 세션 폭까지 바뀐다. 이 열이 보여 주던
+  // 것은 창으로 나갔으니 코드 열을 열기 전의 모양으로 돌아간다. 팝아웃되는 순간과, 나가 있는
+  // 동안 다른 세션으로 옮겨 그 세션의 열 상태가 복원되는 순간에만 본다 — 나가 있는 동안 ⌥⌘S로
+  // 다시 여는 것까지 막으면 토글이 먹지 않는 것처럼 보인다.
+  // 세션은 `selectedKey`가 아니라 패널 값의 주인으로 본다 — 전환 직후 한 렌더는 옛 세션의 값이다.
+  const panelKey = panels.stateKey;
+  const popOutSeenRef = useRef({ poppedOut: editorWindow.poppedOut, key: panelKey });
+  useLayoutEffect(() => {
+    const seen = popOutSeenRef.current;
+    const arrived = editorWindow.poppedOut && (!seen.poppedOut || seen.key !== panelKey);
+    popOutSeenRef.current = { poppedOut: editorWindow.poppedOut, key: panelKey };
+    if (arrived && codeOpen && codeTab === "file") showCode(false);
+  }, [editorWindow.poppedOut, panelKey, codeOpen, codeTab, showCode]);
 
   /** 링크 배달 함수만 따로 잡는다. `editorWindow` 객체째 의존성에 넣으면 매 렌더 참조가 바뀌어
    *  `openAgentLink`가 다시 만들어지고, 그것을 받는 Markdown memo가 전부 깨진다. */
@@ -1755,7 +1786,6 @@ function App() {
   };
 
   const create = async () => {
-    if (vaultCreatePendingRef.current) return;
     const list = agents.length ? agents : ["claude"];
     const ref = vaultClientRef;
     const resume = resumeSession;
@@ -1785,10 +1815,9 @@ function App() {
           setErr("이어받을 세션을 고른 뒤 서버가 바뀌었습니다. 세션을 다시 선택해 주세요.");
           return;
         }
-        // Phase 1은 claude 단일 이어받기만 지원한다(설계 2026-09-17) — 세션 선택 시
-        // 에이전트를 claude로 고정하지만, 이후 AgentPicker로 바뀔 수 있어 여기서도 확인한다.
-        if (list.length !== 1 || list[0] !== "claude") {
-          setErr("세션 이어받기는 claude 단일 에이전트에서만 지원합니다.");
+        const vendor = resume.vendor ?? "claude";
+        if (list.length !== 1 || list[0] !== vendor) {
+          setErr(`세션 이어받기는 ${vendor} 단일 에이전트에서만 지원합니다.`);
           return;
         }
       }
@@ -1797,7 +1826,9 @@ function App() {
       // user/text/tool 이벤트를 task_output에 직렬화해 두므로 데스크톱이 같은 말풍선
       // 트랜스크립트를 복원한다(ADR 0023). terminal로 만들면 그 구조가 있는데도
       // 화면에는 PTY 스크롤백만 남아 내 말과 에이전트 말이 구분되지 않는다.
-      const mode = !remote && list.length===1 && QUESTION_AGENTS.includes(list[0]) && questionsEnabled ? "conversation_questions" : "conversation";
+      const single = !resume && !remote && list.length===1 && QUESTION_AGENTS.includes(list[0]);
+      // 터미널은 백엔드의 기존 PTY 경로(`claude <지시문>`)를 탄다. 권한은 CLI 설정을 그대로 따른다.
+      const mode = single && sessionStyle === "terminal" ? "terminal" : single && questionsEnabled ? "conversation_questions" : "conversation";
       // 인터뷰 점수는 지시문·레포가 결정화 시점과 같을 때만 기록 — stale 점수를 새 입력에 붙이지 않는다.
       const ambiguity =
         interview.result && !interviewIsStale(interview, instr, r)
@@ -1822,15 +1853,16 @@ function App() {
           rows: 30,
           model: model.trim(),
           reasoning_effort: reasoningEffort.trim(),
-          ...(!remote && list[0] === "codex" ? { service_tier: serviceTier } : {}),
+          ...(!remote && list[0] === "codex" && mode !== "terminal" ? { service_tier: serviceTier } : {}),
           ambiguity,
           // 원격은 러너 머신의 체크아웃을 따른다 — base를 고르는 UI도 그때는 뜨지 않는다.
           base_branch: remote ? "" : baseBranch,
           // 원격(Runner)은 무시한다 — tauriTransport만 실어 보낸다(transport.ts).
           client_ref: ref,
-          ...(resume ? { resumeSession: resume.session_id } : {}),
+          ...(resume ? { resumeSession: resume.session_id, resumeVendor: resume.vendor ?? "claude" } : {}),
+          ...(mode === "conversation_questions" && list[0] === "claude" && approvalsEnabled ? { approvals: true } : {}),
         });
-        if (!remote) pendingConvoRef.current = { id: t.id, text: instr };
+        if (!remote && mode !== "terminal") pendingConvoRef.current = { id: t.id, text: instr };
         registerProject(r);
         setInstruction("");
         setResumeSession(null);
@@ -2039,22 +2071,17 @@ function App() {
   });
   // 예약된 세션은 목록에서 빠진다. 실제 정리는 아직이므로 tasks 자체는 건드리지 않는다.
   const visibleTasks = tasks.filter((task) => !removal.isPending(task));
+  // 구조화 질문은 상태 전이가 없어 `tasks`의 state로는 드러나지 않는다 — 질문 원장에서 답변을
+  // 기다리는 작업을 읽어 사이드바 점·라벨에 겹친다. 답이 반영되어 질문이 닫히면 함께 사라진다.
+  // 원장은 로컬 전용이다.
+  const questionTasks = useMemo(
+    () => new Set(pendingQuestionIds.map((id) => taskKey({ host: LOCAL_HOST, id }))),
+    [pendingQuestionIds],
+  );
 
   const goHome = () => setView("home");
-  // 메모리는 더 이상 자체 채널이 아니다 — Wiki 공간의 메모리 필터로 보낸다.
-  const openMemoryFromInsights = (): void => {
-    setWikiInitialTab("memory");
-    setView("wiki");
-  };
-  // 회고 패널의 "자기개선에서 검토" — 같은 자리로 보낸다. 제안 큐는 폐기됐고 정본은 파일이다.
-  const openSelfImproveFromInsights = (): void => {
-    setWikiInitialTab("memory");
-    setView("wiki");
-  };
   const openQuickLink = (nextView: View): void => {
-    if (nextView === "wiki" && scopedHost !== LOCAL_HOST) return;
     setSettingsTab(undefined);
-    setWikiInitialTab(undefined);
     setView(nextView);
   };
 
@@ -2352,7 +2379,7 @@ function App() {
   /** 에이전트 모드 전송. 텍스트를 인자로 받는다 — 호출자는 컴포저일 수도, 에디터 창일 수도 있다.
    *  busy 개념이 없다(대화 모드의 convoBusy에 대응하는 것이 없음) — PTY에 그대로 쓴다. */
   const sendAgent = async (line: string): Promise<boolean> => {
-    if (selectedId == null || selectedKey == null || !selectedConnected || !line.trim() || vaultFollowupPendingRef.current) return false;
+    if (selectedId == null || selectedKey == null || !selectedConnected || !line.trim()) return false;
     const draft = agentInput;
     // 히스토리 누적(연속 중복 제외) + 탐색 포인터 리셋.
     const h = histRef.current;
@@ -2361,7 +2388,7 @@ function App() {
     try {
       // 로컬은 서버가 검토된 자료를 붙이고 전달 기록을 남긴다. Runner는 기존 입력 경로를 쓴다.
       if (selectedHost === LOCAL_HOST) {
-        await vaultLocalComposerSend(selectedId, line, `vault-followup:${selectedId}`, selectedHost);
+        await vaultLocalComposerSend(selectedId, line, vaultFollowupClientRef, selectedHost);
       } else {
         const data = line.includes("\n") ? `\x1b[200~${line}\x1b[201~\r` : `${line}\r`;
         await getTransport(selectedHost).taskInput(selectedId, data);
@@ -2406,7 +2433,7 @@ function App() {
   /** 대화 모드 전송. 텍스트를 인자로 받아 컴포저 state를 경유하지 않는다. */
   /** 보냈으면 true. 초안을 지워도 되는지는 호출자가 이 값으로 판단한다. */
   const sendConvo = async (line: string, imagePaths: string[] = []): Promise<boolean> => {
-    if (selectedId == null || selectedKey == null || !selectedConnected || !line.trim() || convoBusy || vaultFollowupPendingRef.current) return false;
+    if (selectedId == null || selectedKey == null || !selectedConnected || !line.trim() || convoBusy) return false;
     if (promptQueue.has(selectedKey)) {
       const pending = conversationSubmitter.current.inspect(selectedKey);
       const resolvingDirect = pending?.message === line && JSON.stringify(pending.images) === JSON.stringify(imagePaths)
@@ -2434,9 +2461,9 @@ function App() {
     }
     try {
       await conversationSubmitter.current.send(selectedKey, {
-        submit: (requestId, message, images) => transport.conversationSubmit(selectedId, requestId, message, images),
+        submit: (requestId, message, images) => transport.conversationSubmit(selectedId, requestId, message, images, vaultFollowupClientRef),
         receipt: (requestId) => transport.conversationReceipt(selectedId, requestId),
-      }, line, imagePaths);
+      }, line, imagePaths, remote ? undefined : vaultFollowupClientRef);
       if (remote) void refresh();
       return true;
     } catch (e) {
@@ -2473,7 +2500,7 @@ function App() {
       selectedRef.current?.host === from.host && selectedRef.current.id === from.id;
     setConvoBusy(true);
     try {
-      const t = await taskResume(from.host, from.id, line);
+      const t = await taskResume(from.host, from.id, line, vaultFollowupClientRef);
       pendingConvoRef.current = { id: t.id, text: line };
       setTasks((prev) => (prev.some((x) => x.id === t.id) ? prev : [t, ...prev]));
       setSelectedKey(taskKey(t));
@@ -2514,7 +2541,7 @@ function App() {
       return false;
     }
     const message = referenceText ? `${line}\n\n${referenceText}` : line;
-    if (!selectedConnected || vaultFollowupPendingRef.current) return false;
+    if (!selectedConnected) return false;
     const accepted = shouldQueuePrompt && selected != null
       ? promptQueue.enqueue(taskRef(selected), message, imagePaths)
       : await deliverConvo(message, imagePaths);
@@ -2538,6 +2565,7 @@ function App() {
       if (selectedRef.current?.host !== selectedHost || selectedRef.current.id !== selected.id) return;
     }
     if (context) setQuestionContext({ owner: selectedKey, id: crypto.randomUUID(), context });
+    questionThreads.mark(selectedKey);
     openCodeColumn("question");
   };
 
@@ -2623,6 +2651,67 @@ function App() {
       setBusy(false);
       setApprovalRefresh((value) => value + 1);
     }
+  };
+
+  /**
+   * 사이드바 우클릭 "머지" — 리뷰 바의 승인과 같은 `taskApprove` 경로다. 선택되지 않은 작업에도
+   * 쓰이므로 `act`의 선택 좌표 대신 대상 작업의 좌표로 충돌 해소를 열고, 열려 있던 작업일 때만 홈으로 간다.
+   */
+  /** 승인 본체. 실패는 호출자가 표시하도록 그대로 던진다(충돌이면 해소 창만 연다). */
+  const approveTaskOrThrow = async (task: Task) => {
+    const ref = taskRef(task);
+    setBusy(true);
+    setErr(null);
+    try {
+      await taskApprove(ref);
+      await refresh();
+      if (selectedKey === taskKey(ref)) {
+        setSelectedKey(null);
+        setView("home");
+      }
+    } catch (e) {
+      if (conflictPathsFromError(e) && ref.host === LOCAL_HOST) setConflictTask(ref);
+      throw e;
+    } finally {
+      setBusy(false);
+      setApprovalRefresh((value) => value + 1);
+    }
+  };
+
+  const mergeTask = async (task: Task) => {
+    const ref = taskRef(task);
+    if (busy) return;
+    if (!hasHost(ref.host)) {
+      setErr("호스트에 연결되지 않아 머지할 수 없습니다.");
+      return;
+    }
+    // 유예 중인 폐기가 뒤따라 터지지 않게 리뷰 바와 같은 잠금을 따른다.
+    if (removal.isPending(task)) return;
+    try {
+      await approveTaskOrThrow(task);
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
+  /** 파이프라인 화면의 티켓·통합 작업 이동. 로컬 호스트의 작업만 다룬다. */
+  const findLocalTask = (id: number) =>
+    tasks.find((task) => task.id === id && task.host === LOCAL_HOST && !task.stale);
+  const openPipelineTask = (id: number) => {
+    const task = findLocalTask(id);
+    if (task) openTask(task);
+    else setErr("작업을 찾을 수 없습니다. 목록을 새로고침한 뒤 다시 시도하세요.");
+  };
+  /**
+   * G2 승인 — 사이드바 머지와 같은 `taskApprove` 경로라 승인 가드가 그대로 적용된다.
+   * 전역 오류 배너로 삼키지 않고 실패를 던져 파이프라인 화면(FinalApproval)이 표시한다.
+   */
+  const approvePipelineIntegration = async (id: number) => {
+    const task = findLocalTask(id);
+    if (!task) throw new Error("통합 작업을 찾을 수 없습니다. 목록을 새로고침한 뒤 다시 시도하세요.");
+    if (busy) throw new Error("다른 작업이 진행 중입니다. 잠시 후 다시 시도하세요.");
+    if (removal.isPending(task)) throw new Error("폐기 유예 중인 작업입니다. 유예가 끝난 뒤 다시 시도하세요.");
+    await approveTaskOrThrow(task);
   };
 
   const openEnsemble = (ens: string) => {
@@ -2719,10 +2808,10 @@ function App() {
       active={codeTab}
       onActivate={setCodeTab}
       onClose={() => showCode(false)}
-      previewAvailable={selectedCaps.designPreview}
+      previewAvailable={advancedFeatures && selectedCaps.designPreview}
       editorPoppedOut={editorWindow.poppedOut}
       activity={<ActivityColumnTab {...channelProps} />}
-      question={selected.mode === "conversation" && debateRight == null && sideQuestionApi && selectedKey != null ? (
+      question={selected.mode === "conversation" && debateSeats == null && hasQuestionThread && sideQuestionApi && selectedKey != null ? (
         <SideQuestionPanel
           key={selectedKey}
           sessionKey={selectedKey}
@@ -2769,7 +2858,6 @@ function App() {
           onChange={changeFile}
           onSave={saveFile}
           onReload={reloadFile}
-          onReloadClean={reloadIfClean}
           onOpenPath={openPathExternal}
           onRevealPath={revealPathInFinder}
           onCopyAbsPath={(path) => void copyAbsPath(path)}
@@ -2780,12 +2868,11 @@ function App() {
           editorSettings={editorSettings}
           onGoto={selectedCaps.lsp ? gotoSymbol : undefined}
           onLspStatus={selectedCaps.lsp ? askLspStatus : undefined}
-          codeGraph={selectedCaps.lsp ? codeGraph : undefined}
           onOpenTarget={openLspTarget}
           reveal={revealTarget}
           onRevealed={() => setRevealTarget(null)}
           onNavigationError={setErr}
-          askBusy={vaultFollowupPending || (selectedMode === "conversation" && convoBusy)}
+          askBusy={selectedMode === "conversation" && convoBusy}
           onAskSeparately={selected.mode === "conversation" ? (input) => askSeparately({
             label: `${input.filePath} L${input.startLine}–${input.endLine}`,
             text: input.selectionText,
@@ -2824,7 +2911,7 @@ function App() {
    * 작업정보의 거처. 코드 열이 닫혀 있으면 세션이 오른쪽을 비워 준 자리에 뜨고, 파일·Diff를
    * 부르면 코드 열의 고정 탭으로 들어간다 — 한 번에 한 곳이다(설계 0018 · ADR 0066).
    */
-  const sessionMin = debateRight != null ? MIN_DEBATE_SESSION_WIDTH : MIN_SESSION_WIDTH;
+  const sessionMin = debateSeats != null ? debateSessionWidth(debateSeats.length + 1) : MIN_SESSION_WIDTH;
   const placement = channelPlacement({ centerWidth, pinned: channelPinned, codeOpen, sessionMin });
 
   /**
@@ -2852,7 +2939,7 @@ function App() {
     <div className="flex h-screen bg-bg text-text font-ui text-[length:var(--font-ui-size)]">
       <Sidebar
         view={view}
-        retroUnread={retroUnread}
+        insightsUnread={insightsUnread}
         onNewTask={goHome}
         onQuickLink={openQuickLink}
         browsingHost={scopedHost}
@@ -2868,9 +2955,11 @@ function App() {
           setView("home");
         }}
         onDeleteTask={removal.schedule}
+        onMergeTask={(task) => void mergeTask(task)}
         onRemoveProject={removeProject}
         groups={projectGroups}
         onProjectGroupsChange={changeProjectGroups}
+        questionTasks={questionTasks}
         hostFailures={hostFailures}
         onRetryHost={retryHost}
         onDiscardOrphans={discardOrphans}
@@ -2906,6 +2995,9 @@ function App() {
             </button>
           </div>
         )}
+        {view === "workspace" && selectedHost === LOCAL_HOST && selectedId != null && resultTask === selectedId && (
+          <TaskResultPanel key={selectedId} taskId={selectedId} onClose={closeResult} onOpenFile={(path) => { void openFile(path); }} onChanges={() => { setResultTask(null); openDiffPanel(); }} />
+        )}
         {conflictTask != null && (
           <ConflictResolver
             taskId={conflictTask.id}
@@ -2922,39 +3014,26 @@ function App() {
 
         {view === "insights" ? (
           <InsightsView
-            onOpenMemory={openMemoryFromInsights}
-            onOpenSelfImprove={openSelfImproveFromInsights}
             onOpenHome={goHome}
-            onRetroSeen={() => setRetroUnread(false)}
-          />
-        ) : view === "workflow" ? (
-          <WorkflowPanel
-            key={scopedHost}
             tasks={visibleTasks}
-            host={scopedHost}
-            projects={scopedHost === LOCAL_HOST ? projects : []}
-            initialRepo={repo}
-            loadError={hostFailures.find((failure) => failure.host === scopedHost)?.error}
             onOpenTask={openTask}
-            onRefresh={() => void refresh()}
+            onStartResearch={(instruction, repo) => {
+              if (repo) setRepo(repo);
+              // 쓰던 초안을 지우지 않는다 — 받아쓰기처럼 뒤에 덧붙이고, 전송은 사용자가 한다.
+              setInstruction((prev) => (prev.trim() ? `${prev}\n\n${instruction}` : instruction));
+              setView("home");
+            }}
           />
-        ) : view === "wiki" ? (
-          scopedHost === LOCAL_HOST ? (
-            <WikiView key={wikiInitialTab ?? "default"} repo={repo} host={selectedCoord?.host ?? LOCAL_HOST} agent={agents[0] ?? "claude"} initialTab={wikiInitialTab} taskId={selectedId} />
-          ) : (
-            <div className="flex-1 p-6 text-sm text-text-muted">
-              {WIKI_LOCAL_ONLY_REASON}
-            </div>
-          )
+        ) : view === "vocab" ? (
+          <VocabView />
+        ) : view === "pipeline" ? (
+          <PipelineView repo={repo} onOpenTask={openPipelineTask} onApproveIntegration={approvePipelineIntegration} />
         ) : view === "settings" ? (
           <SettingsPanel
             key={settingsTab ?? "default"}
             repo={repo}
             initialTab={settingsTab}
-            onOpenMemory={() => {
-              setWikiInitialTab("memory");
-              setView("wiki");
-            }}
+            agent={agents[0] ?? "claude"}
             fontSettings={fontSettings}
             onFontSettings={applyFonts}
             editorSettings={editorSettings}
@@ -3015,7 +3094,7 @@ function App() {
                       원격 3번이 로컬 3번을 고치던 좌표 혼동이 구조적으로 없다. 이 줄의 손잡이 중
                       에이전트 전환·토론만 로컬 전용이고, 그 판정은 컴포넌트가 능력 표로 한다. */}
                   <SessionModelSwitch
-                    inDebate={debateRight != null}
+                    inDebate={debateSeats != null}
                     key={selected.id}
                     task={selected}
                     contextTokens={contextTokens}
@@ -3052,8 +3131,8 @@ function App() {
                     open={codeOpen}
                     active={codeTab}
                     diffCount={diffCount}
-                    previewAvailable={selectedCaps.designPreview}
-                    questionAvailable={selected.mode === "conversation" && debateRight == null}
+                    previewAvailable={advancedFeatures && selectedCaps.designPreview}
+                    questionAvailable={selected.mode === "conversation" && debateSeats == null && hasQuestionThread}
                     // "파일" 칩은 코드 열 파일 탭과 함께 닫혀 있던 트리도 연다 — 트리·에디터가 한 손잡이다(ADR 0188).
                     // 닫기는 트리 헤더의 ✕·⌘B. 파일 열기 자체(⌘P·링크)는 트리를 건드리지 않는다.
                     onOpen={(tab) => {
@@ -3081,6 +3160,7 @@ function App() {
                   )}
                   <Menu
                     items={[
+                      ...(selected.host === LOCAL_HOST ? [{ label: "작업 결과·검토", onClick: () => setResultTask(selected.id) }] : []),
                       { label: "작업 브리핑", onClick: runCapsule },
                       { label: "Diff Stat", onClick: showDiffStat },
                       ...(canFinalize
@@ -3150,7 +3230,7 @@ function App() {
                         </button>
                       </div>
                     </div>
-                    <div className="flex-1 overflow-auto py-1">
+                    <div className="flex flex-1 flex-col overflow-auto py-1">
                       <FileTree
                         nodes={tree}
                         activePath={activeFile?.path ?? null}
@@ -3230,19 +3310,22 @@ function App() {
                           conversationId={`${selectedKey ?? selected.id}:${centerTab.slice(4)}`}
                           key={centerTab}
                         />
-                      ) : selected.mode === "conversation" && debateRight != null ? (
+                      ) : selected.mode === "conversation" && debateSeats != null ? (
                         /* 세션 열만 갈린다 — 헤더·코드 열·플로팅 채널의 기존 배치는 그대로다. */
-                        <DebateView
-                          taskId={selected.id}
-                          events={convoEvents}
-                          roundCap={debateRoundCap}
-                          left={{ agent: selected.agent ?? "", model: selected.model ?? null }}
-                          right={debateRight}
-                          busy={convoBusy}
-                          onSend={sendConvo}
-                          onEnded={refreshDebateSide}
-                          onOpenLink={openAgentLink}
-                        />
+                        <QuestionSession key={selectedKey} taskId={selectedHost === LOCAL_HOST ? selected.id : null} linkedIds={convoItems.flatMap((item)=>item.role==="interaction"?[item.interactionId]:[])} onBusyChange={updateQuestionBusy}>
+                          {(renderQuestion,interactionStatus)=><DebateView
+                            taskId={selected.id}
+                            events={convoEvents}
+                            roundCap={debateRoundCap}
+                            panes={[{ agent: selected.agent ?? "", model: selected.model ?? null }, ...debateSeats]}
+                            busy={convoBusy}
+                            onSend={sendConvo}
+                            onEnded={refreshDebateSide}
+                            onOpenLink={openAgentLink}
+                            renderQuestion={renderQuestion}
+                            interactionStatus={interactionStatus}
+                          />}
+                        </QuestionSession>
                       ) : selected.mode === "conversation" ? (
                         <QuestionSession key={selectedKey} taskId={selectedHost === LOCAL_HOST ? selected.id : null} linkedIds={mainConvoItems.flatMap((item)=>item.role==="interaction"?[item.interactionId]:[])} onBusyChange={updateQuestionBusy}>
                           {(renderQuestion,interactionStatus)=><ConversationView
@@ -3250,6 +3333,7 @@ function App() {
                           interactionStatus={interactionStatus}
                           conversationId={selectedKey ?? selected.id}
                           onAskSeparately={(text) => askSeparately({ label: "선택한 대화", text })}
+                          translatable
                           items={mainConvoItems}
                           busy={convoBusy}
                           subagents={subThreadById}
@@ -3257,7 +3341,9 @@ function App() {
                           onOpenSubagent={openSubagent}
                           onOpenLink={openAgentLink}
                           onLinkMenu={onLinkMenu}
-                          hidden={centralDiffPath != null}
+                          // 좁은 창에서는 코드 열이 세션 열을 display:none으로 가린다. 그동안 스크롤 위치가
+                          // 사라지므로, 가려지는 것을 알려야 돌아올 때 보던 자리로 되돌린다.
+                          hidden={centralDiffPath != null || (codeOpen && splitMode === "tabs")}
                           waitTaskId={selectedHost === LOCAL_HOST ? selected.id : null}
                         />}
                         </QuestionSession>
@@ -3265,7 +3351,8 @@ function App() {
                         <TerminalView
                           host={selectedHost}
                           taskId={selected.id}
-                          readOnly
+                          // 단일 에이전트는 실제 CLI라 키 입력을 그대로 받는다. 앙상블은 `-p` 출력뿐이다.
+                          readOnly={!!selected.ensemble}
                           onOpenLink={openAgentLink}
                           codeFontFamily={codeFontFamily}
                           codeFontSize={codeFontSize}
@@ -3377,15 +3464,17 @@ function App() {
               )}
 
               {/* 하단 에이전트 질의 컴포저 (멀티라인 + @파일 멘션 + 인터럽트).
-                  토론 중에는 분할 뷰가 자기 컴포저를 갖는다 — 둘을 함께 두지 않는다. */}
-              {debateRight == null && (
+                  토론 중에는 분할 뷰가 자기 컴포저를 갖는다 — 둘을 함께 두지 않는다.
+                  터미널 세션도 두지 않는다 — xterm이 곧 입력창이라 CLI 입력창과 둘로 보인다.
+                  원격·앙상블 PTY는 xterm이 입력을 받지 않으므로 컴포저가 유일한 입력 경로로 남는다. */}
+              {debateSeats == null &&
+                !(selected.mode === "terminal" && !selected.ensemble && getTransport(selectedHost).kind === "local") && (
                 <footer
                   className="border-t border-border px-3 py-2 shrink-0"
                   hidden={centralDiffPath != null || (codeOpen && codeTab === "question" && splitMode === "tabs")}
                   inert={centralDiffPath != null || (codeOpen && codeTab === "question" && splitMode === "tabs")}
                 >
                   <AgentComposer
-                    onVaultMutationPendingChange={onVaultFollowupPending}
                     host={selectedHost}
                     value={agentInput}
                     onChange={(v) => {
@@ -3504,8 +3593,6 @@ function App() {
           <>
             <HomeView tasks={visibleTasks} onOpenTask={openTask} onOpenEnsemble={openEnsemble} onRefresh={refresh} onOpenProject={async (root) => (await projectEditorOpen(root)).root} />
             <Composer
-              vaultClientRef={vaultClientRef}
-              onVaultMutationPendingChange={onVaultCreatePending}
               host={composerHost}
               setHost={switchComposerHost}
               repo={repo}
@@ -3520,6 +3607,9 @@ function App() {
               onServiceTierChange={setServiceTier}
               questionsEnabled={questionsEnabled}
               onQuestionsEnabledChange={setQuestionsEnabled}
+              approvalsEnabled={approvalsEnabled}
+              onApprovalsEnabledChange={setApprovalsEnabled}
+              sessionStyle={sessionStyle}
               model={model}
               setModel={setSessionModel}
               reasoningEffort={reasoningEffort}
@@ -3564,15 +3654,6 @@ function App() {
             />
           </>
         )}
-
-        <NotificationInbox
-          snapshot={notifications.snapshot}
-          error={notifications.error ?? (Object.values(notificationErrors).join(" · ") || null)}
-          onRetry={() => void notifications.reload()}
-          onSnapshot={notifications.setSnapshot}
-          onResult={openNotificationResult}
-          onChanges={openNotificationChanges}
-        />
 
         {/* 최하단 사용량 상태바 — 뷰와 무관하게 항상 보이도록 컴포저 아래에 둔다. */}
         <UsageBar />

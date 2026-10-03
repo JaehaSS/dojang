@@ -21,6 +21,10 @@ export const normalizeAgentSelection = (agents: readonly string[]): string[] => 
   return normalized.size ? [...normalized] : ["claude"];
 };
 
+/** 컴포저가 쓰는 선택 — 1.0은 에이전트 하나다. 앙상블 시절 저장된 다중 선택은 첫 항목만 남긴다. */
+export const singleAgentSelection = (agents: readonly string[]): string[] =>
+  normalizeAgentSelection(agents).slice(0, 1);
+
 /** 전체 라벨 — 피커 칩처럼 공간 여유 있는 곳. */
 export const labelFor = (agent: string) =>
   AGENT_PRESETS.find((p) => p.key === agent)?.label ?? `커스텀: ${agent}`;

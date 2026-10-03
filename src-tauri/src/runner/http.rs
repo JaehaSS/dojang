@@ -2,7 +2,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, post};
 use axum::Extension;
 use axum::{Json, Router};
 use futures_util::StreamExt;
@@ -58,126 +58,15 @@ struct RepositoryQuery {
 }
 
 #[derive(Deserialize)]
-struct QuickOpenQuery {
-    #[serde(default)]
-    query: String,
-    /// 콤마 구분 스코프 목록(예: `task,session`). 비어 있으면 전체 허용.
-    #[serde(default)]
-    scopes: String,
-}
-
-#[derive(Deserialize)]
 struct FileQuery {
     repository: String,
     path: String,
 }
 
 #[derive(Deserialize)]
-struct BrowseQuery {
-    /// 나열할 절대 경로. 비우면 첫 repository root를 연다.
-    #[serde(default)]
-    path: String,
-}
-
-#[derive(Deserialize)]
-struct PathQuery {
-    path: String,
-}
-
-#[derive(Deserialize)]
-struct PathBody {
-    path: String,
-}
-
-/// 경로의 git 상태 — 작업 대상이 격리(워크트리) 가능한지 프런트가 판단하는 근거.
-#[derive(Serialize)]
-struct GitStatusResponse {
-    is_repo: bool,
-}
-
-/// 디렉터리 한 단계 + 상위 경로 — 브라우저가 위로 올라갈 수 있게 함께 준다.
-#[derive(Serialize)]
-struct BrowseResponse {
-    path: String,
-    /// 허용된 root를 벗어나면 `None` — 브라우저는 "위로" 버튼을 숨긴다.
-    parent: Option<String>,
-    entries: Vec<crate::fsapi::DirEntryInfo>,
-}
-
-#[derive(Deserialize)]
-struct GithubIssuesQuery {
-    repository: String,
-}
-
-#[derive(Deserialize)]
-struct GithubIssueDeleteQuery {
-    repository: String,
-    number: u64,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum GithubIssuesResponse {
-    Ready {
-        owner_repo: String,
-        issues: Vec<crate::github::GhIssue>,
-    },
-    Unavailable,
-    NotGithubRepo,
-}
-
-#[derive(Deserialize)]
-struct GithubReposRequest {
-    repositories: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct GithubIssueTaskCreateRequest {
-    repository: String,
-    number: u64,
-    agent: String,
-}
-
-#[derive(Deserialize)]
-struct FileWriteRequest {
-    repository: String,
-    path: String,
-    content: String,
-}
-
-#[derive(Deserialize)]
-struct TaskInputRequest {
-    data: String,
-}
-
-#[derive(Deserialize)]
 struct TaskMessageRequest {
     message: String,
 }
-
-/// 세션 모델 오버라이드 교체 본문. 빈 문자열은 해제(벤더 기본 복귀)라 유효한 값이다 —
-/// `Option`이 아닌 `String`인 이유이고, 그래서 필드 누락과 해제를 서로 구분한다.
-#[derive(Deserialize)]
-struct TaskModelRequest {
-    model: String,
-}
-#[derive(Deserialize)]
-struct ReceiptSubmitRequest {
-    message: String,
-    #[serde(default)]
-    image_paths: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct SideQuestionCancelRequest {
-    turn_id: i64,
-}
-
-#[derive(Deserialize)]
-struct SideQuestionResetRequest {
-    generation: i64,
-}
-
 #[derive(Deserialize)]
 struct ScheduleCreateRequest {
     label: String,
@@ -301,77 +190,6 @@ pub fn mobile_surface_router(
     actions: crate::runner::actions::SharedTaskActions,
 ) -> Router {
     finish_router(mobile_surface_routes(), state, actions)
-}
-
-/// Runner 전체 API — 공유 라우트 + Runner 전용(취소·삭제·PTY 입력·파일 쓰기·GitHub 등).
-pub fn router(state: RunnerHttpState) -> Router {
-    router_with_workflow(state, None)
-}
-
-pub fn router_with_workflow(
-    state: RunnerHttpState,
-    workflow: Option<std::sync::Arc<crate::runner::workflow::WorkflowService>>,
-) -> Router {
-    let routes = mobile_surface_routes()
-        .route("/v1/sessions", get(sessions))
-        .route("/v1/tasks/:id", delete(task_delete))
-        .route("/v1/tasks/:id/cancel", post(task_cancel))
-        .route(
-            "/v1/tasks/:id/annotations",
-            get(task_annotations_list).post(task_annotation_save),
-        )
-        .route(
-            "/v1/tasks/:id/annotations/resend",
-            post(task_annotations_resend),
-        )
-        .route("/v1/tasks/:id/partial/apply", post(task_partial_apply))
-        .route(
-            "/v1/tasks/:id/partial/rollback",
-            post(task_partial_rollback),
-        )
-        .route("/v1/ensembles/:ensemble/matrix", get(ensemble_matrix))
-        .route("/v1/ensembles/:ensemble/compose", post(ensemble_compose))
-        .route("/v1/tasks/:id/input", post(task_input))
-        // `/v1/tasks/:id/message`는 공유 라우트로 옮겨 갔다 — 여기 두면 중복 등록으로 axum이 패닉한다.
-        .route("/v1/tasks/:id/model", put(task_model_set))
-        .route(
-            "/v1/tasks/:id/message-receipts/:request_id",
-            get(conversation_receipt).post(conversation_submit),
-        )
-        .route("/v1/tasks/:id/side-question", get(side_question_read))
-        .route(
-            "/v1/tasks/:id/side-question/messages",
-            post(side_question_send),
-        )
-        .route(
-            "/v1/tasks/:id/side-question/cancel",
-            post(side_question_cancel),
-        )
-        .route(
-            "/v1/tasks/:id/side-question/reset",
-            post(side_question_reset),
-        )
-        .route("/v1/quickopen", get(quickopen))
-        .route(
-            "/v1/github/issues",
-            get(github_issues).delete(github_issue_delete),
-        )
-        .route("/v1/github/repos", post(github_repos))
-        .route("/v1/github/issues/task", post(github_issue_task_create))
-        .route("/v1/files/browse", get(file_browse))
-        .route("/v1/files/roots", get(file_roots))
-        .route("/v1/git/status", get(git_status))
-        .route("/v1/git/init", post(git_init))
-        .route("/v1/files/write", put(file_write))
-        .route("/v1/skills", get(skills_list))
-        .merge(crate::runner::memory_http::routes())
-        .merge(crate::runner::review_process_http::routes())
-        .merge(crate::runner::workflow::http::routes(workflow));
-    finish_router(
-        routes,
-        state,
-        std::sync::Arc::new(crate::runner::actions::RunnerTaskActions),
-    )
 }
 
 /// Desktop webview의 교차 출처 fetch(예: http://localhost:1420 → http://127.0.0.1:포트)를
@@ -547,23 +365,6 @@ async fn task(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "task를 찾을 수 없습니다".to_string()))
 }
 
-async fn task_delete(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let _review_claim = state
-        .review_claims
-        .claim_finalization(id)
-        .map_err(invalid_request)?;
-    crate::runner::review_process::assert_task_unfenced(&state.pool, id)
-        .await
-        .map_err(invalid_request)?;
-    crate::runner::delete_finished_task(&state.pool, id)
-        .await
-        .map_err(invalid_request)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 /// `resume_session`이 실린 요청은 모바일 자격에서 거절한다(설계 2026-09-17 제약 5) —
 /// `mobile_scope_denies`는 `(method, path)`만 보고 본문을 못 보므로, 모바일이 정상적으로 쓰는
 /// `POST /v1/tasks`를 여기서 직접 갈라야 한다.
@@ -605,133 +406,6 @@ pub(crate) fn create_task_error_response(
             StatusCode::CONFLICT,
             serde_json::json!({ "error": message, "task_id": task_id }).to_string(),
         ),
-    }
-}
-
-#[derive(Deserialize)]
-struct SessionsQuery {
-    /// 특정 저장소 루트로 좁힌다(기본). `repository_roots`에 인가되지 않으면 거절.
-    #[serde(default)]
-    repository: Option<String>,
-    /// 켜면 `repository`를 무시하고 인가된 모든 저장소 루트를 대상으로 한다(설계 결정 10).
-    #[serde(default)]
-    all: bool,
-    #[serde(default)]
-    query: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-const SESSIONS_DEFAULT_LIMIT: usize = 200;
-/// 호출자가 올릴 수 있는 상한. `scan`은 세션홈 전체를 순회하므로(실측 1,568파일·1.2GB) 값을
-/// 그대로 믿으면 인가된 클라이언트 하나가 러너를 붙잡아 둘 수 있다. 데스크톱 커맨드는 아예
-/// 상한을 파라미터로 받지 않는다 — 여기만 값을 받으므로 여기서 깎는다.
-const SESSIONS_MAX_LIMIT: usize = 500;
-
-#[derive(Serialize)]
-struct SessionsResponse {
-    /// `sessionhome::SessionMeta`를 그대로 싣는다 — 필드가 1:1인 사본을 여기 두면 두 벌이
-    /// 어긋난다(원장 #236과 같은 종류의 값을 이미 치렀다).
-    sessions: Vec<crate::sessionhome::SessionMeta>,
-    /// 목록이 비었을 때만 채운다 — 어떤 기준 경로로 걸렀는지(페어링 자격 전용, 설계 결정 9).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    diagnostic: Option<SessionsDiagnostic>,
-}
-
-#[derive(Serialize)]
-struct SessionsDiagnostic {
-    cwd_prefixes: Vec<String>,
-}
-
-/// Runner 전용 — 세션홈을 저장소 루트로 좁혀 벤더 세션을 목록으로 낸다(설계 2026-09-17).
-/// 모바일 자격은 `mobile_scope_denies`가 경로 단위로 막는다. `repository_roots` 밖 cwd의
-/// 세션은 이 목록에 나타나지 않는다 — `cwd_prefixes`가 항상 인가된 루트에서만 나온다.
-async fn sessions(
-    State(state): State<RunnerHttpState>,
-    Extension(context): Extension<crate::runner::auth::AuthContext>,
-    Query(query): Query<SessionsQuery>,
-) -> Result<Json<SessionsResponse>, (StatusCode, String)> {
-    let cwd_prefixes = if query.all {
-        state
-            .config
-            .repository_roots
-            .iter()
-            .map(|root| root.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-    } else if let Some(repository) = query.repository.as_deref() {
-        let authorized = authorized_repository(&state, repository)?;
-        vec![authorized.to_string_lossy().into_owned()]
-    } else {
-        state
-            .config
-            .repository_roots
-            .iter()
-            .map(|root| root.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-    };
-    let limit = query
-        .limit
-        .unwrap_or(SESSIONS_DEFAULT_LIMIT)
-        .clamp(1, SESSIONS_MAX_LIMIT);
-    let filter = crate::sessionhome::ScanFilter {
-        cwd_prefixes: cwd_prefixes.clone(),
-        query: query.query.clone(),
-    };
-    let sessions = tokio::task::spawn_blocking(move || crate::sessionhome::scan(&filter, limit))
-        .await
-        .map_err(|error| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("세션홈 조회 실패: {error}"),
-            )
-        })?;
-    // 빈 목록의 진단(기준 경로)은 페어링 자격에만 싣는다 — 모바일에 노출하면 경로 구조가 샌다.
-    let diagnostic = if sessions.is_empty() && matches!(context, crate::runner::auth::AuthContext::Pairing) {
-        Some(SessionsDiagnostic { cwd_prefixes })
-    } else {
-        None
-    };
-    Ok(Json(SessionsResponse {
-        sessions,
-        diagnostic,
-    }))
-}
-
-async fn task_cancel(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let _review_claim = state
-        .review_claims
-        .claim_finalization(id)
-        .map_err(invalid_request)?;
-    crate::runner::review_process::assert_task_unfenced(&state.pool, id)
-        .await
-        .map_err(invalid_request)?;
-    if state
-        .queue
-        .cancel(id, now())
-        .await
-        .map_err(invalid_request)?
-    {
-        return Ok(StatusCode::NO_CONTENT);
-    }
-    let cancelled = db::cancel_queued_task(&state.pool, id, now())
-        .await
-        .map_err(internal_error)?;
-    if cancelled {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        crate::runner::cancel_pending_task(
-            &state.config,
-            &state.pool,
-            &state.queue.worktree_locks(),
-            id,
-            now(),
-        )
-        .await
-        .map_err(|error| (StatusCode::CONFLICT, error))?;
-        Ok(StatusCode::NO_CONTENT)
     }
 }
 
@@ -810,6 +484,12 @@ async fn task_approve(
     State(state): State<RunnerHttpState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    if let Some(message) = crate::pipeline::db::pipeline_guard_for_task(&state.pool, id)
+        .await
+        .map_err(|e| invalid_request(e.to_string()))?
+    {
+        return Err(invalid_request(message));
+    }
     let _review_claim = state
         .review_claims
         .claim_finalization(id)
@@ -834,6 +514,12 @@ async fn task_discard(
     State(state): State<RunnerHttpState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    if let Some(message) = crate::pipeline::db::pipeline_guard_for_task(&state.pool, id)
+        .await
+        .map_err(|e| invalid_request(e.to_string()))?
+    {
+        return Err(invalid_request(message));
+    }
     let _review_claim = state
         .review_claims
         .claim_finalization(id)
@@ -872,28 +558,6 @@ async fn task_output(
     Ok(Json(output))
 }
 
-/// 실행 중 terminal task의 PTY stdin에 원시 입력을 전달한다.
-///
-/// 로컬 `task_write`와 동일한 신뢰 수준 — 접근 통제는 require_auth(loopback+token)가
-/// 담당하며, 활성 세션이 없으면 입력 유실 대신 CONFLICT로 알린다.
-async fn task_input(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-    Json(request): Json<TaskInputRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    match state
-        .queue
-        .write_terminal_input(id, request.data.as_bytes())
-    {
-        None => Err((
-            StatusCode::CONFLICT,
-            "실행 중인 terminal 작업에만 입력을 보낼 수 있습니다".to_string(),
-        )),
-        Some(Err(error)) => Err(internal_error(error)),
-        Some(Ok(())) => Ok(StatusCode::NO_CONTENT),
-    }
-}
-
 /// 검토 대기 conversation task에 후속 턴 메시지를 보낸다.
 ///
 /// instruction을 교체해 재큐잉하면 queue worker가 `convo_session_id` resume으로
@@ -930,168 +594,12 @@ async fn task_message(
     }
 }
 
-/// 세션 모델 오버라이드를 교체한다 — 데스크톱 `task_model_set`의 원격 짝이다.
-///
-/// 본체는 같은 `set_task_model_checked`다. 검사(프리셋 에이전트만·effort 동반 정리·에이전트
-/// 전환 레이스)를 여기서 다시 쓰면 두 경로가 서로 다른 규칙으로 갈라지고, 그 어긋남은 다음 턴이
-/// CLI에 닿아서야 드러난다.
-///
-/// 진행 중인 턴은 프로세스가 이미 떠 있어 바뀌지 않는다. 다음 턴은 큐 워커가 행을 새로 읽으므로
-/// (`resume_conversation` → `db::get_task`) 여기서 쓴 값이 그대로 실린다.
-async fn task_model_set(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-    Json(request): Json<TaskModelRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    // 없는 작업을 400으로 돌려주면 클라이언트가 "모델 이름이 틀렸다"로 읽는다. 존재 여부는
-    // 공통 본체가 문자열 오류로만 알려주므로 여기서 먼저 갈라 404를 준다.
-    if db::get_task(&state.pool, id)
-        .await
-        .map_err(internal_error)?
-        .is_none()
-    {
-        return Err(not_found());
-    }
-    crate::commands::set_task_model_checked(&state.pool, id, &request.model)
-        .await
-        .map_err(invalid_request)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn conversation_receipt(
-    State(state): State<RunnerHttpState>,
-    Path((id, request_id)): Path<(i64, String)>,
-) -> Result<Json<crate::side_question::ConversationReceipt>, (StatusCode, String)> {
-    crate::side_question::receipt_read(&state.pool, id, &request_id)
-        .await
-        .map(Json)
-        .map_err(invalid_request)
-}
-
-async fn conversation_submit(
-    State(state): State<RunnerHttpState>,
-    Path((id, request_id)): Path<(i64, String)>,
-    Json(request): Json<ReceiptSubmitRequest>,
-) -> Result<Json<crate::side_question::ConversationReceipt>, (StatusCode, String)> {
-    let Some(task) = db::get_task(&state.pool, id)
-        .await
-        .map_err(internal_error)?
-    else {
-        return Ok(Json(crate::side_question::ConversationReceipt {
-            request_id,
-            status: "not_found".into(),
-            error: None,
-        }));
-    };
-    let _receipt_admission = crate::side_question::receipt_admission_lock(id, &request_id).await;
-    if let Some(receipt) = crate::side_question::receipt_begin(
-        &state.pool,
-        id,
-        &request_id,
-        &request.message,
-        &request.image_paths,
-        now(),
-    )
-    .await
-    .map_err(invalid_request)?
-    {
-        return Ok(Json(receipt));
-    }
-    if crate::side_question::blocks_main_execution(&state.pool, id).await.map_err(invalid_request)? {
-        return crate::side_question::receipt_read(&state.pool, id, &request_id).await.map(Json).map_err(invalid_request);
-    }
-    if !request.image_paths.is_empty() {
-        let receipt = crate::side_question::receipt_finish(
-            &state.pool,
-            id,
-            &request_id,
-            "failed",
-            Some("Runner 대화 메시지는 이미지 첨부를 지원하지 않습니다"),
-        )
-        .await
-        .map_err(invalid_request)?;
-        return Ok(Json(receipt));
-    }
-    let outcome = if task.mode == "conversation"
-        && db::requeue_conversation_followup_receipt(&state.pool, id, &request_id, request.message.trim(), now())
-            .await
-            .map_err(internal_error)?
-    {
-        crate::side_question::receipt_read(&state.pool, id, &request_id).await
-    } else {
-        let existing = crate::side_question::receipt_read(&state.pool, id, &request_id).await.map_err(invalid_request)?;
-        if existing.status == "accepted" { return Ok(Json(existing)); }
-        crate::side_question::receipt_finish(
-            &state.pool,
-            id,
-            &request_id,
-            "failed",
-            Some("검토 대기 상태의 conversation 작업만 이어갈 수 있습니다"),
-        )
-        .await
-    };
-    outcome.map(Json).map_err(invalid_request)
-}
-
-async fn side_question_read(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-) -> Result<Json<crate::side_question::SideQuestionSnapshot>, (StatusCode, String)> {
-    crate::side_question::read(&state.pool, id, now())
-        .await
-        .map(Json)
-        .map_err(invalid_request)
-}
-
-async fn side_question_send(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-    Json(input): Json<crate::side_question::SideQuestionSend>,
-) -> Result<Json<crate::side_question::SideQuestionSnapshot>, (StatusCode, String)> {
-    let (turn_id, inserted) = crate::side_question::send(&state.pool, id, input, now())
-        .await
-        .map_err(invalid_request)?;
-    if inserted {
-        state.queue.spawn_side_question(id, turn_id, now());
-    }
-    crate::side_question::read(&state.pool, id, now())
-        .await
-        .map(Json)
-        .map_err(invalid_request)
-}
-
-async fn side_question_cancel(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-    Json(request): Json<SideQuestionCancelRequest>,
-) -> Result<Json<crate::side_question::SideQuestionSnapshot>, (StatusCode, String)> {
-    crate::side_question::cancel(&state.pool, id, request.turn_id, now())
-        .await
-        .map_err(invalid_request)?;
-    crate::side_question::read(&state.pool, id, now())
-        .await
-        .map(Json)
-        .map_err(invalid_request)
-}
-
-async fn side_question_reset(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-    Json(request): Json<SideQuestionResetRequest>,
-) -> Result<Json<crate::side_question::SideQuestionSnapshot>, (StatusCode, String)> {
-    crate::side_question::reset(&state.pool, id, request.generation, now())
-        .await
-        .map_err(invalid_request)?;
-    crate::side_question::read(&state.pool, id, now())
-        .await
-        .map(Json)
-        .map_err(invalid_request)
-}
-
 /// diff 범위 쿼리(`?range=uncommitted`). 생략하면 세션 전체다 — 구버전 클라이언트가
 /// 인자 없이 불러도 종전과 같은 응답을 받는다.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 struct DiffRangeQuery {
+    #[serde(default)]
+    include_review: bool,
     #[serde(default)]
     range: crate::worktree::DiffRange,
 }
@@ -1106,26 +614,65 @@ async fn task_diff(
         .map_err(internal_error)?
         .ok_or_else(not_found)?;
     let root = authorized_repository(&state, &task.worktree_path)?;
-    if !crate::worktree::is_git_repository(&root) {
-        return Ok(Json(crate::worktree::TaskDiffResult {
-            files: vec![],
-            baseline: crate::worktree::BaselineStatus::Legacy,
-        }));
-    }
-    let worktree = crate::worktree::Worktree {
-        repo: task.repo.into(),
-        path: root,
-        branch: task.branch,
-        base: task.base,
-        base_revision: task.base_revision,
+    let (stored, warning) = if query.include_review {
+        match crate::annotations::list_by_task(&state.pool, id).await {
+            Ok(stored) => (stored, None),
+            Err(_) => (
+                Vec::new(),
+                Some("주석을 불러오지 못했지만 diff는 최신 상태입니다.".to_string()),
+            ),
+        }
+    } else {
+        (Vec::new(), None)
     };
-    let files = worktree
-        .diff_detailed_range(query.range)
-        .map_err(internal_error)?;
-    Ok(Json(crate::worktree::TaskDiffResult {
-        baseline: worktree.baseline_status(),
-        files,
-    }))
+    let patterns = task
+        .goal_contract
+        .as_deref()
+        .map(|contract| contract.protected_paths.clone())
+        .unwrap_or_default();
+    tokio::task::spawn_blocking(move || {
+        if !crate::worktree::is_git_repository(&root) {
+            return Ok(Json(crate::worktree::TaskDiffResult {
+                files: vec![],
+                baseline: crate::worktree::BaselineStatus::Legacy,
+                review: query
+                    .include_review
+                    .then(|| crate::worktree::ReviewSnapshot {
+                        hunks: vec![],
+                        annotations: crate::annotations::rematch(&stored, &[]),
+                        warning,
+                    }),
+            }));
+        }
+        let worktree = crate::worktree::Worktree {
+            repo: task.repo.into(),
+            path: root,
+            branch: task.branch,
+            base: task.base,
+            base_revision: task.base_revision,
+        };
+        let files = worktree
+            .diff_detailed_range(query.range)
+            .map_err(internal_error)?;
+        let review = if query.include_review {
+            Some({
+                let mut review = worktree
+                    .review_snapshot(&files, query.range, &patterns, &stored)
+                    .map_err(internal_error)?;
+                review.warning = warning;
+                review
+            })
+        } else {
+            None
+        };
+        Ok(Json(crate::worktree::TaskDiffResult {
+            baseline: worktree.baseline_status(),
+            files,
+            review,
+        }))
+    })
+    .await
+    .map_err(|error| internal_error(error.into()))?
 }
 
 /// 구조화 hunk 목록(`diffmodel`) — local(Tauri command)과 동일한 `diffmodel::build_hunks`를
@@ -1140,14 +687,6 @@ async fn task_diff_hunks(
         .map_err(internal_error)?
         .ok_or_else(not_found)?;
     task_hunks_range(&state, &task, query.range).map(Json)
-}
-
-/// task의 현재 구조화 hunk 목록 — `task_diff_hunks`와 annotations 재매칭/재전송이 공유한다.
-fn task_hunks(
-    state: &RunnerHttpState,
-    task: &db::Task,
-) -> Result<Vec<crate::diffmodel::DiffHunk>, (StatusCode, String)> {
-    task_hunks_range(state, task, crate::worktree::DiffRange::Session)
 }
 
 /// 범위를 골라 뜨는 hunk 목록 — 로컬 `task_hunks_range`와 같은 규칙을 쓴다.
@@ -1189,394 +728,6 @@ fn task_hunks_range(
         }
     }
     Ok(hunks)
-}
-
-#[derive(Deserialize)]
-struct AnnotationSaveRequest {
-    #[serde(default)]
-    id: Option<String>,
-    hunk_id: String,
-    path: String,
-    line: i64,
-    side: String,
-    body_md: String,
-}
-
-#[derive(Deserialize)]
-struct AnnotationsResendRequest {
-    ids: Vec<String>,
-}
-
-/// 주석 목록 — local `annotations_list` command와 동일하게 현재 diff에 재매칭해 반환.
-async fn task_annotations_list(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-    Query(query): Query<DiffRangeQuery>,
-) -> Result<Json<Vec<crate::annotations::RematchedAnnotation>>, (StatusCode, String)> {
-    let task = db::get_task(&state.pool, id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(not_found)?;
-    let stored = crate::annotations::list_by_task(&state.pool, id)
-        .await
-        .map_err(internal_error)?;
-    // 로컬 `annotations_list`와 같은 이유로 화면과 같은 범위를 써야 한다.
-    let hunks = task_hunks_range(&state, &task, query.range)?;
-    Ok(Json(crate::annotations::rematch(&stored, &hunks)))
-}
-
-/// draft 주석 생성/저장(onBlur 자동 저장) — local `annotation_save` command와 동일 계약.
-async fn task_annotation_save(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-    Json(request): Json<AnnotationSaveRequest>,
-) -> Result<Json<crate::annotations::ReviewAnnotation>, (StatusCode, String)> {
-    if let Some(existing_id) = request.id {
-        crate::annotations::update_draft_body(&state.pool, &existing_id, &request.body_md)
-            .await
-            .map_err(internal_error)?;
-        let updated =
-            crate::annotations::list_by_ids(&state.pool, id, std::slice::from_ref(&existing_id))
-                .await
-                .map_err(internal_error)?;
-        return updated
-            .into_iter()
-            .next()
-            .map(Json)
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "주석을 찾을 수 없습니다".to_string()));
-    }
-    crate::annotations::create_draft(
-        &state.pool,
-        id,
-        &request.hunk_id,
-        &request.path,
-        request.line,
-        &request.side,
-        &request.body_md,
-        now(),
-    )
-    .await
-    .map(Json)
-    .map_err(internal_error)
-}
-
-/// 선택한 주석 n건을 재전송 — local `annotations_resend` command와 동일 포맷·롤백 계약.
-/// convo resume은 `QueueWorker::resume_conversation`(백그라운드 스폰)이 담당한다.
-async fn task_annotations_resend(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-    Json(request): Json<AnnotationsResendRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let task = db::get_task(&state.pool, id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(not_found)?;
-    let targets = crate::annotations::list_by_ids(&state.pool, id, &request.ids)
-        .await
-        .map_err(internal_error)?;
-    if targets.is_empty() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            "재전송할 주석을 찾을 수 없습니다".to_string(),
-        ));
-    }
-    let hunks = task_hunks(&state, &task)?;
-    let message = crate::annotations::format_resend(&crate::annotations::build_resend_items(
-        &targets, &hunks,
-    ));
-
-    let updated = crate::annotations::mark_sent(&state.pool, id, &request.ids)
-        .await
-        .map_err(internal_error)?;
-    if updated == 0 {
-        return Err((
-            StatusCode::CONFLICT,
-            "재전송 가능한 초안 주석이 없습니다(이미 전송됨)".to_string(),
-        ));
-    }
-    if let Err(error) = state.queue.resume_conversation(id, message, now()).await {
-        let _ = crate::annotations::mark_draft(&state.pool, id, &request.ids).await;
-        return Err((StatusCode::CONFLICT, error));
-    }
-    Ok(StatusCode::OK)
-}
-
-#[derive(Deserialize)]
-struct PartialApplyRequest {
-    hunk_ids: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct PartialApplyResponse {
-    checkpoint: String,
-    kept_hunk_ids: Vec<String>,
-    discarded_hunk_ids: Vec<String>,
-}
-
-/// hunk 부분 승인(B-2) — local `partial_apply` command와 동일 계약(`partial::apply` 공유,
-/// 성공/실패 모두 `partial_apply` 이벤트로 남겨 적용 성공률(KPI Tech)을 관측).
-async fn task_partial_apply(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-    Json(request): Json<PartialApplyRequest>,
-) -> Result<Json<PartialApplyResponse>, (StatusCode, String)> {
-    let locks = state.queue.worktree_locks();
-    let task = db::get_task(&state.pool, id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(not_found)?;
-    let root = authorized_repository(&state, &task.worktree_path)?;
-    let _mutation = crate::runner::review_process::claim_task_mutation(
-        &state.review_claims,
-        &state.pool,
-        &locks,
-        id,
-        &root,
-    )
-    .await
-    .map_err(invalid_request)?;
-    if task.state != db::state::AWAITING_REVIEW {
-        return Err((
-            StatusCode::CONFLICT,
-            "검토 대기 중인 작업만 부분 적용할 수 있습니다".to_string(),
-        ));
-    }
-    let hunks = task_hunks(&state, &task)?;
-    let worktree = crate::worktree::Worktree {
-        repo: task.repo.clone().into(),
-        path: root,
-        branch: task.branch.clone(),
-        base: task.base.clone(),
-        base_revision: task.base_revision.clone(),
-    };
-    let result = crate::partial::apply(&worktree, &hunks, &request.hunk_ids);
-    let _ = db::append_event(
-        &state.pool,
-        id,
-        "partial_apply",
-        Some(&partial_apply_kpi_detail(&result)),
-        now(),
-    )
-    .await;
-    let outcome = result.map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
-
-    crate::partial::save_checkpoint(&state.pool, id, &outcome.checkpoint, now())
-        .await
-        .map_err(internal_error)?;
-    Ok(Json(PartialApplyResponse {
-        checkpoint: outcome.checkpoint,
-        kept_hunk_ids: outcome.kept_hunk_ids,
-        discarded_hunk_ids: outcome.discarded_hunk_ids,
-    }))
-}
-
-/// KPI Tech(적용 성공률) 관측용 이벤트 상세 — local `commands::partial_apply_kpi_detail`과 동일
-/// 로직(모듈 경계상 별도 정의 — `task_hunks`처럼 local/runner가 각자 얇게 재구현하는 기존 관행).
-fn partial_apply_kpi_detail(
-    result: &Result<crate::partial::ApplyOutcome, crate::partial::PartialError>,
-) -> String {
-    match result {
-        Ok(o) => format!(
-            "ok kept={} discarded={}",
-            o.kept_hunk_ids.len(),
-            o.discarded_hunk_ids.len()
-        ),
-        Err(crate::partial::PartialError::ApplyConflict(ids)) => {
-            format!("conflict failed={}", ids.len())
-        }
-        Err(crate::partial::PartialError::ProtectedHunkRejected(ids)) => {
-            format!("protected_rejected count={}", ids.len())
-        }
-        Err(e) => format!("error {e}"),
-    }
-}
-
-/// hunk 부분 승인 롤백 — local `partial_rollback` command와 동일 계약.
-async fn task_partial_rollback(
-    State(state): State<RunnerHttpState>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let locks = state.queue.worktree_locks();
-    let task = db::get_task(&state.pool, id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(not_found)?;
-    let root = authorized_repository(&state, &task.worktree_path)?;
-    let _mutation = crate::runner::review_process::claim_task_mutation(
-        &state.review_claims,
-        &state.pool,
-        &locks,
-        id,
-        &root,
-    )
-    .await
-    .map_err(invalid_request)?;
-    let checkpoint = crate::partial::get_checkpoint(&state.pool, id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                "되돌릴 부분 적용 체크포인트가 없습니다".to_string(),
-            )
-        })?;
-    let worktree = crate::worktree::Worktree {
-        repo: task.repo.into(),
-        path: root,
-        branch: task.branch,
-        base: task.base,
-        base_revision: task.base_revision,
-    };
-    crate::partial::rollback(&worktree, &checkpoint)
-        .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
-    crate::partial::clear_checkpoint(&state.pool, id)
-        .await
-        .map_err(internal_error)?;
-    let _ = db::append_event(&state.pool, id, "partial_rollback", None, now()).await;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// ensemble 후보×파일×hunk 매트릭스(B-3) — local `ensemble_matrix` command와 동일 계약
-/// (`ensemble::matrix` 공유, 겹치는 hunk를 배타 그룹으로 반환).
-async fn ensemble_matrix(
-    State(state): State<RunnerHttpState>,
-    Path(ensemble): Path<String>,
-) -> Result<Json<crate::ensemble::EnsembleMatrix>, (StatusCode, String)> {
-    let candidates = ensemble_candidate_hunks(&state, &ensemble).await?;
-    Ok(Json(crate::ensemble::matrix(&candidates)))
-}
-
-#[derive(Deserialize)]
-struct EnsembleComposeRequest {
-    winner_task_id: i64,
-    selections: Vec<crate::ensemble::HunkRef>,
-}
-
-/// ensemble 조합 병합(B-3) — local `ensemble_compose` command와 동일 계약(`ensemble::compose` 공유,
-/// 체크포인트는 `partial_checkpoints`에 영속해 기존 `/partial/rollback`으로 되돌릴 수 있다).
-async fn ensemble_compose(
-    State(state): State<RunnerHttpState>,
-    Path(ensemble): Path<String>,
-    Json(request): Json<EnsembleComposeRequest>,
-) -> Result<Json<crate::ensemble::ComposeOutcome>, (StatusCode, String)> {
-    let tasks = db::tasks_by_ensemble(&state.pool, &ensemble)
-        .await
-        .map_err(internal_error)?;
-    let winner = tasks
-        .iter()
-        .find(|t| t.id == request.winner_task_id)
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                "추천 후보를 찾을 수 없습니다".to_string(),
-            )
-        })?;
-    let locks = state.queue.worktree_locks();
-    let root = authorized_repository(&state, &winner.worktree_path)?;
-    let _mutation = crate::runner::review_process::claim_task_mutation(
-        &state.review_claims,
-        &state.pool,
-        &locks,
-        request.winner_task_id,
-        &root,
-    )
-    .await
-    .map_err(invalid_request)?;
-    if winner.state != db::state::AWAITING_REVIEW {
-        return Err((
-            StatusCode::CONFLICT,
-            "검토 대기 중인 후보에만 조합을 적용할 수 있습니다".to_string(),
-        ));
-    }
-    let mut candidates = Vec::new();
-    for t in &tasks {
-        candidates.push((t.id, task_hunks(&state, t)?));
-    }
-    let worktree = crate::worktree::Worktree {
-        repo: winner.repo.clone().into(),
-        path: root,
-        branch: winner.branch.clone(),
-        base: winner.base.clone(),
-        base_revision: winner.base_revision.clone(),
-    };
-    let result = crate::ensemble::compose(
-        request.winner_task_id,
-        &worktree,
-        &candidates,
-        &request.selections,
-    );
-    let _ = db::append_event(
-        &state.pool,
-        request.winner_task_id,
-        "ensemble_compose",
-        Some(&compose_kpi_detail(&result)),
-        now(),
-    )
-    .await;
-    let outcome = result.map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
-    crate::partial::save_checkpoint(
-        &state.pool,
-        request.winner_task_id,
-        &outcome.checkpoint,
-        now(),
-    )
-    .await
-    .map_err(internal_error)?;
-    Ok(Json(outcome))
-}
-
-/// KPI Tech(조합 적용 성공률) 관측용 이벤트 상세 — local `commands::compose_kpi_detail`과 동일 로직
-/// (모듈 경계상 별도 정의 — `task_hunks`처럼 local/runner가 각자 얇게 재구현하는 기존 관행).
-fn compose_kpi_detail(
-    result: &Result<crate::ensemble::ComposeOutcome, crate::ensemble::ComposeError>,
-) -> String {
-    match result {
-        Ok(o) => format!("ok applied={}", o.applied.len()),
-        Err(crate::ensemble::ComposeError::ApplyConflict(ids)) => {
-            format!("conflict failed={}", ids.len())
-        }
-        Err(crate::ensemble::ComposeError::ExclusiveGroupViolation(ids)) => {
-            format!("exclusive_violation count={}", ids.len())
-        }
-        Err(crate::ensemble::ComposeError::ProtectedHunkRejected(ids)) => {
-            format!("protected_rejected count={}", ids.len())
-        }
-        Err(e) => format!("error {e}"),
-    }
-}
-
-/// ensemble 후보 목록 조회 + task별 구조화 hunk 조회를 묶은 헬퍼 — matrix 핸들러 전용.
-async fn ensemble_candidate_hunks(
-    state: &RunnerHttpState,
-    ensemble: &str,
-) -> Result<Vec<crate::ensemble::CandidateHunks>, (StatusCode, String)> {
-    let tasks = db::tasks_by_ensemble(&state.pool, ensemble)
-        .await
-        .map_err(internal_error)?;
-    let mut candidates = Vec::new();
-    for t in &tasks {
-        candidates.push((t.id, task_hunks(state, t)?));
-    }
-    Ok(candidates)
-}
-
-/// Quick Open(⌘K) tasks/sessions 검색 — local(Tauri command)과 동일한 `db::quickopen_search`를
-/// 공유해 parity를 보장한다. 파일/스킬/커맨드 소스는 프론트가 별도 엔드포인트로 조회.
-async fn quickopen(
-    State(state): State<RunnerHttpState>,
-    Query(query): Query<QuickOpenQuery>,
-) -> Result<Json<Vec<db::QuickOpenCandidate>>, (StatusCode, String)> {
-    let scopes: Vec<String> = query
-        .scopes
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    db::quickopen_search(&state.pool, &query.query, &scopes, 50)
-        .await
-        .map(Json)
-        .map_err(internal_error)
 }
 
 /// 디렉터리 스캔은 동기 파일시스템 작업이라 async 워커에서 직접 돌리면 그 워커가 스캔이
@@ -1654,155 +805,6 @@ fn discover_repositories(roots: &[std::path::PathBuf]) -> Vec<String> {
     list
 }
 
-/// GitHub 이슈 목록(C-2, local `github_issues_list` command와 동일 계약) — 비 GitHub 레포는
-/// `NotGithubRepo`(섹션 숨김), gh 미설치/미인증은 `Unavailable`(안내 카드)로 반환.
-async fn github_issues(
-    State(state): State<RunnerHttpState>,
-    Query(query): Query<GithubIssuesQuery>,
-) -> Result<Json<GithubIssuesResponse>, (StatusCode, String)> {
-    let root = authorized_repository(&state, &query.repository)?;
-    let Some(owner_repo) = crate::github::remote_owner_repo(&root) else {
-        return Ok(Json(GithubIssuesResponse::NotGithubRepo));
-    };
-    match crate::github::list_issues(&root) {
-        Ok(issues) => Ok(Json(GithubIssuesResponse::Ready { owner_repo, issues })),
-        Err(crate::github::GhError::GhUnavailable) => Ok(Json(GithubIssuesResponse::Unavailable)),
-        Err(e @ crate::github::GhError::CommandFailed(_)) => Err(invalid_request(e.to_string())),
-    }
-}
-
-/// 후보 경로 중 이슈를 볼 수 있는 레포만(local `github_repos_list`와 동일 계약). 허용되지 않은
-/// 경로는 거부가 아니라 조용히 제외한다 — 홈은 로컬 최근 작업 경로를 그대로 넘기므로,
-/// 하나가 화이트리스트 밖이라고 레포 버튼 전체가 사라지면 안 된다.
-async fn github_repos(
-    State(state): State<RunnerHttpState>,
-    Json(request): Json<GithubReposRequest>,
-) -> Json<Vec<crate::github::GhRepo>> {
-    let authorized: Vec<String> = request
-        .repositories
-        .iter()
-        .filter_map(|repository| authorized_repository(&state, repository).ok())
-        .map(|root| root.to_string_lossy().into_owned())
-        .collect();
-    Json(crate::github::resolve_repos(&authorized))
-}
-
-/// 이슈 번호로 큐 태스크 생성(C-2, local `github_create_task_from_issue`와 동일 계약) —
-/// 지시문은 제목+본문+`#N` 참조, 생성 후 `owner/repo#N`을 `task_issue_refs`에 저장.
-async fn github_issue_task_create(
-    State(state): State<RunnerHttpState>,
-    Json(request): Json<GithubIssueTaskCreateRequest>,
-) -> Result<Json<db::Task>, (StatusCode, String)> {
-    let root = authorized_repository(&state, &request.repository)?;
-    let owner_repo = crate::github::remote_owner_repo(&root)
-        .ok_or_else(|| invalid_request("GitHub 레포가 아닙니다".to_string()))?;
-    let detail = crate::github::view_issue(&root, request.number)
-        .map_err(|e| invalid_request(e.to_string()))?;
-    let instruction = crate::github::build_instruction(&owner_repo, request.number, &detail);
-    let queued = crate::runner::QueuedTaskRequest {
-        repository: root.to_string_lossy().into_owned(),
-        instruction,
-        agent: request.agent,
-        role: crate::agent::DEFAULT_ROLE.to_string(),
-        model: String::new(),
-        reasoning_effort: String::new(),
-        mode: "terminal".to_string(),
-        goal_contract: None,
-        resume_session: None,
-    };
-    let task = crate::runner::create_queued_task(
-        &state.config,
-        &state.pool,
-        &state.queue.worktree_locks(),
-        queued,
-        now(),
-    )
-    .await
-    .map_err(create_task_error_response)?;
-    let issue_ref = format!("{owner_repo}#{}", request.number);
-    let _ = crate::github::set_issue_ref(&state.pool, task.id, &issue_ref).await;
-    Ok(Json(task))
-}
-
-/// 이슈 삭제(local `github_issue_delete` command와 동일 계약) — **close가 아니라 완전 삭제**다.
-/// 권한 부족·미존재는 gh의 사유를 그대로 400으로 올린다. gh 부재도 마찬가지로 실패로 다룬다
-/// — 목록 조회와 달리 "조용히 비활성"이 성립하지 않는 동작이라, 안 지워졌으면 그렇게 말해야 한다.
-async fn github_issue_delete(
-    State(state): State<RunnerHttpState>,
-    Query(query): Query<GithubIssueDeleteQuery>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let root = authorized_repository(&state, &query.repository)?;
-    crate::github::delete_issue(&root, query.number).map_err(|e| invalid_request(e.to_string()))?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// 경로가 git 저장소인지 — 아니면 작업은 격리 없이 직접 모드로 실행된다.
-async fn git_status(
-    State(state): State<RunnerHttpState>,
-    Query(query): Query<PathQuery>,
-) -> Result<Json<GitStatusResponse>, (StatusCode, String)> {
-    let dir = authorized_repository(&state, &query.path)?;
-    Ok(Json(GitStatusResponse {
-        is_repo: crate::worktree::is_git_repository(&dir),
-    }))
-}
-
-/// 폴더를 git 저장소로 초기화한다(현재 내용을 초기 커밋으로). 이미 저장소면 멱등하게 통과.
-/// 사용자 폴더를 바꾸는 동작이므로 프런트가 명시적으로 요청할 때만 호출된다.
-async fn git_init(
-    State(state): State<RunnerHttpState>,
-    Json(body): Json<PathBody>,
-) -> Result<Json<GitStatusResponse>, (StatusCode, String)> {
-    let dir = authorized_repository(&state, &body.path)?;
-    crate::worktree::init_repository(&dir)
-        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
-    Ok(Json(GitStatusResponse { is_repo: true }))
-}
-
-/// 브라우저가 시작점으로 쓰는 configured root 목록.
-async fn file_roots(State(state): State<RunnerHttpState>) -> Json<Vec<String>> {
-    Json(
-        state
-            .config
-            .repository_roots
-            .iter()
-            .map(|root| crate::fsapi::display_path(root))
-            .collect(),
-    )
-}
-
-/// 디렉터리 한 단계 나열 — 원격 파일 브라우저의 지연 로딩용.
-///
-/// `file_tree`와 같은 root 검증을 거치므로 configured root 밖은 볼 수 없다. 상위 경로도
-/// 같은 검증을 통과할 때만 준다 — root에 도달하면 더 올라갈 수 없다.
-async fn file_browse(
-    State(state): State<RunnerHttpState>,
-    Query(query): Query<BrowseQuery>,
-) -> Result<Json<BrowseResponse>, (StatusCode, String)> {
-    let requested = if query.path.trim().is_empty() {
-        state
-            .config
-            .repository_roots
-            .first()
-            .map(|root| root.to_string_lossy().into_owned())
-            .ok_or((
-                StatusCode::NOT_FOUND,
-                "repository root가 설정되어 있지 않습니다".to_string(),
-            ))?
-    } else {
-        query.path.clone()
-    };
-    let dir = authorized_repository(&state, &requested)?;
-    let entries = crate::fsapi::browse_dir(&dir).map_err(invalid_path)?;
-    let parent =
-        crate::fsapi::browse_parent(&dir).filter(|p| authorized_repository(&state, p).is_ok());
-    Ok(Json(BrowseResponse {
-        path: crate::fsapi::display_path(&dir),
-        parent,
-        entries,
-    }))
-}
-
 async fn file_tree(
     State(state): State<RunnerHttpState>,
     Query(query): Query<RepositoryQuery>,
@@ -1813,18 +815,6 @@ async fn file_tree(
         .map_err(internal_error)
 }
 
-/// 스킬 목록 — 원격 세션의 `/` 드롭다운을 Runner 호스트의 실측값으로 채운다.
-///
-/// 파일 경로와 같은 root 검증을 거치므로 configured root 밖의 저장소는 볼 수 없다.
-/// 목록만 준다 — 본문은 프롬프트 확장 시점에 Runner가 직접 읽는다.
-async fn skills_list(
-    State(state): State<RunnerHttpState>,
-    Query(query): Query<RepositoryQuery>,
-) -> Result<Json<Vec<crate::skills::SkillMeta>>, (StatusCode, String)> {
-    let root = authorized_repository(&state, &query.repository)?;
-    Ok(Json(crate::skills::list_skills(&root.to_string_lossy())))
-}
-
 async fn file_read(
     State(state): State<RunnerHttpState>,
     Query(query): Query<FileQuery>,
@@ -1833,24 +823,6 @@ async fn file_read(
     crate::fsapi::read_file(&root, &query.path)
         .map(Json)
         .map_err(invalid_path)
-}
-
-async fn file_write(
-    State(state): State<RunnerHttpState>,
-    Json(request): Json<FileWriteRequest>,
-) -> Result<Json<i64>, (StatusCode, String)> {
-    let root = authorized_repository(&state, &request.repository)?;
-    crate::runner::file_mutation::write_file(
-        &state.pool,
-        &state.queue.worktree_locks(),
-        &state.review_claims,
-        &root,
-        &request.path,
-        &request.content,
-    )
-    .await
-    .map(Json)
-    .map_err(invalid_path)
 }
 
 async fn schedules(
@@ -2118,10 +1090,7 @@ fn parse_schedule(request: &ScheduleCreateRequest) -> Result<(), (StatusCode, St
     cron::Schedule::from_str(&request.cron)
         .map(|_| ())
         .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
-    if !matches!(
-        request.kind.as_str(),
-        "task" | "reminder" | "quiz" | "retro"
-    ) {
+    if !matches!(request.kind.as_str(), "task" | "reminder" | "quiz") {
         return Err((
             StatusCode::BAD_REQUEST,
             "알 수 없는 스케줄 종류입니다".to_string(),

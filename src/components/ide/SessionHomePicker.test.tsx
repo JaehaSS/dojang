@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   sessionHomeIndex: vi.fn(
     async (_host: unknown, _repo: unknown, _all?: unknown, _query?: unknown) => [] as unknown[],
   ),
+  sessionHomePreview: vi.fn(async () => ({ meta: {} as never, messages: [], truncated: false })),
 }));
 
 vi.mock("../../lib/ipc", () => mocks);
@@ -71,7 +72,9 @@ describe("SessionHomePicker", () => {
     close.mockClear();
     select.mockClear();
     mocks.sessionHomeIndex.mockReset();
+    mocks.sessionHomePreview.mockReset();
     mocks.sessionHomeIndex.mockResolvedValue([]);
+    mocks.sessionHomePreview.mockResolvedValue({ meta: session() as never, messages: [], truncated: false });
     vi.useFakeTimers();
   });
 
@@ -81,7 +84,31 @@ describe("SessionHomePicker", () => {
     vi.useRealTimers();
   });
 
-  it("경고 없는 세션은 바로 선택된다", async () => {
+  it("행에서 Esc는 상세를 먼저 닫고 두 번째에 선택창을 닫는다", async () => {
+    mocks.sessionHomeIndex.mockResolvedValue([session()]);
+    await act(async () => render());
+    await flush();
+    await act(async () => sessionRow().click());
+    await act(async () => key(sessionRow(), "Escape"));
+    expect(close).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("세션을 선택하면 최근 대화를 확인");
+    await act(async () => key(sessionRow(), "Escape"));
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("목록 조회 뒤 활동한 세션도 최신 미리보기 시각으로 경고한다", async () => {
+    mocks.sessionHomeIndex.mockResolvedValue([session({ last_active: 0 })]);
+    mocks.sessionHomePreview.mockResolvedValue({ meta: session({ last_active: Math.floor(Date.now() / 1000) }) as never, messages: [], truncated: false });
+    await act(async () => render());
+    await flush();
+    await act(async () => sessionRow().click());
+    const button = Array.from(host.querySelectorAll("button")).find((b) => b.textContent === "이 세션 이어받기")!;
+    await act(async () => button.click());
+    expect(select).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("최근에도 쓰인 세션");
+  });
+
+  it("세션을 선택한 뒤 명시적 이어받기로 확정한다", async () => {
     mocks.sessionHomeIndex.mockResolvedValue([session({ last_active: 0 })]);
     await act(async () => render());
     await flush();
@@ -90,6 +117,9 @@ describe("SessionHomePicker", () => {
     expect(row?.textContent).toContain("테스트 세션");
     await act(async () => row?.click());
 
+    expect(select).not.toHaveBeenCalled();
+    const resume = Array.from(host.querySelectorAll("button")).find((button) => button.textContent === "이 세션 이어받기");
+    await act(async () => resume?.click());
     expect(select).toHaveBeenCalledTimes(1);
     expect(select.mock.calls[0][0].session_id).toBe("abcd1234efgh5678");
   });
@@ -114,6 +144,8 @@ describe("SessionHomePicker", () => {
 
     const row = sessionRow();
     await act(async () => row?.click());
+    const resume = Array.from(host.querySelectorAll("button")).find((button) => button.textContent === "이 세션 이어받기");
+    await act(async () => resume?.click());
 
     expect(select).not.toHaveBeenCalled();
     expect(host.textContent).toContain("다른 터미널에서 아직 열려 있으면");
@@ -135,6 +167,8 @@ describe("SessionHomePicker", () => {
     await act(async () => projectRows()[0].click());
     const row = sessionRow();
     await act(async () => row?.click());
+    const resume = Array.from(host.querySelectorAll("button")).find((button) => button.textContent === "이 세션 이어받기");
+    await act(async () => resume?.click());
 
     expect(select).not.toHaveBeenCalled();
     expect(host.textContent).toContain("원래 작업 디렉터리가 지금 선택한 저장소와 다릅니다");
@@ -148,6 +182,8 @@ describe("SessionHomePicker", () => {
 
     const row = sessionRow();
     await act(async () => row?.click());
+    const resume = Array.from(host.querySelectorAll("button")).find((button) => button.textContent === "이 세션 이어받기");
+    await act(async () => resume?.click());
     const back = Array.from(host.querySelectorAll("button")).find((b) => b.textContent === "돌아가기");
     await act(async () => back?.click());
 
@@ -235,11 +271,11 @@ describe("SessionHomePicker", () => {
     expect(select).not.toHaveBeenCalled();
 
     await act(async () => key(input, "ArrowDown"));
-    expect(input.getAttribute("aria-activedescendant")).toBe("session-home-session:o");
+    expect(input.getAttribute("aria-activedescendant")).toBe("session-home-session:local:claude:o");
     await act(async () => key(input, "Enter"));
-    // 다른 저장소의 세션이라 확인 단계로 간다 — 바로 선택되지 않는다.
+    // Enter는 상세만 열며, 이어받기는 상세 버튼에서 확정한다.
     expect(select).not.toHaveBeenCalled();
-    expect(host.textContent).toContain("원래 작업 디렉터리가 지금 선택한 저장소와 다릅니다");
+    expect(host.textContent).toContain("/other");
   });
 
   it("Esc는 목록에서 닫고, 확인 단계에서는 목록으로 돌아간다", async () => {
@@ -249,6 +285,8 @@ describe("SessionHomePicker", () => {
     await flush();
 
     await act(async () => sessionRow().click());
+    const resume = Array.from(host.querySelectorAll("button")).find((button) => button.textContent === "이 세션 이어받기");
+    await act(async () => resume?.click());
     expect(host.textContent).toContain("이어받으시겠습니까");
     const dialog = host.querySelector('[role="dialog"]') as HTMLElement;
     await act(async () => key(dialog, "Escape"));
@@ -257,7 +295,53 @@ describe("SessionHomePicker", () => {
 
     const input = host.querySelector('input[aria-label="세션 검색"]') as HTMLInputElement;
     await act(async () => key(input, "Escape"));
+    expect(close).not.toHaveBeenCalled();
+    expect(host.querySelector('[aria-label="세션 미리보기"]')?.textContent).toContain("선택하면");
+    await act(async () => key(input, "Escape"));
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("방향키 선택은 미리보기를 바꾸고 Enter는 이어받기 버튼으로 포커스한다", async () => {
+    mocks.sessionHomeIndex.mockResolvedValue([
+      session({ session_id: "a", title: "첫 세션", recent_user_message: "첫 요청" }),
+      session({ session_id: "b", title: "둘째 세션", recent_user_message: "둘째 요청" }),
+    ]);
+    mocks.sessionHomePreview.mockImplementation((async (_host: unknown, _repo: unknown, _vendor: unknown, id: unknown) => ({
+      meta: session({ session_id: String(id), title: `${id} 전체 제목`, cwd: `/full/${id}` }),
+      messages: [{ role: "user", text: `${id} 대화` }],
+      truncated: false,
+    })) as never);
+    await act(async () => render());
+    await flush();
+    const input = host.querySelector('input[aria-label="세션 검색"]') as HTMLInputElement;
+
+    await act(async () => key(input, "ArrowDown"));
+    await act(async () => await Promise.resolve());
+    expect(host.querySelector('[aria-label="세션 미리보기"]')?.textContent).toContain("a 전체 제목");
+    expect(host.querySelector('[aria-label="세션 미리보기"]')?.textContent).toContain("/full/a");
+
+    await act(async () => key(input, "ArrowDown"));
+    await act(async () => await Promise.resolve());
+    expect(host.querySelector('[aria-label="세션 미리보기"]')?.textContent).toContain("b 대화");
+    await act(async () => key(input, "Enter"));
+    await act(async () => vi.advanceTimersByTime(20));
+    expect(document.activeElement?.textContent).toBe("이 세션 이어받기");
+  });
+
+  it("미리보기 오류 중에는 이어받기를 막고 재시도 후에만 푼다", async () => {
+    mocks.sessionHomeIndex.mockResolvedValue([session({ session_id: "a" })]);
+    mocks.sessionHomePreview.mockRejectedValueOnce(new Error("forbidden"));
+    mocks.sessionHomePreview.mockResolvedValueOnce({ meta: session({ session_id: "a" }) as never, messages: [], truncated: false });
+    await act(async () => render());
+    await flush();
+    await act(async () => sessionRow().click());
+    await act(async () => await Promise.resolve());
+    const resume = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "이 세션 이어받기");
+    expect(resume?.getAttribute("aria-disabled")).toBe("true");
+    const retry = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("다시 시도"));
+    await act(async () => retry?.click());
+    await act(async () => await Promise.resolve());
+    expect(resume?.getAttribute("aria-disabled")).toBe("false");
   });
 
   it("두 조회가 모두 실패해야 오류를 보여주고, 하나만 실패하면 나머지로 그린다", async () => {
@@ -284,6 +368,8 @@ describe("SessionHomePicker", () => {
     await flush();
 
     await act(async () => sessionRow().click());
+    const resume = Array.from(host.querySelectorAll("button")).find((button) => button.textContent === "이 세션 이어받기");
+    await act(async () => resume?.click());
     await act(async () => vi.advanceTimersByTime(20));
     const confirm = Array.from(host.querySelectorAll("button")).find((b) => b.textContent === "이어받기");
     expect(document.activeElement).toBe(confirm);
@@ -325,9 +411,9 @@ describe("SessionHomePicker", () => {
     await act(async () => type(input, "내"));
     await flush();
 
-    expect(input.getAttribute("aria-activedescendant")).toBe("session-home-session:m");
+    expect(input.getAttribute("aria-activedescendant")).toBe("session-home-session:local:claude:m");
     await act(async () => key(input, "Enter"));
-    expect(select).toHaveBeenCalledTimes(1);
+    expect(select).not.toHaveBeenCalled();
   });
 
   it("검색어는 200ms 디바운스 뒤에 조회에 실린다", async () => {

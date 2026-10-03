@@ -52,6 +52,15 @@ describe("mergeSessionHomeResults", () => {
     expect(merged.map((s) => s.session_id)).toEqual(["1", "2", "3"]);
     expect(merged[0].title).toBe("세션 1");
   });
+
+  it("다른 공급자의 같은 session_id는 별도 세션으로 보존한다", () => {
+    const merged = mergeSessionHomeResults(
+      [session("same", { vendor: "claude" })],
+      [session("same", { vendor: "codex" })],
+    );
+    expect(merged).toHaveLength(2);
+    expect(merged.map((item) => item.vendor)).toEqual(["claude", "codex"]);
+  });
 });
 
 describe("buildSessionHomeTree", () => {
@@ -84,7 +93,7 @@ describe("buildSessionHomeTree", () => {
       "/work/app",
       [],
     );
-    expect(tree[0].children.map((c) => c.id)).toEqual(["session:b", "session:a"]);
+    expect(tree[0].children.map((c) => c.id)).toEqual(["session:local:claude:b", "session:local:claude:a"]);
     expect(tree[0].children[0].detail).toBeNull();
   });
 
@@ -111,7 +120,7 @@ describe("sessionHomeRows / initiallyCollapsedProjects", () => {
     const rows = sessionHomeRows(tree, collapsed, false);
     expect(rows.map((r) => `${r.depth}:${r.id}`)).toEqual([
       "0:project:/work/app",
-      "1:session:a",
+      "1:session:local:claude:a",
       "0:project:/work/other",
     ]);
   });

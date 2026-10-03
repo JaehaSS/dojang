@@ -2,10 +2,12 @@
 export const MIN_CODE_WIDTH = 480;
 /** 세션 열 최소 폭 — 마크다운 본문과 코드블록이 접히지 않는 하한. */
 export const MIN_SESSION_WIDTH = 360;
-/** 토론 한 면의 최소 폭 — 면이 둘이므로 세션 열의 하한이 달라진다(설계 0020 §5). */
+/** 토론 한 면의 최소 폭 — 면이 여럿이므로 세션 열의 하한이 달라진다(설계 0020 §5). */
 export const MIN_DEBATE_PANE_WIDTH = 320;
-/** 토론 중 세션 열의 최소 폭 — 면 둘을 접지 않는다. 그 아래에서는 가로 스크롤한다. */
-export const MIN_DEBATE_SESSION_WIDTH = MIN_DEBATE_PANE_WIDTH * 2;
+/** 토론 중 세션 열의 최소 폭 — 면을 접지 않는다. 그 아래에서는 가로 스크롤한다. */
+export const debateSessionWidth = (seats: number): number => MIN_DEBATE_PANE_WIDTH * seats;
+/** 2자 토론의 세션 열 최소 폭. */
+export const MIN_DEBATE_SESSION_WIDTH = debateSessionWidth(2);
 
 /** 2열을 포기하는 임계. */
 export const SPLIT_EXIT = MIN_CODE_WIDTH + MIN_SESSION_WIDTH;

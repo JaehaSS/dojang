@@ -74,16 +74,25 @@ pub fn env_for(token: &str) -> Vec<(String, String)> {
 
 /// 질문 턴은 상한이 질문 TTL보다 커야 한다 — 90초로는 사용자가 읽기도 전에 툴이 끊긴다.
 /// 같은 턴의 다른 MCP 툴에도 같은 상한이 걸린다. 실험 기능의 대가다.
+///
+/// claude에는 상한이 둘이다. `MCP_TOOL_TIMEOUT`은 호출 전체, `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`은
+/// 응답·progress 없이 조용한 구간이다(2.1.283 기본 300초). 답을 기다리는 동안 서버는 아무것도
+/// 보내지 않으므로, 전체 상한만 올리면 5분째에 idle 상한이 먼저 끊는다.
 pub fn env_for_kind(token: &str, questions: bool) -> Vec<(String, String)> {
     let secs = if questions {
         (crate::convo::interaction::QUESTION_TTL as u64) + 60
     } else {
         TOOL_TIMEOUT_SECS
     };
-    vec![
+    let millis = (secs * 1000).to_string();
+    let mut env = vec![
         (TOKEN_ENV.to_string(), token.to_string()),
-        ("MCP_TOOL_TIMEOUT".to_string(), (secs * 1000).to_string()),
-    ]
+        ("MCP_TOOL_TIMEOUT".to_string(), millis.clone()),
+    ];
+    if questions {
+        env.push(("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT".to_string(), millis));
+    }
+    env
 }
 
 /// spawn 한 번에 얹을 인자와 환경변수.
@@ -91,15 +100,35 @@ pub fn env_for_kind(token: &str, questions: bool) -> Vec<(String, String)> {
 pub struct McpInjection {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// 도구 실행을 사용자 승인에 맡기는가. 켜지면 claude 명령에서 `--dangerously-skip-permissions`가
+    /// 빠지고, CLI가 승인이 필요한 호출마다 우리 `approve` 툴을 부른다.
+    pub approvals: bool,
+}
+
+/// claude가 permission prompt로 부를 툴의 전체 이름.
+pub fn approval_tool_name() -> String {
+    format!(
+        "mcp__{CLAUDE_SERVER_KEY}__{}",
+        crate::convo::interaction::APPROVAL_TOOL
+    )
+}
+
+/// 이 서버의 툴은 승인 없이 통과한다 — 질문 툴이 승인 카드를 먼저 띄우면 한 번 묻는 데 두 번 답한다.
+pub fn is_own_tool(tool_name: &str) -> bool {
+    tool_name.starts_with(&format!("mcp__{CLAUDE_SERVER_KEY}__"))
 }
 
 /// 벤더 인자를 마지막 위치인자(지시문) **앞**에 끼운다 — codex `exec`는 프롬프트가 마지막이라
-/// 뒤에 붙이면 옵션이 프롬프트 뒤로 밀린다.
+/// 뒤에 붙이면 옵션이 프롬프트 뒤로 밀린다. 지시문 앞에 옵션 종료 `--`가 있으면 그보다 앞에 끼운다 —
+/// 뒤에 들어가면 주입 인자가 위치인자가 된다.
 pub fn splice_before_instruction(args: &mut Vec<String>, extra: Vec<String>, instruction: &str) {
-    let at = match args.last() {
+    let mut at = match args.last() {
         Some(last) if last == instruction => args.len() - 1,
         _ => args.len(),
     };
+    if at < args.len() && at > 0 && args[at - 1] == "--" {
+        at -= 1;
+    }
     args.splice(at..at, extra);
 }
 
@@ -150,6 +179,7 @@ impl PreviewMcpLease {
         let injection = McpInjection {
             args,
             env: env_for_kind(&token, questions),
+            approvals: false,
         };
         Ok(Self {
             token,
@@ -162,6 +192,17 @@ impl PreviewMcpLease {
 
     pub fn injection(&self) -> &McpInjection {
         &self.injection
+    }
+
+    /// 실행 전 승인을 켠다. claude 전용이다 — codex는 이 통로가 없어 그대로 둔다.
+    pub fn with_approvals(mut self, vendor: Vendor) -> Self {
+        if vendor == Vendor::Claude && !self.injection.approvals {
+            self.injection.approvals = true;
+            self.injection
+                .args
+                .extend(["--permission-prompt-tool".to_string(), approval_tool_name()]);
+        }
+        self
     }
 
     /// Revocation blocks new admissions; existing dispatches must also finish.
@@ -294,6 +335,45 @@ mod tests {
     }
 
     #[test]
+    fn question_turns_lift_both_the_total_and_the_idle_tool_limits() {
+        let get = |env: &[(String, String)], key: &str| {
+            env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+        };
+        let questions = env_for_kind("t", true);
+        let total = get(&questions, "MCP_TOOL_TIMEOUT").unwrap();
+        assert_eq!(get(&questions, "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"), Some(total.clone()));
+        // idle 기본 300초보다 커야 대기 중인 질문이 5분째에 끊기지 않는다.
+        assert!(total.parse::<u64>().unwrap() > 300_000);
+
+        let plain = env_for_kind("t", false);
+        assert_eq!(get(&plain, "MCP_TOOL_TIMEOUT").as_deref(), Some("90000"));
+        assert_eq!(get(&plain, "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"), None);
+    }
+
+    #[test]
+    fn approvals_name_our_tool_as_the_permission_prompt_for_claude_only() {
+        let dir = temp_dir("approvals");
+        let tokens = ControlTokens::default();
+        let lease = PreviewMcpLease::issue_for(&tokens, 1, Vendor::Claude, "http://x", &dir, true)
+            .unwrap()
+            .with_approvals(Vendor::Claude);
+        let args = &lease.injection().args;
+        assert!(lease.injection().approvals);
+        assert_eq!(
+            &args[args.len() - 2..],
+            &["--permission-prompt-tool", "mcp__praxis-preview__approve"]
+        );
+        let codex = PreviewMcpLease::issue_for(&tokens, 1, Vendor::Codex, "http://x", &dir, true)
+            .unwrap()
+            .with_approvals(Vendor::Codex);
+        assert!(!codex.injection().approvals);
+        assert!(!codex.injection().args.iter().any(|a| a == "--permission-prompt-tool"));
+        assert!(is_own_tool("mcp__praxis-preview__ask_user"));
+        assert!(!is_own_tool("Bash"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn claude_config_carries_the_placeholder_not_a_token() {
         let json = claude_config_json("http://127.0.0.1:1/mcp/i");
         assert!(json.contains("Bearer ${PRAXIS_PREVIEW_TOKEN}"));
@@ -357,5 +437,23 @@ mod tests {
         let mut args = vec!["-p".to_string(), "prompt".to_string(), "--flag".to_string()];
         splice_before_instruction(&mut args, vec!["-c".to_string()], "prompt");
         assert_eq!(args, vec!["-p", "prompt", "--flag", "-c"]);
+    }
+
+    /// claude `--mcp-config <configs...>`는 가변 인자라 지시문이 뒤따르면 설정 파일로 삼키고 exit 1로 죽는다.
+    #[test]
+    fn injection_args_stay_before_the_options_terminator() {
+        let mcp = || vec!["--mcp-config".to_string(), "/tmp/a.json".to_string()];
+
+        let mut args: Vec<String> = ["--model", "opus", "--", "닌 cli니"].map(String::from).into();
+        splice_before_instruction(&mut args, mcp(), "닌 cli니");
+        assert_eq!(
+            args,
+            vec!["--model", "opus", "--mcp-config", "/tmp/a.json", "--", "닌 cli니"]
+        );
+
+        // 지시문이 마지막이 아니면 꼬리에 붙으므로 끝낼 옵션이 없다.
+        let mut args: Vec<String> = ["-p", "prompt", "--verbose"].map(String::from).into();
+        splice_before_instruction(&mut args, mcp(), "prompt");
+        assert_eq!(args, vec!["-p", "prompt", "--verbose", "--mcp-config", "/tmp/a.json"]);
     }
 }

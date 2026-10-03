@@ -48,14 +48,12 @@ import { useTreeFileOps } from "./useTreeFileOps";
 import { ContextMenuShell } from "./ContextMenuShell";
 import { FilePromptDialog } from "./FilePromptDialog";
 import { targetDir } from "./tree-file-ops";
-import { QuickOpen } from "../QuickOpen";
+import { QuickOpen, type EditorSearchTab } from "../QuickOpen";
 import { parseCodeItemId, type RankedQuickOpenItem } from "../../lib/quickopen";
 import { onKeyDown as shiftDown, onKeyUp as shiftUp, type ShiftTapState } from "../../lib/shift-double-tap";
 import { Icon } from "./icons";
-import { NotificationInbox } from "./NotificationInbox";
 import { ReplDock } from "./ReplDock";
 import { pandasOpenSnippet } from "../../lib/repl-snippets";
-import { useNotificationSnapshot } from "../../lib/use-notification-snapshot";
 
 const STATUS_LABEL: Record<EditorStatus, string> = {
   idle: "대기",
@@ -112,7 +110,6 @@ function StatusBar({
  * 직후에는 그릴 것이 없고, `editor://ready`로 준비를 알린 뒤 메인 창이 보내 주는 세션을 기다린다.
  */
 export function EditorWindow() {
-  const notifications = useNotificationSnapshot();
   const [session, setSession] = useState<EditorSessionPayload | null>(null);
   const [status, setStatus] = useState<EditorStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -126,7 +123,8 @@ export function EditorWindow() {
   /** 트리를 접을 수 있게 둔다 — 이 창은 통째로 에디터라 폭이 곧 코드 폭이다.
    *  접힌 자리에는 다시 펼 손잡이만 남는다(메인 창은 상단 툴바의 폴더 칩이 그 역할). */
   const [treeOpen, setTreeOpen] = useState(true);
-  const [quickOpen, setQuickOpen] = useState(false);
+  /** 열린 Quick Open의 시작 범위. null이면 닫혀 있다 — Shift 더블탭은 전체, ⌥F는 파일로 연다. */
+  const [quickOpen, setQuickOpen] = useState<EditorSearchTab | null>(null);
   /** 하단 Python 콘솔(IPython) 도크. ⌃`로 여닫는다 — 메인 창의 터미널 도크와 같은 손동작. */
   const [replDock, setReplDock] = useState(false);
   const theme = useTheme();
@@ -196,7 +194,7 @@ export function EditorWindow() {
     const up = (e: KeyboardEvent) => {
       const { next, fire } = shiftUp(tap, e, performance.now());
       tap = next;
-      if (fire) setQuickOpen(true);
+      if (fire) setQuickOpen("all");
     };
     window.addEventListener("keydown", down, true);
     window.addEventListener("keyup", up, true);
@@ -206,9 +204,27 @@ export function EditorWindow() {
     };
   }, []);
 
+  /**
+   * ⌥F — 파일 찾기. Quick Open을 파일 범위로 연다.
+   *
+   * 캡처 단계에서 잡는다: macOS에서 ⌥F는 `ƒ`를 입력하는 키라, Monaco에 먼저 닿으면 코드에
+   * 글자가 들어간다. `e.key`가 `ƒ`로 오므로 물리 키(`e.code`)로 본다.
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || e.code !== "KeyF") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.repeat) return;
+      setQuickOpen((current) => current ?? "file");
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
   /** 고른 것을 이 창에서 연다. 코드 히트는 LSP 점프와 같은 착지 경로를 쓴다. */
   const openFromQuickOpen = (item: RankedQuickOpenItem) => {
-    setQuickOpen(false);
+    setQuickOpen(null);
     if (item.scope === "file") {
       void files.openFile(item.id);
       return;
@@ -610,7 +626,7 @@ export function EditorWindow() {
               <Icon name="x" size={13} />
             </button>
           </div>
-          <div className="flex-1 overflow-auto">
+          <div className="flex flex-1 flex-col overflow-auto">
             <FileTree
               nodes={files.tree}
               activePath={files.activeFile?.path ?? null}
@@ -647,7 +663,6 @@ export function EditorWindow() {
             onChange={files.changeFile}
             onSave={(path, content) => void files.saveFile(path, content)}
             onReload={(path) => void files.reloadFile(path)}
-            onReloadClean={(path) => void files.reloadIfClean(path)}
             onOpenPath={(path) => void actions.openPathExternal(path)}
             onRevealPath={(path) => void actions.revealPathInFinder(path)}
             onCopyAbsPath={(path) => void actions.copyAbsPath(path)}
@@ -665,7 +680,6 @@ export function EditorWindow() {
             editorSettings={editorSettings}
             onGoto={lsp ? actions.gotoSymbol : undefined}
             onLspStatus={lsp ? actions.askLspStatus : undefined}
-            codeGraph={lsp ? actions.codeGraph : undefined}
             onOpenTarget={actions.openLspTarget}
             reveal={actions.revealTarget}
             onRevealed={() => actions.setRevealTarget(null)}
@@ -700,21 +714,6 @@ export function EditorWindow() {
           onClose={closeReplDock}
         />
       )}
-
-      <NotificationInbox
-        snapshot={notifications.snapshot}
-        error={notifications.error}
-        onRetry={() => void notifications.reload()}
-        onSnapshot={notifications.setSnapshot}
-        onResult={async (item) => {
-          await requestPopIn({ action: "result", item, request_id: crypto.randomUUID() });
-          return false;
-        }}
-        onChanges={async (item) => {
-          if (await requestPopIn({ action: "changes", item, request_id: crypto.randomUUID() })) return;
-          throw new Error("코드 창을 접지 못해 변경을 열지 않았습니다.");
-        }}
-      />
       <StatusBar session={session} status={status} error={error} notice={notice} />
       <ContextMenuShell
         at={treeOps.menu}
@@ -726,7 +725,8 @@ export function EditorWindow() {
       />
       <FilePromptDialog {...treeOps.promptProps} />
       <QuickOpen
-        open={quickOpen}
+        open={quickOpen != null}
+        initialEditorTab={quickOpen ?? "all"}
         scopes={["file", "code"]}
         editorSearch={{
           scopeLabel: `${session.branch ?? "현재 워크트리"} · ${session.host} · 세션 #${session.task_id}`,
@@ -736,7 +736,7 @@ export function EditorWindow() {
         // 스킬은 이 창에서 열 수 없다 — 빈 문자열이면 조회 자체를 생략한다.
         repo=""
         taskId={session?.task_id ?? null}
-        onClose={() => setQuickOpen(false)}
+        onClose={() => setQuickOpen(null)}
         onSelect={openFromQuickOpen}
       />
     </div>

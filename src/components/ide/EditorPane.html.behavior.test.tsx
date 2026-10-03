@@ -18,7 +18,6 @@ const monacoStub = {
   languages: {
     registerDefinitionProvider: () => ({ dispose: () => undefined }),
     registerImplementationProvider: () => ({ dispose: () => undefined }),
-    registerReferenceProvider: () => ({ dispose: () => undefined }),
   },
   // 모델 정리 이펙트가 만지는 것 — Monaco가 마운트된 뒤 files가 바뀌면 실행된다.
   Uri: { parse: (p: string) => ({ toString: () => `file://${p}` }) },
@@ -36,6 +35,9 @@ vi.mock("@monaco-editor/react", async () => {
         onMount(
           {
             addCommand: () => undefined,
+            addAction: () => ({ dispose: () => undefined }),
+            onMouseDown: () => ({ dispose: () => undefined }),
+            onMouseUp: () => ({ dispose: () => undefined }),
             createContextKey: () => ({ set: () => undefined }),
             onDidChangeCursorSelection: () => undefined,
             onDidScrollChange: () => undefined,

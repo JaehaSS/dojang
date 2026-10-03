@@ -13,6 +13,20 @@ use crate::goal_contract::GoalContract;
 pub enum TaskOrigin {
     Ui,
     External,
+    /// 멀티 벤더 파이프라인 드라이버가 만든 작업. External처럼 최신화·직접 모드·질문 응답을
+    /// 쓰지 않지만, 사용자가 이미 계획을 승인했으므로 승인 대기 없이 곧바로 헤드리스로 spawn한다.
+    Pipeline,
+}
+
+impl TaskOrigin {
+    /// 지표와 로그에 남기는 기원 라벨.
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskOrigin::Ui => "ui",
+            TaskOrigin::External => "external",
+            TaskOrigin::Pipeline => "pipeline",
+        }
+    }
 }
 
 /// host adapter가 정규화한 작업 생성 요청이다.
@@ -50,6 +64,10 @@ pub struct CreateTaskParams {
     /// `db::adopt_external_session`으로 승계한다. `resume_from`과 배타 — 둘 다 Some이면
     /// 생성 자체를 거절한다. 새로 시작하는 모든 경로는 None이다.
     pub resume_session: Option<String>,
+    pub resume_vendor: Option<String>,
+    pub purpose_selection: Option<crate::project_plan::PurposeSelection>,
+    /// Claude 질문 세션에서 도구 실행 전 사용자 승인을 받는가. 그 밖의 생성은 false다.
+    pub approvals: bool,
 }
 
 impl CreateTaskParams {
@@ -81,6 +99,9 @@ impl CreateTaskParams {
             client_ref: None,
             resume_from: None,
             resume_session: None,
+            resume_vendor: None,
+            purpose_selection: None,
+            approvals: false,
         }
     }
 }

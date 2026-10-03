@@ -20,6 +20,7 @@ import { inputCls } from "./ide/formStyles";
 import { ToggleBadge, ResourceRow, DeleteButton } from "./ide/ResourceRow";
 import { MobilePairingCard } from "./ide/MobilePairingCard";
 import { useHighlight } from "./ide/settings/SettingRow";
+import { MetaTag } from "./MetaTag";
 
 /** 페어링 코드 수명 — 백엔드 `session::PAIRING_TTL_SECS`와 같은 값이다. */
 const PAIRING_HINT = "코드는 한 번만 쓸 수 있고 만료되면 다시 발급해야 합니다.";
@@ -302,9 +303,14 @@ export function MobileView() {
   return (
     <div className="flex-1 overflow-auto p-4">
       <div className="max-w-3xl mx-auto">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-sm font-medium">모바일 PWA</span>
+          <MetaTag title="실제 기기 페어링은 아직 충분히 검증되지 않았습니다">베타</MetaTag>
+        </div>
         <div className="text-text-muted text-xs mb-3">
           데스크톱에서 돌린 작업을 폰에서 보고, 대화하고, 승인합니다. 에이전트가 질문하거나 검토 대기에
-          들어가면 Web Push가 갑니다.
+          들어가면 Web Push가 갑니다. 실제 기기로 페어링하는 경로는 아직 충분히 검증되지 않았고, 이
+          Mac 밖에서 접속하려면 `tailscale serve`가 필요합니다.
         </div>
         {err && <div className="text-status-failed text-sm font-code mb-2">{err}</div>}
         <SurfaceSection status={status} setStatus={setStatus} onError={setErr} />

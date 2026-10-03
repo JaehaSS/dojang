@@ -33,6 +33,8 @@ pub async fn finalize_task(
     let mut attempt = if approved {
         // Authorize before audit metadata invokes Git on any stored task path.
         worktree(config, &pending).map_err(|e| e.to_string())?;
+        crate::task_results::refresh_evidence(pool, task_id).await?;
+        crate::task_review::guard_apply(pool, task_id).await?;
         Some(crate::approval::Attempt::start(pool, &pending).await.map_err(|e| e.to_string())?)
     } else { None };
     let result = async {
@@ -104,7 +106,6 @@ async fn resume_discard(
     now: i64,
 ) -> anyhow::Result<()> {
     if state == "prepared" {
-        crate::memory::retire_task_projection_if_present(pool, task_id, now).await?;
         crate::memory::file::retire_task(pool, task_id).await?;
         store::stage(pool, task_id, "projection_retired", None, now).await?;
     }
@@ -139,9 +140,8 @@ async fn resume_approval(
 ) -> anyhow::Result<()> {
     set_attempt_stage(&mut attempt, "projection", None);
     if row.state == "prepared" {
-        // 파일형 투영에는 원장(journal)이 없다 — 있으면 옛 방식대로 회수하고,
-        // 없으면 블록만 걷어낸다. 강제 영수증을 요구하면 모든 승인이 막힌다.
-        crate::memory::retire_task_projection_if_present(pool, task.id, now).await?;
+        // 파일형 투영에는 원장(journal)이 없다 — 블록만 걷어낸다. 옛 DB 투영(P2)의 retire는
+        // 제거됐다(설계 2026-09-13 §P2 제거).
         crate::memory::file::retire_task(pool, task.id).await?;
         store::stage(pool, task.id, "projection_retired", None, now).await?;
         row.state = "projection_retired".to_string();

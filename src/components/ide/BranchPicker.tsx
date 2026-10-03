@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { MetaTag } from "../MetaTag";
 import { Icon } from "./icons";
 import { filterByQuery, matchRanges, queryTokens } from "./picker-search";
@@ -15,6 +15,10 @@ interface Props {
   onPick: (branch: string) => void;
   /** 직접 실행이면 선택한 브랜치로 작업 생성 전에 메인 체크아웃을 전환한다. */
   direct?: boolean;
+  /** 작업 생성과 별개로 메인 체크아웃을 즉시 전환한다. 없으면 행에 체크아웃 버튼을 두지 않는다. */
+  onCheckout?: (branch: string) => void;
+  /** 전환이 진행 중이면 다른 전환을 받지 않는다. */
+  checkingOut?: boolean;
 }
 
 /** 세 피커가 같은 규칙을 쓴다 — 구현은 `picker-search.ts`이고 여기 이름은 호출부 호환용 별칭이다. */
@@ -35,7 +39,15 @@ export const branchMatchRanges = matchRanges;
  * 않는다: 원래 순서(최근 커밋순)가 곧 "방금 만든 브랜치가 위"라는 뜻이다.
  * 와이어프레임: `docs/designs/wireframes/0010-branch-picker-search.md`.
  */
-export function BranchPicker({ value, current, branches, onPick, direct = false }: Props) {
+export function BranchPicker({
+  value,
+  current,
+  branches,
+  onPick,
+  direct = false,
+  onCheckout,
+  checkingOut = false,
+}: Props) {
   const [openMenu, setOpenMenu] = useState(false);
   const [query, setQuery] = useState("");
   const ref = useRef<HTMLDivElement>(null);
@@ -61,9 +73,17 @@ export function BranchPicker({ value, current, branches, onPick, direct = false 
     setOpenMenu(false);
   };
 
+  // 이미 체크아웃된 브랜치는 전환할 것이 없다.
+  const canCheckout = (branch: string) => !!onCheckout && !checkingOut && branch !== current;
+  const checkout = (branch: string) => {
+    if (!canCheckout(branch)) return;
+    onCheckout?.(branch);
+    setOpenMenu(false);
+  };
+
   // 커서는 열 때만 지금 고른 값 위에 선다 — 목록이 갱신될 때마다 되돌리면 키보드 이동이 무효가 된다.
   const at = branches.indexOf(selected);
-  const { cursor, setCursor, inputRef, listRef, onKeyDown } = usePickerCursor({
+  const { cursor, setCursor, inputRef, listRef, onKeyDown: onCursorKeyDown } = usePickerCursor({
     open: openMenu,
     count: shown.length,
     initial: at >= 0 ? at : 0,
@@ -75,6 +95,18 @@ export function BranchPicker({ value, current, branches, onPick, direct = false 
     },
     onClose: () => setOpenMenu(false),
   });
+
+  // Shift+Enter는 고르는 대신 커서 행으로 체크아웃한다. 나머지 키는 커서 훅이 맡는다.
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && e.shiftKey && onCheckout) {
+      e.preventDefault();
+      e.stopPropagation();
+      const branch = shown[cursor];
+      if (branch) checkout(branch);
+      return;
+    }
+    onCursorKeyDown(e);
+  };
 
   // 열리면 곧장 검색으로 손이 간다(훅이 포커스한다). 닫으면 질의를 버린다.
   useEffect(() => {
@@ -114,7 +146,10 @@ export function BranchPicker({ value, current, branches, onPick, direct = false 
       {openMenu && (
         <div className="absolute bottom-full left-0 mb-1 z-20 w-80 rounded-lg border border-border-strong bg-raised py-1 shadow-xl">
           <div className="flex items-center justify-between gap-2 px-3 py-1">
-            <span className="text-xs text-text-muted">시작할 브랜치</span>
+            <span className="text-xs text-text-muted">
+              시작할 브랜치
+              {onCheckout && <span className="ml-1">· Shift+Enter 체크아웃</span>}
+            </span>
             {/* 좁혀졌다는 사실을 숫자로 준다 — 스크롤 막대 길이는 근거가 아니다. */}
             <span className="text-xs text-text-muted font-code shrink-0">
               {tokens.length > 0 ? `${shown.length}/${branches.length}` : branches.length}
@@ -167,13 +202,13 @@ export function BranchPicker({ value, current, branches, onPick, direct = false 
             className="max-h-72 overflow-auto"
           >
             {shown.map((branch, i) => (
-              <button
+              <div
                 key={branch}
                 id={`branch-opt-${i}`}
                 role="option"
                 aria-selected={branch === selected}
                 data-cursor={i === cursor ? "true" : undefined}
-                className={`w-full text-left flex items-center gap-2 px-3 py-1.5 text-sm ${
+                className={`flex items-center text-sm ${
                   i === cursor
                     ? "bg-surface text-text"
                     : branch === selected
@@ -181,20 +216,36 @@ export function BranchPicker({ value, current, branches, onPick, direct = false 
                       : "text-text-secondary"
                 }`}
                 onMouseEnter={() => setCursor(i)}
-                onClick={() => commit(branch)}
                 title={branch}
               >
-                <span className="truncate flex-1 font-code text-xs">
-                  <Highlighted text={branch} tokens={tokens} />
-                </span>
-                {/* 상태가 아니라 분류다 — Badge가 아니라 MetaTag의 자리(DESIGN.md Don't #14). */}
-                {branch === current && <MetaTag>체크아웃됨</MetaTag>}
-                {branch === selected && (
-                  <span className="text-primary-bright shrink-0">
-                    <Icon name="check" size={14} />
+                <button
+                  className="min-w-0 flex-1 text-left flex items-center gap-2 pl-3 pr-2 py-1.5"
+                  onClick={() => commit(branch)}
+                  tabIndex={-1}
+                >
+                  <span className="truncate flex-1 font-code text-xs">
+                    <Highlighted text={branch} tokens={tokens} />
                   </span>
+                  {/* 상태가 아니라 분류다 — Badge가 아니라 MetaTag의 자리(DESIGN.md Don't #14). */}
+                  {branch === current && <MetaTag>체크아웃됨</MetaTag>}
+                  {branch === selected && (
+                    <span className="text-primary-bright shrink-0">
+                      <Icon name="check" size={14} />
+                    </span>
+                  )}
+                </button>
+                {/* 커서 행에만 보여 목록이 버튼으로 뒤덮이지 않게 한다. */}
+                {i === cursor && canCheckout(branch) && (
+                  <button
+                    className="shrink-0 mr-2 text-xs border border-border rounded px-1.5 py-0.5 text-text-secondary hover:border-border-strong hover:text-text"
+                    onClick={() => checkout(branch)}
+                    tabIndex={-1}
+                    title={`메인 체크아웃을 '${branch}'로 지금 전환합니다 — 변경 사항은 stash에 보관됩니다 (Shift+Enter)`}
+                  >
+                    체크아웃
+                  </button>
                 )}
-              </button>
+              </div>
             ))}
 
             {shown.length === 0 && (

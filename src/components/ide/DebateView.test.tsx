@@ -35,8 +35,10 @@ const view = (over: Partial<React.ComponentProps<typeof DebateView>> = {}) => (
     taskId={7}
     events={events}
     roundCap={3}
-    left={{ agent: "claude", model: "sonnet-4.6" }}
-    right={{ agent: "codex", model: "gpt-5.2" }}
+    panes={[
+      { agent: "claude", model: "sonnet-4.6" },
+      { agent: "codex", model: "gpt-5.2" },
+    ]}
     busy={false}
     onSend={() => true}
     onEnded={() => undefined}
@@ -79,6 +81,17 @@ afterEach(async () => {
 });
 
 describe("DebateView", () => {
+  it("토론에서도 저장된 도구 이미지·음성·리소스 결과를 표시한다", async () => {
+    const open=vi.fn();
+    await render(view({ onOpenLink:open, events:[...events,{kind:"tool_output",speaker:"right",tool_use_id:"codex-tool",contents:[
+      {type:"text",text:"계산 결과 42"},{type:"image",url:"data:image/png;base64,AQ=="},{type:"audio",url:"data:audio/wav;base64,AQ=="},{type:"resource",uri:"https://example.com/result",title:"결과 열기"}
+    ]}]}));
+    expect(container?.textContent).toContain("계산 결과 42");
+    expect(container?.querySelector('img[alt="도구 이미지 결과"]')).not.toBeNull();
+    expect(container?.querySelector("audio")?.controls).toBe(true);
+    expect(container?.querySelector("audio")?.autoplay).toBe(false);
+    await act(async()=>byText("결과 열기")?.click());expect(open).toHaveBeenCalledWith("https://example.com/result");
+  });
   it("면 헤더에 에이전트 이름·모델 배지와 발화자 접근성 레이블을 단다", async () => {
     await render(view());
     const left = container?.querySelector('[aria-label="좌측 발화자 Claude Code"]');
@@ -88,6 +101,73 @@ describe("DebateView", () => {
     // 라운드 구분선은 목록 구분이 아니라 제목 수준이다 — 안 들리면 두 면이 한 흐름으로 읽힌다.
     const heading = container?.querySelector('[role="heading"]');
     expect(heading?.textContent).toContain("라운드 1/3");
+  });
+
+  it("라운드마다 각 면 첫머리에 발화자를 단다 — 헤더가 스크롤로 멀어져도 누가 말했는지 보인다", async () => {
+    await render(view({ events: [...events, { kind: "user", text: "다음" }, { kind: "text", text: "B안", speaker: "left" }] }));
+    const tags = [...(container?.querySelectorAll('[data-testid="debate-speaker"]') ?? [])].map((t) => t.textContent);
+    expect(tags).toEqual(["Claudesonnet-4.6", "Codexgpt-5.2", "Claudesonnet-4.6", "Codexgpt-5.2"]);
+  });
+
+  it("3자면 면이 셋이고 위치 이름·발화자 표지가 자리마다 붙는다", async () => {
+    await render(
+      view({
+        panes: [
+          { agent: "claude", model: "sonnet-4.6" },
+          { agent: "codex", model: "gpt-5.2" },
+          { agent: "agy", model: null },
+        ],
+        events: [...events, { kind: "text", text: "둘 다 부족하다", speaker: "third" }],
+      }),
+    );
+    expect(container?.querySelector('[aria-label="첫째 발화자 Claude Code"]')).not.toBeNull();
+    expect(container?.querySelector('[aria-label="둘째 발화자 Codex"]')).not.toBeNull();
+    expect(container?.querySelector('[aria-label^="셋째 발화자"]')).not.toBeNull();
+    const tags = container?.querySelectorAll('[data-testid="debate-speaker"]') ?? [];
+    expect(tags).toHaveLength(3);
+    const bodies = [...(container?.querySelectorAll('[data-testid="md"]') ?? [])].map((t) => t.textContent);
+    expect(bodies).toEqual(["A안을 권한다", "전제가 틀렸다", "둘 다 부족하다"]);
+  });
+
+  it("지금보다 자리가 많던 이전 토론의 셋째 발화도 화면에 남는다", async () => {
+    await render(view({ events: [...events, { kind: "text", text: "옛 셋째 발화", speaker: "third" }] }));
+    expect(container?.textContent).toContain("이전 토론의 다른 참여자");
+    expect(container?.textContent).toContain("옛 셋째 발화");
+  });
+
+  it("구조화 질문은 발화자별 원래 자리와 미상 영역에 남긴다", async () => {
+    const renderQuestion = (id: string) => <div data-testid={`question-${id}`}>{id}</div>;
+    await render(view({
+      renderQuestion,
+      events: [
+        { kind: "interaction", interaction_id: "preamble" },
+        { kind: "user", text: "토론 시작" },
+        { kind: "text", text: "좌측 앞", speaker: "left" },
+        { kind: "interaction", interaction_id: "left", speaker: "left" },
+        { kind: "text", text: "좌측 뒤", speaker: "left" },
+        { kind: "text", text: "우측 앞", speaker: "right" },
+        { kind: "interaction", interaction_id: "right", speaker: "right" },
+        { kind: "text", text: "우측 뒤", speaker: "right" },
+        { kind: "interaction", interaction_id: "common" },
+        { kind: "interaction", interaction_id: "orphan", speaker: "third" },
+      ],
+    }));
+
+    const question = (id: string) => container?.querySelector(`[data-testid="question-${id}"]`) as HTMLElement;
+    const tag = (name: string) => [...(container?.querySelectorAll('[data-testid="debate-speaker"]') ?? [])]
+      .find((element) => element.textContent?.includes(name));
+    expect(tag("Claude")?.parentElement?.contains(question("left"))).toBe(true);
+    expect(tag("Codex")?.parentElement?.contains(question("right"))).toBe(true);
+    expect(question("preamble").compareDocumentPosition(container?.querySelector('[role="heading"]') as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(question("common").compareDocumentPosition(tag("Claude") as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const orphanLabel = [...(container?.querySelectorAll("div") ?? [])].find((element) => element.textContent === "이전 토론의 다른 참여자");
+    expect(orphanLabel).toBeDefined();
+    expect(orphanLabel!.compareDocumentPosition(question("orphan")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("원본 이벤트가 없는 대기 질문 상태도 토론 끝에 남긴다", async () => {
+    await render(view({ interactionStatus: <div data-testid="unanchored-question">미연결 질문</div> }));
+    expect(container?.querySelector('[data-testid="unanchored-question"]')?.textContent).toBe("미연결 질문");
   });
 
   it("라운드가 도는 동안 컴포저는 잠기고 중단만 남는다", async () => {
@@ -122,6 +202,19 @@ describe("DebateView", () => {
     await act(async () => byText("토론 끝내기")?.click());
     expect(ipc.debateEnd).toHaveBeenCalledWith(7);
     expect(ended).toHaveBeenCalled();
+  });
+
+  it("실수로 켠 토론도 첫 발화 전에 끝낼 수 있고, 라운드가 도는 동안에는 중단을 먼저 가리킨다", async () => {
+    const ended = vi.fn();
+    await render(view({ events: [], onEnded: ended }));
+    await act(async () => byText("토론 끝내기")?.click());
+    expect(ipc.debateEnd).toHaveBeenCalledWith(7);
+    expect(ended).toHaveBeenCalled();
+
+    ipc.debateEnd.mockClear();
+    await render(view({ busy: true }));
+    expect(byText("토론 끝내기")?.disabled).toBe(true);
+    expect(byText("중단")).toBeDefined();
   });
 
   it("상한으로 끝나면 배너 문구만 다르고 결론 복사는 없다 — 복사할 결론이 없다", async () => {

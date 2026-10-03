@@ -40,9 +40,6 @@ async fn decision_for(pool: &sqlx::SqlitePool, task_id: i64) -> i64 {
     let provenance = ApprovalProvenance {
         task_id,
         instruction_digest: decision::provenance::digest("delete me"),
-        start_receipts: vec![3],
-        memory_versions: vec![(4, 1)],
-        evidence_checks: vec![5],
         verification_run: Some(decision::provenance::verification_ref(task_id, 99)),
         commit_sha: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(),
     };

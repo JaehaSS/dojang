@@ -1,8 +1,9 @@
 //! Durable, task-scoped question receipts. A committed dispatch is never replayed.
+use super::native_interaction::NativeRequestInfo;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use std::collections::HashSet;
 
 pub const RUNTIME: &str = "codex_questions_v1";
@@ -11,12 +12,17 @@ pub const RUNTIME_LOCAL: &str = "claude_questions_v1";
 /// 두 표면이 함께 쓰는 툴 이름. Claude에는 `mcp__praxis-preview__ask_user`로 보인다.
 pub const TOOL_NAME: &str = "ask_user";
 pub const CREATE_MODE: &str = "conversation_questions";
+/// Claude `--permission-prompt-tool`이 부르는 호스트 툴. 에이전트가 아니라 CLI가 부른다.
+pub const APPROVAL_TOOL: &str = "approve";
 pub const QUESTION_TTL: i64 = 30 * 60;
 pub const MAX_BYTES: usize = 16 * 1024;
 const ACTIVE: &str = "('starting','running','cancelling','finalizing','cleanup_failed')";
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+fn input_validation(e: impl std::fmt::Display) -> String {
+    format!("INPUT_VALIDATION: {e}")
 }
 pub fn id() -> Result<String, String> {
     crate::preview_bridge::random_hex_id()
@@ -165,31 +171,138 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), String> {
         "CREATE TABLE IF NOT EXISTS convo_runtime_bindings(task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,runtime_kind TEXT NOT NULL,tool_schema_hash TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS convo_executions(id TEXT PRIMARY KEY,task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,state TEXT NOT NULL,thread_id TEXT,turn_id TEXT,pgid INTEGER,identity_hash TEXT,process_marker TEXT,created_at INTEGER NOT NULL,error TEXT)",
         "CREATE UNIQUE INDEX IF NOT EXISTS convo_one_execution ON convo_executions(task_id) WHERE state IN ('starting','running','cancelling','finalizing','cleanup_failed')",
-        "CREATE TABLE IF NOT EXISTS convo_interactions(id TEXT PRIMARY KEY,execution_id TEXT NOT NULL REFERENCES convo_executions(id) ON DELETE CASCADE,wire_id TEXT NOT NULL,call_id TEXT NOT NULL,questions TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',reason TEXT,revision INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(execution_id,wire_id),UNIQUE(execution_id,call_id))",
+        "CREATE TABLE IF NOT EXISTS convo_interactions(id TEXT PRIMARY KEY,execution_id TEXT NOT NULL REFERENCES convo_executions(id) ON DELETE CASCADE,wire_id TEXT NOT NULL,call_id TEXT NOT NULL,questions TEXT NOT NULL,native_method TEXT,native_params TEXT,native_request TEXT,state TEXT NOT NULL DEFAULT 'pending',reason TEXT,revision INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(execution_id,wire_id),UNIQUE(execution_id,call_id))",
         "CREATE TABLE IF NOT EXISTS convo_interaction_answers(id TEXT PRIMARY KEY,interaction_id TEXT NOT NULL REFERENCES convo_interactions(id) ON DELETE CASCADE,payload TEXT NOT NULL,payload_hash TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL)",
         "CREATE UNIQUE INDEX IF NOT EXISTS convo_one_answer ON convo_interaction_answers(interaction_id)",
         "CREATE TABLE IF NOT EXISTS convo_interaction_drafts(interaction_id TEXT PRIMARY KEY REFERENCES convo_interactions(id) ON DELETE CASCADE,payload TEXT NOT NULL,revision INTEGER NOT NULL)",
     ] { sqlx::query(sql).execute(pool).await.map_err(err)?; }
+    let mut tx = pool.begin().await.map_err(err)?;
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('convo_runtime_bindings') WHERE name='cli_version'",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(err)?;
+    if exists == 0 {
+        sqlx::query("ALTER TABLE convo_runtime_bindings ADD COLUMN cli_version TEXT")
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+        // Historical question threads could only run with this exact adapter version.
+        sqlx::query("UPDATE convo_runtime_bindings SET cli_version=? WHERE runtime_kind=?")
+            .bind(super::cli_runtime::LEGACY_VERSION)
+            .bind(RUNTIME)
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+    }
+    let approvals: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('convo_runtime_bindings') WHERE name='approvals'",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(err)?;
+    if approvals == 0 {
+        sqlx::query("ALTER TABLE convo_runtime_bindings ADD COLUMN approvals INTEGER NOT NULL DEFAULT 0")
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+    }
+    for column in ["native_method", "native_params", "native_request"] {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('convo_interactions') WHERE name=?",
+        )
+        .bind(column)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(err)?;
+        if exists == 0 {
+            sqlx::query(&format!(
+                "ALTER TABLE convo_interactions ADD COLUMN {column} TEXT"
+            ))
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+        }
+    }
+    tx.commit().await.map_err(err)?;
     Ok(())
+}
+/// 실행 전 승인은 Claude 질문 세션의 생성 옵션이다. 공급자를 바꿔도 값은 남고, Codex 차례는 읽지 않는다.
+pub async fn set_approvals(pool: &SqlitePool, task: i64, on: bool) -> Result<(), String> {
+    let updated = sqlx::query("UPDATE convo_runtime_bindings SET approvals=? WHERE task_id=?")
+        .bind(on)
+        .bind(task)
+        .execute(pool)
+        .await
+        .map_err(err)?
+        .rows_affected();
+    if updated != 1 {
+        return Err("질문 실행 계약이 없어 실행 전 승인을 켤 수 없습니다".into());
+    }
+    Ok(())
+}
+pub async fn approvals_of(pool: &SqlitePool, task: i64) -> Result<bool, String> {
+    let on: Option<bool> =
+        sqlx::query_scalar("SELECT approvals FROM convo_runtime_bindings WHERE task_id=?")
+            .bind(task)
+            .fetch_optional(pool)
+            .await
+            .map_err(err)?;
+    Ok(on.unwrap_or(false))
+}
+/// `approve`의 MCP 서술자. 입력은 CLI가 정한 permission prompt 형태다(`tool_name`·`input`).
+pub fn approval_tool_spec() -> Value {
+    json!({
+        "name": APPROVAL_TOOL,
+        "description": "Host permission prompt used by the Claude CLI. Do not call this tool directly.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["tool_name", "input"],
+            "properties": {
+                "tool_name": {"type": "string"},
+                "input": {"type": "object"},
+                "tool_use_id": {"type": "string"}
+            }
+        }
+    })
 }
 pub async fn bind(pool: &SqlitePool, task: i64) -> Result<(), String> {
     bind_runtime(pool, task, RUNTIME).await
 }
 pub async fn bind_runtime(pool: &SqlitePool, task: i64, runtime: &str) -> Result<(), String> {
-    sqlx::query("INSERT INTO convo_runtime_bindings VALUES(?,?,?)")
+    sqlx::query("INSERT INTO convo_runtime_bindings(task_id,runtime_kind,tool_schema_hash,cli_version) VALUES(?,?,?,?)")
         .bind(task)
         .bind(runtime)
         .bind(schema_hash(runtime))
+        .bind((runtime == RUNTIME).then_some(super::cli_runtime::DEFAULT_VERSION))
         .execute(pool)
         .await
         .map_err(err)?;
     Ok(())
 }
+fn validate_binding(kind: &str, schema: &str, version: Option<&str>) -> Result<(), String> {
+    match kind {
+        RUNTIME if schema == schema_hash(RUNTIME) => super::cli_runtime::validate_version(
+            version.ok_or("대화의 Codex 버전 기록이 없습니다")?,
+        ),
+        RUNTIME_LOCAL if schema == schema_hash(RUNTIME_LOCAL) => {
+            // Claude가 질문을 주도해도 토론의 Codex 차례는 이 작업의 고정 런타임을 쓴다.
+            // 옛 로컬 바인딩은 이 값이 없을 수 있어 `ensure_codex_version`만 채울 수 있다.
+            if let Some(version) = version {
+                super::cli_runtime::validate_version(version)
+            } else {
+                Ok(())
+            }
+        }
+        _ => Err("이 질문 세션의 실행 계약을 지원하지 않습니다".into()),
+    }
+}
 /// 바인딩이 없으면 `None`. 있는데 우리가 모르는 계약이면 **에러다** — 조용히 평범한 턴으로
 /// 흘려보내면 열린 질문이 영영 응답되지 않는다.
 pub async fn runtime_of(pool: &SqlitePool, task: i64) -> Result<Option<String>, String> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT runtime_kind,tool_schema_hash FROM convo_runtime_bindings WHERE task_id=?",
+    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT runtime_kind,tool_schema_hash,cli_version FROM convo_runtime_bindings WHERE task_id=?",
     )
     .bind(task)
     .fetch_optional(pool)
@@ -197,13 +310,113 @@ pub async fn runtime_of(pool: &SqlitePool, task: i64) -> Result<Option<String>, 
     .map_err(err)?;
     match row {
         None => Ok(None),
-        Some((kind, schema))
-            if (kind == RUNTIME || kind == RUNTIME_LOCAL) && schema == schema_hash(&kind) =>
-        {
+        Some((kind, schema, version)) => {
+            validate_binding(&kind, &schema, version.as_deref())?;
             Ok(Some(kind))
         }
-        _ => Err("이 질문 세션의 실행 계약을 지원하지 않습니다".into()),
     }
+}
+/// Never infer a thread's version from the currently installed global CLI.
+pub async fn cli_version_of(pool: &SqlitePool, task: i64) -> Result<String, String> {
+    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT runtime_kind,tool_schema_hash,cli_version FROM convo_runtime_bindings WHERE task_id=?",
+    )
+    .bind(task)
+    .fetch_optional(pool)
+    .await
+    .map_err(err)?;
+    let (kind, schema, version) = row.ok_or("질문 실행 계약이 없습니다")?;
+    validate_binding(&kind, &schema, version.as_deref())?;
+    let version = version.ok_or("대화의 Codex 버전 기록이 없습니다")?;
+    Ok(version)
+}
+/// Return the task's pinned Codex runtime. A historical Claude binding may not have needed a
+/// Codex pin; it is filled exactly once when a Codex debate turn needs one.
+pub async fn ensure_codex_version(pool: &SqlitePool, task: i64) -> Result<String, String> {
+    let mut tx = pool.begin().await.map_err(err)?;
+    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT runtime_kind,tool_schema_hash,cli_version FROM convo_runtime_bindings WHERE task_id=?",
+    )
+    .bind(task)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(err)?;
+    let (kind, schema, version) = row.ok_or("질문 실행 계약이 없습니다")?;
+    validate_binding(&kind, &schema, version.as_deref())?;
+    let version = match (kind.as_str(), version) {
+        (_, Some(version)) => version,
+        (RUNTIME_LOCAL, None) => {
+            let version = super::cli_runtime::DEFAULT_VERSION.to_string();
+            let updated = sqlx::query(
+                "UPDATE convo_runtime_bindings SET cli_version=? WHERE task_id=? AND runtime_kind=? AND cli_version IS NULL",
+            )
+            .bind(&version)
+            .bind(task)
+            .bind(RUNTIME_LOCAL)
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?
+            .rows_affected();
+            if updated != 1 {
+                return Err("대화의 Codex 버전 기록을 고정하지 못했습니다".into());
+            }
+            version
+        }
+        (RUNTIME, None) => return Err("대화의 Codex 버전 기록이 없습니다".into()),
+        _ => return Err("이 질문 세션의 실행 계약을 지원하지 않습니다".into()),
+    };
+    tx.commit().await.map_err(err)?;
+    Ok(version)
+}
+/// Rebind an existing question contract while its caller updates the task's selected agent.
+/// Keeping this inside that transaction prevents the task row and tool contract from drifting.
+pub async fn rebind_for_agent_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    task: i64,
+    agent: &str,
+) -> Result<(), String> {
+    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT runtime_kind,tool_schema_hash,cli_version FROM convo_runtime_bindings WHERE task_id=?",
+    )
+    .bind(task)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(err)?;
+    let Some((old_kind, old_schema, old_version)) = row else {
+        return Ok(());
+    };
+    validate_binding(&old_kind, &old_schema, old_version.as_deref())?;
+    let new_kind = runtime_for_agent(agent)
+        .ok_or_else(|| format!("질문 응답은 Codex·Claude 사이의 전환을 지원합니다: {agent}"))?;
+    let active: i64 = sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM convo_executions WHERE task_id=? AND state IN {ACTIVE})"
+    ))
+    .bind(task)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(err)?;
+    if active != 0 {
+        return Err("진행 중인 질문 실행이 있어 에이전트를 바꿀 수 없습니다".into());
+    }
+    let version = match (old_kind.as_str(), new_kind, old_version) {
+        (RUNTIME_LOCAL, RUNTIME, None) => Some(super::cli_runtime::DEFAULT_VERSION.to_string()),
+        (_, _, version) => version,
+    };
+    let updated = sqlx::query(
+        "UPDATE convo_runtime_bindings SET runtime_kind=?,tool_schema_hash=?,cli_version=? WHERE task_id=?",
+    )
+    .bind(new_kind)
+    .bind(schema_hash(new_kind))
+    .bind(version)
+    .bind(task)
+    .execute(&mut **tx)
+    .await
+    .map_err(err)?
+    .rows_affected();
+    if updated != 1 {
+        return Err("질문 실행 계약을 전환하지 못했습니다".into());
+    }
+    Ok(())
 }
 pub async fn is_bound(pool: &SqlitePool, task: i64) -> Result<bool, String> {
     Ok(runtime_of(pool, task).await?.is_some())
@@ -253,28 +466,62 @@ pub async fn started(
     thread: &str,
     turn: &str,
 ) -> Result<(), String> {
+    started_on_side(pool, execution, thread, turn, None).await
+}
+/// Accept a started turn and persist its vendor session in the owner for that debate side.
+/// `None` is the historical single-session path; `Left` deliberately shares that task owner.
+pub async fn started_on_side(
+    pool: &SqlitePool,
+    execution: &str,
+    thread: &str,
+    turn: &str,
+    side: Option<super::Side>,
+) -> Result<(), String> {
     let mut tx = pool.begin().await.map_err(err)?;
     let affected=sqlx::query("UPDATE convo_executions SET state='running',thread_id=?,turn_id=? WHERE id=? AND state='starting'")
         .bind(thread).bind(turn).bind(execution).execute(&mut *tx).await.map_err(err)?.rows_affected();
     if affected != 1 {
         return Err("실행 시작 상태가 변경되었습니다".into());
     }
-    sqlx::query("UPDATE tasks SET convo_session_id=?,pending_capsule=NULL WHERE id=(SELECT task_id FROM convo_executions WHERE id=?)")
-        .bind(thread).bind(execution).execute(&mut *tx).await.map_err(err)?;
+    let persisted = match side {
+        Some(side @ (super::Side::Right | super::Side::Third)) => sqlx::query(
+            "UPDATE convo_debate_sides SET vendor_session_id=? WHERE task_id=(SELECT task_id FROM convo_executions WHERE id=?) AND side=?",
+        )
+        .bind(thread)
+        .bind(execution)
+        .bind(side.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?
+        .rows_affected(),
+        None | Some(super::Side::Left) => sqlx::query(
+            "UPDATE tasks SET convo_session_id=?,pending_capsule=NULL WHERE id=(SELECT task_id FROM convo_executions WHERE id=?)",
+        )
+        .bind(thread)
+        .bind(execution)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?
+        .rows_affected(),
+    };
+    if persisted != 1 {
+        return Err("대화 세션을 저장할 토론 자리를 찾지 못했습니다".into());
+    }
     tx.commit().await.map_err(err)?;
     Ok(())
 }
 /// 로컬 MCP 런타임의 시작. 스레드 id 없이 상태만 올린다 — Claude의 세션 id는 `system/init`에서야
 /// 오는데 `ask_user`는 그보다 먼저 올 수 있고, `open`은 실행이 `running`이어야 받아준다.
 pub async fn started_local(pool: &SqlitePool, execution: &str, turn: &str) -> Result<(), String> {
-    let affected =
-        sqlx::query("UPDATE convo_executions SET state='running',turn_id=? WHERE id=? AND state='starting'")
-            .bind(turn)
-            .bind(execution)
-            .execute(pool)
-            .await
-            .map_err(err)?
-            .rows_affected();
+    let affected = sqlx::query(
+        "UPDATE convo_executions SET state='running',turn_id=? WHERE id=? AND state='starting'",
+    )
+    .bind(turn)
+    .bind(execution)
+    .execute(pool)
+    .await
+    .map_err(err)?
+    .rows_affected();
     if affected != 1 {
         return Err("실행 시작 상태가 변경되었습니다".into());
     }
@@ -333,6 +580,57 @@ pub async fn open(
         .bind(&interaction).bind(wire_id.to_string()).bind(call).bind(serde_json::to_string(&q).map_err(err)?).bind(now).bind(now+QUESTION_TTL).bind(execution).execute(pool).await.map_err(err)?.rows_affected().eq(&1).then_some(()).ok_or("질문 실행이 종료되었습니다")?;
     Ok(interaction)
 }
+/// Open an app-server-originated request. Native calls retain their original protocol envelope
+/// privately; the public interaction shape stays the established clarification shape.
+pub async fn open_native(
+    pool: &SqlitePool,
+    execution: &str,
+    wire_id: &Value,
+    method: &str,
+    params: &Value,
+    now: i64,
+) -> Result<String, String> {
+    if !(wire_id.is_string() || wire_id.is_i64() || wire_id.is_u64()) {
+        return Err("native 요청 ID가 올바르지 않습니다".into());
+    }
+    if serde_json::to_vec(params).map_err(err)?.len() > MAX_BYTES {
+        return Err("native 요청 크기 제한을 초과했습니다".into());
+    }
+    let native = super::native_interaction::normalize(method, params)?;
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM convo_interactions WHERE execution_id=? AND state='pending'",
+    )
+    .bind(execution)
+    .fetch_one(pool)
+    .await
+    .map_err(err)?;
+    if pending >= 8 {
+        return Err("미응답 질문 한도를 초과했습니다".into());
+    }
+    let interaction = id()?;
+    // A single provider item can produce several approvals. The JSON-RPC request id is the only
+    // protocol correlation key, so preserve it verbatim and namespace its local call id.
+    let call = format!("native:{}", wire_id);
+    let inserted = sqlx::query("INSERT INTO convo_interactions(id,execution_id,wire_id,call_id,questions,native_method,native_params,native_request,created_at,expires_at) SELECT ?,id,?,?,?,?,?,?,?,? FROM convo_executions WHERE id=? AND state='running'")
+        .bind(&interaction)
+        .bind(wire_id.to_string())
+        .bind(call)
+        .bind(serde_json::to_string(&native.questions).map_err(err)?)
+        .bind(method)
+        .bind(serde_json::to_string(params).map_err(err)?)
+        .bind(serde_json::to_string(&native.info).map_err(err)?)
+        .bind(now)
+        .bind(now + QUESTION_TTL)
+        .bind(execution)
+        .execute(pool)
+        .await
+        .map_err(err)?
+        .rows_affected();
+    if inserted != 1 {
+        return Err("질문 실행이 종료되었거나 이미 받은 native 요청입니다".into());
+    }
+    Ok(interaction)
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Receipt {
     pub request_id: String,
@@ -351,6 +649,8 @@ pub struct Interaction {
     pub draft: Vec<Answer>,
     pub draft_revision: i64,
     pub receipt: Option<Receipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<NativeRequestInfo>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
@@ -386,6 +686,11 @@ pub async fn snapshot(pool: &SqlitePool, task: i64) -> Result<Snapshot, String> 
                 .unwrap_or_default(),
             draft_revision: r.get::<Option<i64>, _>("draft_revision").unwrap_or(0),
             receipt,
+            request: r
+                .get::<Option<String>, _>("native_request")
+                .map(|value| serde_json::from_str(&value))
+                .transpose()
+                .map_err(err)?,
         });
     }
     Ok(Snapshot {
@@ -468,7 +773,41 @@ pub async fn submit(
         });
     }
     let q = question_for(pool, task, execution, interaction, now).await?;
-    normalize_answers(&q, &sorted, true)?;
+    // Validate the protocol-shaped result before claiming the receipt. In particular, this keeps
+    // malformed MCP numbers and schema-bound strings from becoming an undeliverable dispatch.
+    let native: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT native_method,native_params FROM convo_interactions WHERE id=? AND execution_id=?",
+    )
+    .bind(interaction)
+    .bind(execution)
+    .fetch_optional(pool)
+    .await
+    .map_err(err)?;
+    let negative_form = match native.as_ref() {
+        Some((Some(method), Some(params))) => {
+            let params = serde_json::from_str(params).map_err(err)?;
+            super::native_interaction::is_negative_form_response(method, &params, &sorted)
+                .map_err(input_validation)?
+        }
+        _ => false,
+    };
+    if !negative_form {
+        normalize_answers(&q, &sorted, true).map_err(input_validation)?;
+    } else {
+        // A declined/cancelled MCP form deliberately omits its fields, but it is still subject to
+        // the normal size, question-id, duplicate, and option validation rules.
+        normalize_answers(&q, &sorted, false).map_err(input_validation)?;
+    }
+    match native {
+        Some((Some(method), Some(params))) => {
+            let params = serde_json::from_str(&params).map_err(err)?;
+            super::native_interaction::response(&method, &params, &sorted)
+                .map_err(input_validation)?;
+        }
+        Some((None, None)) => {}
+        Some(_) => return Err("native 요청 기록이 손상되었습니다".into()),
+        None => return Err("이 질문은 더 이상 답변을 받지 않습니다".into()),
+    }
     let mut tx = pool.begin().await.map_err(err)?;
     let n=sqlx::query("UPDATE convo_interactions SET revision=revision+1 WHERE id=? AND execution_id=? AND state='pending' AND expires_at>? AND EXISTS(SELECT 1 FROM convo_executions WHERE id=? AND task_id=? AND state='running') AND NOT EXISTS(SELECT 1 FROM convo_interaction_answers WHERE interaction_id=?)")
       .bind(interaction).bind(execution).bind(now).bind(execution).bind(task).bind(interaction).execute(&mut *tx).await.map_err(err)?.rows_affected();
@@ -512,6 +851,12 @@ pub struct Dispatch {
     pub wire_id: Value,
     pub call_id: String,
     pub output: String,
+    /// Native app-server requests receive their protocol response here. `output` remains the
+    /// legacy dynamic-tool result for Claude/Codex clarification calls.
+    pub native_result: Option<Value>,
+    /// `Some` identifies a native request. Async host messages use this to route their result via
+    /// `turn/steer` instead of replying to an invented JSON-RPC id.
+    pub native_method: Option<String>,
 }
 pub async fn take_dispatch(
     pool: &SqlitePool,
@@ -537,7 +882,7 @@ async fn take_dispatch_where(
     now: i64,
 ) -> Result<Option<Dispatch>, String> {
     let mut tx = pool.begin().await.map_err(err)?;
-    let row=sqlx::query("SELECT a.id,a.payload,i.id AS interaction_id,i.wire_id,i.call_id FROM convo_interaction_answers a JOIN convo_interactions i ON i.id=a.interaction_id JOIN convo_executions e ON e.id=i.execution_id WHERE e.id=? AND e.state='running' AND i.state='pending' AND a.state='claimed' AND i.expires_at>? AND (? IS NULL OR i.id=?) ORDER BY a.created_at LIMIT 1").bind(execution).bind(now).bind(interaction).bind(interaction).fetch_optional(&mut *tx).await.map_err(err)?;
+    let row=sqlx::query("SELECT a.id,a.payload,i.id AS interaction_id,i.wire_id,i.call_id,i.native_method,i.native_params FROM convo_interaction_answers a JOIN convo_interactions i ON i.id=a.interaction_id JOIN convo_executions e ON e.id=i.execution_id WHERE e.id=? AND e.state='running' AND i.state='pending' AND a.state='claimed' AND i.expires_at>? AND (? IS NULL OR i.id=?) ORDER BY a.created_at LIMIT 1").bind(execution).bind(now).bind(interaction).bind(interaction).fetch_optional(&mut *tx).await.map_err(err)?;
     let Some(r) = row else { return Ok(None) };
     let answer_id: String = r.get("id");
     sqlx::query(
@@ -549,17 +894,43 @@ async fn take_dispatch_where(
     .map_err(err)?;
     tx.commit().await.map_err(err)?;
     let answers: Vec<Answer> = serde_json::from_str(r.get("payload")).map_err(err)?;
+    let native_result = match (
+        r.get::<Option<String>, _>("native_method"),
+        r.get::<Option<String>, _>("native_params"),
+    ) {
+        (Some(method), Some(params)) => Some(super::native_interaction::response(
+            &method,
+            &serde_json::from_str(&params).map_err(err)?,
+            &answers,
+        )?),
+        (None, None) => None,
+        _ => return Err("native 요청 기록이 손상되었습니다".into()),
+    };
     Ok(Some(Dispatch {
         answer_id,
         interaction_id: r.get("interaction_id"),
         wire_id: serde_json::from_str(r.get("wire_id")).map_err(err)?,
         call_id: r.get("call_id"),
         output: answer_output(&answers),
+        native_result,
+        native_method: r.get("native_method"),
     }))
 }
 pub async fn written(pool: &SqlitePool, answer: &str) -> Result<(), String> {
     sqlx::query(
         "UPDATE convo_interaction_answers SET state='written' WHERE id=? AND state='dispatching'",
+    )
+    .bind(answer)
+    .execute(pool)
+    .await
+    .map_err(err)?;
+    Ok(())
+}
+/// The host attempted to relay a native response but the app-server rejected it. Keep a durable
+/// receipt distinct from delivery, and let `serverRequest/resolved` close the interaction.
+pub async fn reject_native_dispatch(pool: &SqlitePool, answer: &str) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE convo_interaction_answers SET state='rejected' WHERE id=? AND state='dispatching'",
     )
     .bind(answer)
     .execute(pool)
@@ -618,6 +989,42 @@ pub async fn pending(pool: &SqlitePool, execution: &str, now: i64) -> Result<(i6
     let (count,expired):(i64,i64)=sqlx::query_as("SELECT COUNT(*),COALESCE(MAX(expires_at<=?),0) FROM convo_interactions WHERE execution_id=? AND state='pending'").bind(now).bind(execution).fetch_one(pool).await.map_err(err)?;
     Ok((count, expired != 0))
 }
+/// Native non-blocking input may remain visible while a turn finishes. Legacy question calls
+/// were always blocking, so they remain in this count.
+pub async fn blocking_pending(
+    pool: &SqlitePool,
+    execution: &str,
+    now: i64,
+) -> Result<(i64, bool), String> {
+    let (count, expired): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*),COALESCE(MAX(expires_at<=?),0) FROM convo_interactions WHERE execution_id=? AND state='pending' AND (native_request IS NULL OR json_extract(native_request,'$.blocking')=1)",
+    )
+    .bind(now)
+    .bind(execution)
+    .fetch_one(pool)
+    .await
+    .map_err(err)?;
+    Ok((count, expired != 0))
+}
+/// `serverRequest/resolved` confirms that the app-server stopped waiting for this request. It is
+/// not an acknowledgement that the model consumed a response, so answer receipt state is kept.
+pub async fn resolve_native(
+    pool: &SqlitePool,
+    execution: &str,
+    wire_id: &Value,
+) -> Result<bool, String> {
+    if !(wire_id.is_string() || wire_id.is_i64() || wire_id.is_u64()) {
+        return Ok(false);
+    }
+    let changed = sqlx::query("UPDATE convo_interactions SET state='closed',reason='resolved',revision=revision+1 WHERE execution_id=? AND wire_id=? AND native_method IS NOT NULL AND state='pending'")
+        .bind(execution)
+        .bind(wire_id.to_string())
+        .execute(pool)
+        .await
+        .map_err(err)?
+        .rows_affected();
+    Ok(changed == 1)
+}
 pub async fn close_questions(
     pool: &SqlitePool,
     execution: &str,
@@ -639,6 +1046,12 @@ pub async fn finish(
     sqlx::query("UPDATE convo_executions SET state=?,error=?,pgid=NULL,identity_hash=NULL,process_marker=NULL WHERE id=?").bind(state).bind(reason).bind(execution).execute(pool).await.map_err(err)?;
     Ok(())
 }
+/// 답변을 기다리는 질문이 열린 작업 id 목록. 사이드바가 질문 점·라벨을 겹치는 근거다.
+/// 조건은 `question_for`와 같다 — 실행이 `running`이고 질문이 `pending`이며 만료 전이어야 한다.
+/// 구조화 질문은 `tasks.state`를 바꾸지 않으므로 여기 말고는 드러날 곳이 없다.
+pub async fn pending_tasks(pool: &SqlitePool, now: i64) -> Result<Vec<i64>, String> {
+    sqlx::query_scalar("SELECT DISTINCT e.task_id FROM convo_interactions i JOIN convo_executions e ON e.id=i.execution_id WHERE e.state='running' AND i.state='pending' AND i.expires_at>? ORDER BY e.task_id").bind(now).fetch_all(pool).await.map_err(err)
+}
 pub async fn blocked(pool: &SqlitePool, task: i64) -> Result<bool, String> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM convo_executions WHERE task_id=? AND state='cleanup_failed')",
@@ -647,6 +1060,21 @@ pub async fn blocked(pool: &SqlitePool, task: i64) -> Result<bool, String> {
     .fetch_one(pool)
     .await
     .map_err(err)
+}
+/// Admission paths that would change a debate or runtime contract require no live execution.
+pub async fn ensure_idle(pool: &SqlitePool, task: i64) -> Result<(), String> {
+    let active: i64 = sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM convo_executions WHERE task_id=? AND state IN {ACTIVE})"
+    ))
+    .bind(task)
+    .fetch_one(pool)
+    .await
+    .map_err(err)?;
+    if active != 0 {
+        Err("진행 중인 질문 실행이 있어 이 작업을 변경할 수 없습니다".into())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

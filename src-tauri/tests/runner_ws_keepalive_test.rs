@@ -14,6 +14,7 @@ use praxis_lib::db;
 use praxis_lib::runner::auth::RunnerAuth;
 use praxis_lib::runner::config::RunnerConfig;
 use praxis_lib::runner::events::{EventHub, REPLAY_LIMIT};
+use praxis_lib::runner::actions::RunnerTaskActions;
 use praxis_lib::runner::http::{self, RunnerHttpState};
 use praxis_lib::runner::queue::QueueWorker;
 use tokio_tungstenite::tungstenite;
@@ -194,7 +195,7 @@ async fn serve(pool: sqlx::SqlitePool) -> (SocketAddr, tokio::task::JoinHandle<(
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
-            http::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            http::mobile_surface_router(state, std::sync::Arc::new(RunnerTaskActions)).into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
         .unwrap();

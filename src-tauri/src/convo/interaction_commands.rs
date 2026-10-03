@@ -39,6 +39,10 @@ pub async fn interaction_snapshot(
     Ok(snapshot)
 }
 #[tauri::command]
+pub async fn interaction_pending_tasks(state: State<'_, AppState>) -> Result<Vec<i64>, String> {
+    ledger::pending_tasks(&crate::commands::pool_of(&state)?, now()).await
+}
+#[tauri::command]
 pub async fn interaction_draft(
     state: State<'_, AppState>,
     id: i64,

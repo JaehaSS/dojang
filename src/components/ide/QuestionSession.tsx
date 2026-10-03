@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { answerQuestion, answersComplete, interactionSnapshot, questionReceipt, receiptLabel, retryQuestionCleanup, saveQuestionDraft, type Interaction, type InteractionSnapshot, type QuestionAnswer } from "../../lib/conversation-interaction";
+import { safeExternalHttpUrl } from "../../lib/tool-output-media";
 
 interface Props {
   taskId: number | null;
@@ -71,6 +73,15 @@ export function QuestionCard({ taskId, item, phase, refresh }: { taskId: number;
   const pending = item.state === "pending" && phase === "running" && item.expires_at * 1000 > Date.now();
   const receipt = item.receipt?.state ?? observedReceipt;
   const locked = !pending || !!receipt || sending || uncertain;
+  const nativeRequest = item.request;
+  const externalUrl = safeExternalHttpUrl(nativeRequest?.url);
+  const submitLabel = nativeRequest?.kind === "approval"
+    ? "승인 여부 보내기"
+    : nativeRequest?.kind === "form"
+      ? "입력 보내기"
+      : nativeRequest?.kind === "url"
+        ? "선택 보내기"
+        : "답변 보내기";
   // Restore externally accepted snapshots, but never overwrite a locally edited draft mid-save.
   useEffect(() => {
     if (item.receipt) { latest.current = item.draft; setAnswers(item.draft); }
@@ -94,11 +105,20 @@ export function QuestionCard({ taskId, item, phase, refresh }: { taskId: number;
     // The answer transaction carries its own complete snapshot, even after a draft save failure.
     request.current ??= crypto.randomUUID();
     try {
-      const accepted = await answerQuestion(taskId, item, request.current, latest.current);
+      const action = latest.current.find((a) => a.question_id === "__dojang_action");
+      // Declining a form sends no field contents, even if the user already started a draft.
+      const payload = item.request?.kind === "form" && action && (action.option_id === "decline" || action.option_id === "cancel") ? [action] : latest.current;
+      const accepted = await answerQuestion(taskId, item, request.current, payload);
       if (mounted.current) setObservedReceipt(accepted.state);
       await refresh();
     } catch (e) {
-      if (mounted.current) { setUncertain(true); setError(`답변 접수 확인 실패: ${String(e)}`); }
+      if (mounted.current) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (message.startsWith("INPUT_VALIDATION: ")) {
+          // The host guarantees this error is returned before claiming any receipt.
+          request.current = null; setUncertain(false); setError(message.slice("INPUT_VALIDATION: ".length));
+        } else { setUncertain(true); setError(`답변 접수 확인 실패: ${message}`); }
+      }
     } finally { submitting.current = false; if (mounted.current) setSending(false); }
   };
   const checkReceipt = async () => {
@@ -114,7 +134,13 @@ export function QuestionCard({ taskId, item, phase, refresh }: { taskId: number;
     } catch (e) { if (mounted.current) setError(String(e)); }
   };
   return <section className="rounded-lg border border-border-strong bg-raised p-4 space-y-3 max-w-[92%]" aria-label="에이전트 질문">
-    <div className="text-sm font-medium">{pending && !receipt ? "답변 필요" : "에이전트 질문"}</div>
+    <div className="text-sm font-medium">{nativeRequest?.kind === "approval" ? pending && !receipt ? "승인 필요" : "승인 요청" : pending && !receipt ? "답변 필요" : "에이전트 질문"}</div>
+    {nativeRequest && <div className="space-y-1 rounded border border-border bg-bg p-3">
+      <div className="text-sm font-medium whitespace-pre-wrap">{nativeRequest.title}</div>
+      {nativeRequest.details && <p className="text-sm text-text-secondary whitespace-pre-wrap">{nativeRequest.details}</p>}
+      {nativeRequest.kind === "url" && externalUrl && <><p className="text-xs break-all">{externalUrl}</p><button type="button" className="text-sm text-primary-bright underline" onClick={() => { void openUrl(externalUrl).catch((e) => setError(`링크를 열지 못했습니다: ${String(e)}`)); }}>외부 링크 열기</button></>}
+      {nativeRequest.kind === "url" && nativeRequest.url && !externalUrl && <p role="alert" className="text-xs text-text-secondary">열 수 없는 주소입니다.</p>}
+    </div>}
     {item.questions.questions.map((q) => {
       const answer = answers.find((a) => a.question_id === q.id);
       return <fieldset key={q.id} disabled={locked} className="space-y-2">
@@ -131,10 +157,11 @@ export function QuestionCard({ taskId, item, phase, refresh }: { taskId: number;
         </label>}
       </fieldset>;
     })}
-    {receipt ? <p role="status" className="text-xs text-text-secondary">{receiptLabel(receipt)}</p> : pending && !uncertain ? <button disabled={locked || !answersComplete(item, answers)} onClick={() => void submit()} className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-40">{sending ? "접수 중…" : "답변 보내기"}</button> : null}
+    {receipt ? <p role="status" className="text-xs text-text-secondary">{receiptLabel(receipt)}</p> : pending && !uncertain ? <button disabled={locked || !answersComplete(item, answers)} onClick={() => void submit()} className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-40">{sending ? "접수 중…" : submitLabel}</button> : null}
     {uncertain && !item.receipt && <button className="underline text-sm" onClick={() => void checkReceipt()}>접수 상태 확인</button>}
-    {!pending && item.reason !== "answered" && <p className="text-xs text-text-muted">이 질문은 종료되었습니다 ({item.reason === "cancelled" ? "사용자 중단" : item.reason === "connection_lost" ? "연결 종료" : "실행 종료 또는 만료"}).</p>}
+    {!pending && item.reason !== "answered" && <p className="text-xs text-text-muted">이 질문은 종료되었습니다 ({item.reason === "resolved" ? "Codex가 더 이상 답변을 기다리지 않음" : item.reason === "cancelled" ? "사용자 중단" : item.reason === "connection_lost" ? "연결 종료" : "실행 종료 또는 만료"}).</p>}
     {error && <p role="alert" className="text-xs text-text-secondary">{error}</p>}
+    {pending && !receipt && nativeRequest?.kind === "question" && !nativeRequest.blocking && <p className="text-xs text-text-muted">답변을 기다리는 동안 작업은 계속됩니다.</p>}
     {pending && !receipt && <p className="text-xs text-text-muted">다른 작업은 계속 진행될 수 있습니다. 비밀번호·API 키 등 비밀값을 입력하지 마세요.</p>}
   </section>;
 }

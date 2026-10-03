@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { EditorSettings, FontSettings } from "../../lib/ipc";
+import { LOCAL_HOST } from "../../lib/transport";
 import { McpServersView } from "../McpServersView";
-import { KnowledgeView } from "../KnowledgeView";
 import { EditorSettingsTab } from "./EditorSettingsTab";
 import { MobileView } from "../MobileView";
 import { SkillsView } from "../SkillsView";
@@ -12,6 +12,9 @@ import { ConnectionTab } from "./settings/ConnectionTab";
 import { NotificationsTab } from "./settings/NotificationsTab";
 import { SettingsSearch } from "./settings/SettingsSearch";
 import { SettingHighlight } from "./settings/SettingRow";
+import { MetaTag } from "../MetaTag";
+import { KnowledgeView } from "../KnowledgeView";
+import { VaultMemoryPanel } from "../knowledge-vault/VaultMemoryPanel";
 import {
   DEFAULT_SETTINGS_TAB,
   SETTINGS_TABS,
@@ -28,8 +31,8 @@ interface Props {
   repo?: string;
   /** 퀵오픈처럼 특정 탭을 지목해 여는 경로. 없으면 모양새 탭. */
   initialTab?: SettingsTab;
-  /** 스킬 탭의 경험 패널이 메모리 화면을 열 때. */
-  onOpenMemory?: () => void;
+  /** 메모리 패널이 파일형 메모리를 쓰는 에이전트. */
+  agent?: string;
   fontSettings: FontSettings | null;
   onFontSettings: (s: FontSettings) => void;
   /** 파일 트리 치수·Monaco 옵션. 폰트와 나눠 두는 이유는 소비자가 다르기 때문이다. */
@@ -48,7 +51,7 @@ interface Props {
 export function SettingsPanel({
   repo,
   initialTab,
-  onOpenMemory,
+  agent = "claude",
   fontSettings,
   onFontSettings,
   editorSettings,
@@ -84,7 +87,10 @@ export function SettingsPanel({
                   }`}
                   aria-pressed={tab === spec.key}
                 >
-                  {spec.label}
+                  <span className="flex items-center gap-1.5">
+                    {spec.label}
+                    {spec.badge && <MetaTag>{spec.badge}</MetaTag>}
+                  </span>
                 </button>
               </div>
             ))}
@@ -112,9 +118,11 @@ export function SettingsPanel({
         ) : tab === "mcp" ? (
           <McpServersView />
         ) : tab === "skills" ? (
-          <SkillsView repo={repo ?? ""} onOpenMemory={onOpenMemory} />
+          <SkillsView repo={repo ?? ""} onOpenMemory={() => setTab("memory")} />
         ) : tab === "knowledge" ? (
-          <KnowledgeView />
+          <div className="flex-1 min-h-0 overflow-auto p-4"><KnowledgeView /></div>
+        ) : tab === "memory" ? (
+          <div className="flex-1 min-h-0 overflow-auto p-4"><VaultMemoryPanel agent={agent} host={LOCAL_HOST} /></div>
         ) : tab === "mobile" ? (
           <MobileView />
         ) : (

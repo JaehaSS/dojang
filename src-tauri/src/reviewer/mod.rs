@@ -10,20 +10,20 @@ mod process;
 
 /// PATH에서 실행 파일의 **절대 경로**를 찾는다 (간이 which).
 /// PTY 스폰(portable_pty)은 프로그램명을 PATH로 해석하지 않으므로 절대경로가 필요하다.
+///
+/// Windows에서는 `.exe` → `.cmd` → 확장자 없음 순으로 찾는다. npm 전역 shim은 확장자 없는
+/// POSIX 스크립트를 `.cmd` 옆에 함께 까는데, CreateProcess는 그것을 실행하지 못한다.
 pub fn which(bin: &str) -> Option<String> {
     let path = std::env::var("PATH").ok()?;
+    #[cfg(windows)]
+    let candidates = [format!("{bin}.exe"), format!("{bin}.cmd"), bin.to_string()];
+    #[cfg(not(windows))]
+    let candidates = [bin.to_string()];
     for dir in std::env::split_paths(&path) {
-        let p = dir.join(bin);
-        if p.is_file() {
-            return Some(p.to_string_lossy().into_owned());
-        }
-        #[cfg(windows)]
-        {
-            for ext in ["cmd", "exe"] {
-                let pe = dir.join(format!("{bin}.{ext}"));
-                if pe.is_file() {
-                    return Some(pe.to_string_lossy().into_owned());
-                }
+        for candidate in &candidates {
+            let p = dir.join(candidate);
+            if p.is_file() {
+                return Some(p.to_string_lossy().into_owned());
             }
         }
     }
@@ -125,6 +125,37 @@ pub fn run_repair_agent(
     process::run_in_directory(&bin, &args, "", 600, Some(registrar), cwd)
 }
 
+/// claude를 read-only 도구(Read,Grep,Glob)만 허용해 `cwd`에서 실행한다. (bin, args) — 단위 테스트용 순수 헬퍼.
+fn readonly_claude_command() -> (&'static str, Vec<String>) {
+    let args = ["-p", "--output-format", "text", "--tools", "Read,Grep,Glob"];
+    ("claude", args.iter().map(|a| a.to_string()).collect())
+}
+
+/// 도구 제한으로만 read-only를 보장한다(Bash/Edit 비허용). 호출측은 실행 뒤 [`worktree_is_clean`]으로
+/// worktree가 그대로인지 반드시 다시 확인해야 한다. 프롬프트는 stdin.
+pub fn run_claude_readonly_in(
+    cwd: &std::path::Path, prompt: &str, timeout_secs: u64,
+    registrar: Option<&SharedProcessRegistrar>,
+) -> Result<String, String> {
+    let (bin, args) = readonly_claude_command();
+    let bin = which(bin).ok_or_else(|| "claude 실행 파일을 찾을 수 없습니다".to_string())?;
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    process::run_in_directory(&bin, &args, prompt, timeout_secs, registrar, cwd)
+}
+
+/// `git status --porcelain`이 비어 있으면 true (추적·미추적 변경 없음).
+pub fn worktree_is_clean(dir: &std::path::Path) -> Result<bool, String> {
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| format!("git status 실행 실패: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("git status 실패: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(out.stdout.iter().all(|b| b.is_ascii_whitespace()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +179,26 @@ mod tests {
         // 미지/기본은 claude 폴백.
         assert_eq!(invocation("claude", "prompt").bin, "claude");
         assert_eq!(invocation("anything-else", "prompt").bin, "claude");
+    }
+
+    #[test]
+    fn readonly_claude_args_restrict_tools() {
+        let (bin, args) = readonly_claude_command();
+        assert_eq!(bin, "claude");
+        let i = args.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(args[i + 1], "Read,Grep,Glob");
+        assert!(args.contains(&"-p".to_string()));
+    }
+
+    #[test]
+    fn worktree_clean_detects_changes() {
+        let dir = std::env::temp_dir().join(format!("praxis-clean-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |a: &[&str]| std::process::Command::new("git").args(a).current_dir(&dir).output().unwrap();
+        git(&["init", "-q"]);
+        assert_eq!(worktree_is_clean(&dir), Ok(true));
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        assert_eq!(worktree_is_clean(&dir), Ok(false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

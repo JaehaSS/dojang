@@ -91,9 +91,12 @@ pub(super) async fn reserve_turn(
     active: ActiveConvos,
     task_id: i64,
     initial: bool,
+    uses_global_cli: bool,
 ) -> Result<ConvoReservation, String> {
     if !initial {
-        refuse_while_updating(state)?;
+        if uses_global_cli {
+            refuse_while_updating(state)?;
+        }
         return reserve_main(state, active, task_id).map_err(|error| match error {
             MainSlotError::Busy(error) => error,
             MainSlotError::Capacity(limit) => cap_reached_error(limit),
@@ -106,7 +109,9 @@ pub(super) async fn reserve_turn(
         reserve_convo_switch(active.clone(), task_id)?
     };
     loop {
-        refuse_while_updating(state)?;
+        if uses_global_cli {
+            refuse_while_updating(state)?;
+        }
         let over_capacity = {
             let tasks = state.tasks.lock().unwrap_or_else(|e| e.into_inner());
             let main = active.lock().unwrap_or_else(|e| e.into_inner());
@@ -223,10 +228,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_turns_admit_during_global_update_but_global_turns_do_not() {
+        let state = state(2);
+        state.updating.store(true, Ordering::SeqCst);
+        for initial in [true, false] {
+            assert!(reserve_turn(&state, state.convo_active.clone(), 1, initial, true).await.is_err());
+            let managed = reserve_turn(&state, state.convo_active.clone(), 1, initial, false).await.unwrap();
+            assert!(state.convo_active.lock().unwrap().contains_key(&1));
+            drop(managed);
+            assert!(!state.convo_active.lock().unwrap().contains_key(&1));
+        }
+    }
+
+    #[tokio::test]
     async fn initial_main_waits_for_a_lent_slot_without_losing_its_request() {
         let state = state(1);
         let question = reserve_question(&state, 1).unwrap();
-        let start = reserve_turn(&state, state.convo_active.clone(), 1, true);
+        let start = reserve_turn(&state, state.convo_active.clone(), 1, true, true);
         tokio::pin!(start);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), &mut start)

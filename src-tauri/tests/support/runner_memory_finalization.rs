@@ -96,6 +96,7 @@ fn request(repo: &std::path::Path) -> QueuedTaskRequest {
         role: "implementer".to_string(),
         reasoning_effort: String::new(),
         resume_session: None,
+        resume_vendor: None,
     }
 }
 

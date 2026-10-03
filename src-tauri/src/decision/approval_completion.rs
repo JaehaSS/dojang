@@ -42,24 +42,6 @@ async fn collect_sources(
     instruction: &str,
     commit_sha: String,
 ) -> anyhow::Result<ApprovalProvenance> {
-    let start_receipts: Vec<i64> =
-        sqlx::query_scalar("SELECT id FROM task_start_receipts WHERE task_id = ? ORDER BY id")
-            .bind(task_id)
-            .fetch_all(&mut **tx)
-            .await?;
-    let memory_versions: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT DISTINCT memory_id, version FROM memory_injections \
-         WHERE task_id = ? ORDER BY memory_id, version",
-    )
-    .bind(task_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    let evidence_checks: Vec<i64> = sqlx::query_scalar(
-        "SELECT check_id FROM task_start_receipt_checks WHERE task_id = ? ORDER BY check_id",
-    )
-    .bind(task_id)
-    .fetch_all(&mut **tx)
-    .await?;
     let evidence_at: Option<i64> =
         sqlx::query_scalar("SELECT created_at FROM evidence WHERE task_id = ?")
             .bind(task_id)
@@ -68,9 +50,6 @@ async fn collect_sources(
     Ok(ApprovalProvenance {
         task_id,
         instruction_digest: provenance::digest(instruction),
-        start_receipts,
-        memory_versions,
-        evidence_checks,
         verification_run: evidence_at.map(|created| provenance::verification_ref(task_id, created)),
         commit_sha,
     })
@@ -92,18 +71,6 @@ async fn record_outcome(
     if changed.rows_affected() != 1 {
         anyhow::bail!("local approval task state changed during completion");
     }
-    sqlx::query(
-        "UPDATE memory_usages SET outcome = 'approved' WHERE task_id = ? AND outcome IS NULL",
-    )
-    .bind(task_id)
-    .execute(&mut **tx)
-    .await?;
-    sqlx::query(
-        "UPDATE memory_injections SET outcome = 'approved' WHERE task_id = ? AND outcome IS NULL",
-    )
-    .bind(task_id)
-    .execute(&mut **tx)
-    .await?;
     sqlx::query(
         "INSERT INTO task_events (task_id, ts, kind, detail) VALUES (?, ?, 'approved', NULL)",
     )

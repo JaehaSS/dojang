@@ -24,12 +24,14 @@ export default defineConfig(async ({ mode }) => {
     // 수집 비용도 크다 — worktree 9개가 있던 시점의 `src/components/ide`는 90초, 걷어낸
     // 뒤에는 4초였다. exclude는 기본값을 덮어쓰므로 configDefaults를 펼쳐 얹는다.
     test: {
+      // 여러 작업 트리의 검증이 겹쳐도 각 실행이 CPU 수만큼 워커를 띄우지 않는다.
+      minWorkers: 1,
+      maxWorkers: 2,
       exclude: [
         ...configDefaults.exclude,
         "**/.claude/worktrees/**",
         "**/.praxis/worktrees/**",
         // node:test suite; executed by check:workflow, not Vitest.
-        "**/scripts/tests/workflow-runtime-probe.test.mjs",
       ],
     },
     ...(isMobile

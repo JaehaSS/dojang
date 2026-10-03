@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use praxis_lib::db::{self, state};
 use praxis_lib::runner::queue::QueueWorker;
-use praxis_lib::{memory, projector};
+use praxis_lib::memory;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -94,7 +94,6 @@ async fn worker_runs_a_leased_terminal_task_to_awaiting_review() {
     )
     .await
     .unwrap();
-    project_empty(&pool, task_id, &worktree, "queue-run-marker", 2).await;
     db::update_state(&pool, task_id, state::QUEUED, 2)
         .await
         .unwrap();
@@ -108,13 +107,16 @@ async fn worker_runs_a_leased_terminal_task_to_awaiting_review() {
     assert!(db::list_task_output_after(&pool, 0, 10).await.unwrap()[0]
         .data
         .contains("queue-run-marker"));
-    let receipt: (String,) =
-        sqlx::query_as("SELECT source_checks_json FROM task_start_receipts WHERE task_id = ?")
-            .bind(task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(receipt.0, "[]");
+    // 파일형 메모리(설계 2026-09-13, P1)는 검증할 투영 원장이 없어 시작 영수증 자체를
+    // 만들지 않는다 — `task_start_receipts`는 신규 설치에서 더는 생성되지 않는다
+    // (`db::promote_starting_task`가 그 영수증 없이 항상 승격한다).
+    let receipts_table: Option<(String,)> = sqlx::query_as(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_start_receipts'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert!(receipts_table.is_none());
     let _ = std::fs::remove_dir_all(worktree);
     let _ = std::fs::remove_file(db_path);
 }
@@ -147,7 +149,6 @@ async fn cancel_terminates_only_the_active_task_process_group() {
     )
     .await
     .unwrap();
-    project_empty(&pool, task_id, &worktree, "30", 2).await;
     db::update_state(&pool, task_id, state::QUEUED, 2)
         .await
         .unwrap();
@@ -258,26 +259,4 @@ async fn resume_conversation_rejects_before_touching_any_vendor_process() {
     );
 
     let _ = std::fs::remove_file(db_path);
-}
-
-async fn project_empty(
-    pool: &sqlx::SqlitePool,
-    task_id: i64,
-    worktree: &std::path::Path,
-    instruction: &str,
-    now: i64,
-) {
-    memory::inject_into_worktree(
-        pool,
-        "/tmp",
-        instruction,
-        None,
-        task_id,
-        now,
-        worktree,
-        memory::INJECTION_LIMIT,
-        &projector::project_targets(),
-    )
-    .await
-    .unwrap();
 }

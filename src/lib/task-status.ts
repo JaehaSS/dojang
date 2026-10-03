@@ -33,9 +33,11 @@ export function statusTone(
   state: string,
   awaitingKind?: string | null,
   blockedReason?: string | null,
+  pendingQuestion = false,
 ): StatusTone {
   // 차단된 큐 작업은 실패가 아니라 **사용자 조치 대기**다 — 빨강으로 칠하면 이미 죽은 줄 안다.
   if (blockedReason?.startsWith(BLOCKED_AUTH_PREFIX)) return "awaiting";
+  if (awaitingAnswer(state, pendingQuestion)) return "question";
   if (state === "Running" || state === "Starting") return "running";
   if (state === "AwaitingReview") {
     return awaitingKind === AWAITING_QUESTION ? "question" : "awaiting";
@@ -45,6 +47,15 @@ export function statusTone(
   if (state === "Failed" || state === "Discarded") return "failed";
   return "muted";
 }
+
+/**
+ * 구조화 질문(MCP `ask_user`)은 실행이 `Running`인 채로 열린다 — 상태만 보면 실행 중이지만 사용자가
+ * 답해야 진행된다. 그 조건은 `tasks` 행이 아니라 attention 투영(`reason: "question"`)이 관측하므로
+ * 호출부가 관측 결과를 `pendingQuestion`으로 넘긴다. 실행 중이 아닌 상태의 잔상은 무시한다 — 턴이
+ * 끝났으면 `awaiting_kind`가 같은 뜻을 이미 싣고 있다.
+ */
+const awaitingAnswer = (state: string, pendingQuestion: boolean): boolean =>
+  pendingQuestion && (state === "Running" || state === "Starting");
 
 /** 톤 → CSS 변수. 인라인 style(점 배경)용 — Tailwind 클래스가 필요하면 `toneTextClass`. */
 const TONE_VAR: Record<StatusTone, string> = {
@@ -79,28 +90,33 @@ const LABEL: Record<string, string> = {
 
 export function taskTone(
   task: Pick<Task, "state" | "awaiting_kind" | "blocked_reason">,
+  pendingQuestion = false,
 ): StatusTone {
-  return statusTone(task.state, task.awaiting_kind, task.blocked_reason);
+  return statusTone(task.state, task.awaiting_kind, task.blocked_reason, pendingQuestion);
 }
 
 export function taskDotColor(
   task: Pick<Task, "state" | "awaiting_kind" | "blocked_reason">,
+  pendingQuestion = false,
 ): string {
-  return TONE_VAR[taskTone(task)];
+  return TONE_VAR[taskTone(task, pendingQuestion)];
 }
 
 export function taskTextClass(
   task: Pick<Task, "state" | "awaiting_kind" | "blocked_reason">,
+  pendingQuestion = false,
 ): string {
-  return TONE_TEXT_CLASS[taskTone(task)];
+  return TONE_TEXT_CLASS[taskTone(task, pendingQuestion)];
 }
 
 /** 알 수 없는 상태는 원문을 그대로 보여준다 — 추측한 라벨보다 낫다. */
 export function taskStatusLabel(
   task: Pick<Task, "state" | "awaiting_kind" | "blocked_reason">,
+  pendingQuestion = false,
 ): string {
   // 색만으로 구분하지 않는다(DESIGN.md Do #2) — 차단은 라벨로도 드러나야 한다.
   if (isAuthBlocked(task)) return "로그인 필요";
+  if (awaitingAnswer(task.state, pendingQuestion)) return "답변 대기";
   if (task.state === "AwaitingReview") {
     return task.awaiting_kind === AWAITING_QUESTION ? "답변 대기" : "검토 대기";
   }
@@ -114,8 +130,10 @@ export function taskStatusLabel(
  */
 export function taskStatusLabelShort(
   task: Pick<Task, "state" | "awaiting_kind" | "blocked_reason">,
+  pendingQuestion = false,
 ): string {
   if (isAuthBlocked(task)) return "로그인";
+  if (awaitingAnswer(task.state, pendingQuestion)) return "답변";
   if (task.state === "AwaitingReview") {
     return task.awaiting_kind === AWAITING_QUESTION ? "답변" : "검토";
   }

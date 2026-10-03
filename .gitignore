@@ -30,16 +30,13 @@ dist-ssr
 /docs/INDEX.md
 /docs/STATE.md
 /LESSONS_LEARNED.md
+/docs/lessons.json
 
 # 픽셀 에셋 원본 — 라이선스상 재배포 대상이 되지 않도록 굽기 입력만 로컬에 둔다.
 # 굽기 산출물(src/assets/village/*.png)은 커밋한다 — 앱이 필요로 하고, 원본 팩과 달리
 # 이 앱 전용 합성물이다.
 tools/sprites/vendor/
 
-# 무관한 기존 파일 (Praxis 프로젝트 외)
-standard_medical_item_2501_shez.xlsx
-/cd_test/
-/cd_test_back/
 .loop/
 .harness/
 .codex/

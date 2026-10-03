@@ -21,8 +21,8 @@ export function buildPreviewRequestContext(
   return [
     question.trim(),
     "",
-    "[Praxis 프리뷰 도구 안내]",
-    "사용자와 같은 Praxis 웹뷰에서 작업하세요. 별도 브라우저를 열지 마세요.",
+    "[Dojang 프리뷰 도구 안내]",
+    "사용자와 같은 Dojang 웹뷰에서 작업하세요. 별도 브라우저를 열지 마세요.",
     "browser_snapshot으로 화면과 최신 ref를 읽고 browser_fill, browser_click, browser_press_key로 조작하세요.",
     "browser_navigate는 로컬 페이지 이동, browser_wait_for는 성공 문구 대기, browser_console은 콘솔 조회입니다.",
     "조작 뒤에는 최신 snapshot의 ref를 사용하세요. changed:true만으로 완료를 판단하지 말고 성공 조건과 satisfied:true를 확인하세요.",

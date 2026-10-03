@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { editorChipLabel, wikiChipLabel } from "./CaptureAttachmentChips";
+import { editorChipLabel } from "./CaptureAttachmentChips";
 import type { DesignCaptureRecord } from "../../lib/designmode/types";
 
 const record = (patch: Partial<DesignCaptureRecord>): DesignCaptureRecord => ({
@@ -37,16 +37,5 @@ describe("editorChipLabel", () => {
 
   it("경로가 없어도 라벨을 만든다", () => {
     expect(editorChipLabel(record({ file_path: null }))).toBe("파일 L12–30");
-  });
-});
-
-describe("wikiChipLabel", () => {
-  it("위키 문서는 제목으로 보인다", () => {
-    expect(wikiChipLabel(record({ source: "wiki", outer_html: "운영 메모", file_path: "/창고/운영/메모.md" }))).toBe("운영 메모");
-  });
-
-  it("제목이 비면 파일명으로 내려간다 — 빈 칩을 내보내지 않는다", () => {
-    expect(wikiChipLabel(record({ source: "wiki", outer_html: "", file_path: "/창고/운영/메모.md" }))).toBe("메모.md");
-    expect(wikiChipLabel(record({ source: "wiki", outer_html: "", file_path: null }))).toBe("위키 문서");
   });
 });

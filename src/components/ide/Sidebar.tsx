@@ -9,9 +9,9 @@ export type View =
   | "home"
   | "workspace"
   | "ensemble"
-  | "workflow"
   | "insights"
-  | "wiki"
+  | "vocab"
+  | "pipeline"
   | "settings";
 
 import type { HostFailure } from "../../lib/task-list-merge";
@@ -22,10 +22,13 @@ const hostLabel = (host: HostId): string => (host === LOCAL_HOST ? "로컬" : ho
 
 interface Props extends SessionTaskNavigationProps {
   view: View;
+  /**
+   * 인사이트 항목의 점 — 아직 보지 않은 발견 카드 수(설계 2026-09-28 §4, 슬라이스 T5).
+   * 예전 회고 신선도 점(`retroUnread`, #565에서 회고와 함께 폐기)과 같은 자리다.
+   */
+  insightsUnread?: number;
   /** 응답하지 않은 호스트 — 목록은 나머지로 그리되 빠진 이유를 남긴다. */
   hostFailures?: HostFailure[];
-  /** 읽지 않은 주간 회고가 있는가 — 인사이트 항목의 신선도 점(설계 0054 DR-6). */
-  retroUnread?: boolean;
   /**
    * 카드의 "다시 연결" — 목록 재조회가 아니라 그 호스트의 터널을 다시 연다. 저장만 된
    * 프로필은 재조회로는 영영 살아나지 않는다. 끝날 때까지 카드가 "연결 중"으로 잠긴다.
@@ -46,13 +49,10 @@ interface Props extends SessionTaskNavigationProps {
 }
 
 const QUICK: { v: View; icon: IconName; label: string }[] = [
-  { v: "workflow", icon: "branch", label: "작업 그래프" },
   { v: "insights", icon: "chart", label: "인사이트" },
-  { v: "wiki", icon: "markdown", label: "Wiki" },
+  { v: "vocab", icon: "book", label: "단어장" },
+  { v: "pipeline", icon: "branch", label: "파이프라인" },
 ];
-
-/** 원격 탐색 중 Wiki가 잠기는 이유 — 사이드바 툴팁과 본문 안내가 같은 문장을 쓴다. */
-export const WIKI_LOCAL_ONLY_REASON = "창고는 이 컴퓨터의 폴더라 로컬 호스트에서만 열립니다.";
 
 const ORCH_VIEWS_STORAGE_KEY = "praxis-orch-views-open";
 
@@ -76,6 +76,7 @@ function persistOrchViewsOpen(open: boolean): void {
 /** Claude-desktop식 단일 사이드바: 새 작업 + 빠른 링크 + 푸터. */
 export function Sidebar({
   view,
+  insightsUnread = 0,
   onNewTask,
   onQuickLink,
   browsingHost,
@@ -88,13 +89,14 @@ export function Sidebar({
   onOpenTask,
   onNewInRepo,
   onDeleteTask,
+  onMergeTask,
   onRemoveProject,
   onDiscardOrphans,
   groups,
   onProjectGroupsChange,
+  questionTasks,
   hostFailures = [],
   onRetryHost,
-  retroUnread = false,
 }: Props) {
   const hosts = listHosts();
   const [retryingHosts, setRetryingHosts] = useState<ReadonlySet<HostId>>(() => new Set());
@@ -190,36 +192,22 @@ export function Sidebar({
         {orchViewsOpen && (
           <div className="flex flex-col gap-0.5 px-1">
             {QUICK.map((q) => {
-              /* 창고는 이 컴퓨터의 폴더라 원격 탐색 중에는 열리지 않는다. 그렇다고 항목을
-                 지워 버리면 **사라진 이유가 화면 어디에도 남지 않는다** — 본문의 안내는
-                 진입점이 없어 도달할 수 없고, 사용자는 기능이 없어졌다고 읽는다.
-                 자리는 지키고 잠긴 이유를 붙인다. */
-              const localOnly = q.v === "wiki" && browsingHost !== LOCAL_HOST;
               return (
                 <button
                   key={q.v}
                   onClick={() => onQuickLink(q.v)}
-                  disabled={localOnly}
-                  title={localOnly ? WIKI_LOCAL_ONLY_REASON : undefined}
                   className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md text-sm ${
-                    localOnly
-                      ? "text-text-muted cursor-not-allowed"
-                      : view === q.v
-                        ? "bg-raised text-text"
-                        : "text-text-secondary hover:text-text"
+                    view === q.v ? "bg-raised text-text" : "text-text-secondary hover:text-text"
                   }`}
                 >
                   <Icon name={q.icon} size={16} /> {q.label}
-                  {localOnly && (
-                    <span className="ml-auto shrink-0 text-[10px] text-text-muted">로컬 전용</span>
-                  )}
-                  {/* 적체 건수가 아니라 **새 다이제스트**일 때만 켠다. 만성적으로 켜져 있는
-                      배지는 두 주면 무시된다(설계 0054 DR-6). */}
-                  {q.v === "insights" && retroUnread && (
+                  {/* 적체 건수가 아니라 아직 보지 않은 발견 카드가 있을 때만 켠다 —
+                      만성적으로 켜져 있는 배지는 두 주면 무시된다(설계 0054 DR-6). */}
+                  {q.v === "insights" && insightsUnread > 0 && (
                     <span
                       className="ml-auto w-1.5 h-1.5 rounded-full bg-primary-bright shrink-0"
-                      title="읽지 않은 주간 회고"
-                      aria-label="읽지 않은 주간 회고"
+                      title={`읽지 않은 발견 카드 ${insightsUnread}건`}
+                      aria-label={`읽지 않은 발견 카드 ${insightsUnread}건`}
                     />
                   )}
                 </button>
@@ -265,10 +253,12 @@ export function Sidebar({
           onOpenTask={onOpenTask}
           onNewInRepo={onNewInRepo}
           onDeleteTask={onDeleteTask}
+          onMergeTask={onMergeTask}
           onRemoveProject={onRemoveProject}
           onDiscardOrphans={onDiscardOrphans}
           groups={groups}
           onProjectGroupsChange={onProjectGroupsChange}
+          questionTasks={questionTasks}
         />
       </div>
 
@@ -279,14 +269,14 @@ export function Sidebar({
         {/* 호스트가 하나뿐이면 고를 것이 없다 — 손잡이 대신 사실만 적는다. */}
         {hosts.length <= 1 ? (
           <span className="flex-1 min-w-0 truncate text-sm text-text-secondary">
-            Praxis · {hostLabel(browsingHost)}
+            Dojang · {hostLabel(browsingHost)}
           </span>
         ) : (
           <label
             className="flex min-w-0 flex-1 items-center gap-1 text-sm text-text-secondary"
             title="파일·메모리·일정·GitHub 화면이 볼 호스트"
           >
-            <span className="shrink-0">Praxis ·</span>
+            <span className="shrink-0">Dojang ·</span>
             <select
               aria-label="탐색 호스트"
               className={`min-w-0 flex-1 bg-transparent outline-none ${

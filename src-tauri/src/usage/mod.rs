@@ -377,7 +377,8 @@ fn claude_cli_version() -> String {
             return v.clone();
         }
     }
-    let detected = std::process::Command::new("claude")
+    let claude = crate::reviewer::which("claude").unwrap_or_else(|| "claude".to_string());
+    let detected = std::process::Command::new(claude)
         .arg("--version")
         .output()
         .ok()

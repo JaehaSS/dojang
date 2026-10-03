@@ -35,7 +35,6 @@ vi.mock("../../lib/composer-focus", async (original) => ({
 
 import { EditorPane, type OpenFile } from "./EditorPane";
 import { fileTabKey } from "../../lib/tab-key";
-import type { EditorCodeGraphActions } from "./useCodeGraphPanel";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -57,57 +56,6 @@ const READ_ONLY_FILE: OpenFile = {
   key: fileTabKey("/Users/test/external.ts"),
   path: "/Users/test/external.ts",
   readOnly: true,
-};
-
-const graphStatus = vi.fn(async () => ({
-  activeState: "absent" as const,
-  activeRunId: null,
-  indexedAt: null,
-  files: 0,
-  symbols: 0,
-  edges: 0,
-  buildState: "idle" as const,
-  buildRunId: null,
-  detail: null,
-  incomplete: null,
-}));
-
-const graphActions: EditorCodeGraphActions = {
-  scope: 7,
-  status: graphStatus,
-  index: async () => ({
-    runId: 1,
-    state: "ready",
-    filesSeen: 0,
-    filesIndexed: 0,
-    filesUnchanged: 0,
-    filesSkipped: 0,
-    symbols: 0,
-    edges: 0,
-  }),
-  cancel: async () => undefined,
-  impactAt: async () => ({
-    runId: 1,
-    indexedAt: 0,
-    freshness: "ready",
-    truncated: false,
-    edgesUnavailable: null,
-    items: [],
-  }),
-  neighborhoodAt: async () => ({
-    runId: 1,
-    indexedAt: 0,
-    freshness: "ready",
-    rootId: 1,
-    nodes: [],
-    edges: [],
-    truncated: false,
-    incomplete: null,
-    edgesUnavailable: null,
-    encounteredIncomplete: [],
-  }),
-  openItem: async () => undefined,
-  openNode: async () => undefined,
 };
 
 let container: HTMLDivElement;
@@ -162,7 +110,6 @@ const pressCmdL = async () => {
 beforeEach(() => {
   h.pushCapture.mockClear();
   h.requestComposerFocus.mockClear();
-  graphStatus.mockClear();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -316,12 +263,5 @@ describe("마크다운 프리뷰", () => {
     expect(h.pushCapture).not.toHaveBeenCalled();
     // 남의 창으로 포커스를 뺏지 않는다.
     expect(h.requestComposerFocus).not.toHaveBeenCalled();
-  });
-
-  it("지원하지 않는 텍스트 형식은 사유를 알리고 그래프 명령을 호출하지 않는다", async () => {
-    await render({ codeGraph: graphActions, onLspStatus: async () => ({ server: null, available: false, detail: "지원하지 않는 파일 형식입니다" }) });
-
-    expect(container.textContent).toContain("이 파일 형식은 코드 그래프를 지원하지 않습니다");
-    expect(graphStatus).not.toHaveBeenCalled();
   });
 });

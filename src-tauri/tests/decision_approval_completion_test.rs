@@ -61,40 +61,10 @@ async fn insert_sources(pool: &sqlx::SqlitePool, task_id: i64) {
     .execute(pool)
     .await
     .unwrap();
-    insert_receipts(pool, task_id).await;
-    insert_memory_and_evidence(pool, task_id).await;
+    insert_evidence(pool, task_id).await;
 }
 
-async fn insert_receipts(pool: &sqlx::SqlitePool, task_id: i64) {
-    sqlx::query(
-        "INSERT INTO task_start_receipts \
-         (task_id, projection_id, source_checks_json, created_at) VALUES (?, 1, '[]', 13)",
-    )
-    .bind(task_id)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO task_start_receipt_checks (task_id, check_id) VALUES (?, 7)")
-        .bind(task_id)
-        .execute(pool)
-        .await
-        .unwrap();
-}
-
-async fn insert_memory_and_evidence(pool: &sqlx::SqlitePool, task_id: i64) {
-    sqlx::query(
-        "INSERT INTO memory_injections \
-         (memory_id, version, task_id, target_hash, injected_at) VALUES (3, 2, ?, 'hash', 14)",
-    )
-    .bind(task_id)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO memory_usages (memory_id, task_id, injected_at) VALUES (3, ?, 14)")
-        .bind(task_id)
-        .execute(pool)
-        .await
-        .unwrap();
+async fn insert_evidence(pool: &sqlx::SqlitePool, task_id: i64) {
     sqlx::query(
         "INSERT INTO evidence (task_id, passed, failed, ready, created_at) VALUES (?, 1, 0, 1, 15)",
     )
@@ -118,30 +88,20 @@ async fn assert_authoritative_outcome(pool: &sqlx::SqlitePool, task_id: i64) {
     .fetch_one(pool)
     .await
     .unwrap();
-    assert_eq!(counts, (1, 8, 1));
+    // actor·task·instruction_digest·git_commit 4 + verification_run 1
+    assert_eq!(counts, (1, 5, 1));
     assert_outcomes(pool, task_id).await;
 }
 
 async fn assert_outcomes(pool: &sqlx::SqlitePool, task_id: i64) {
-    let outcomes: (Option<String>, Option<String>, String) = sqlx::query_as(
-        "SELECT (SELECT outcome FROM memory_injections WHERE task_id = ?), \
-                (SELECT outcome FROM memory_usages WHERE task_id = ?), \
-                (SELECT state FROM local_approval_finalizations WHERE task_id = ?)",
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM local_approval_finalizations WHERE task_id = ?",
     )
-    .bind(task_id)
-    .bind(task_id)
     .bind(task_id)
     .fetch_one(pool)
     .await
     .unwrap();
-    assert_eq!(
-        outcomes,
-        (
-            Some("approved".into()),
-            Some("approved".into()),
-            "completed".into()
-        )
-    );
+    assert_eq!(state, "completed");
 }
 
 async fn persisted_values(pool: &sqlx::SqlitePool) -> String {

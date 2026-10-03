@@ -1,2 +1,0 @@
-.wiki-workspace-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; align-items: start; }
-@container (min-width: 760px) { .wiki-workspace-grid { grid-template-columns: 240px minmax(0, 1fr); } }

@@ -33,7 +33,7 @@ pub fn start_toolbar_probe(app: &tauri::App, url: &str) -> Result<(), String> {
         ..Default::default()
     }));
     let window = tauri::window::WindowBuilder::new(app, TOOLBAR_PROBE_WINDOW_LABEL)
-        .title("Praxis toolbar probe")
+        .title("Dojang toolbar probe")
         .inner_size(720.0, 520.0)
         .build()
         .map_err(|error| error.to_string())?;

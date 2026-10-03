@@ -257,7 +257,7 @@ pub async fn ensemble_matrix(
 }
 
 /// ensemble 조합 병합(B-3): 심판 추천 후보(`winner_task_id`) worktree를 베이스로 타 후보의 선택
-/// hunk를 체크포인트(`praxis: pre-compose`) 후 순차 forward 적용(`git apply --3way`, `ensemble::compose`
+/// hunk를 체크포인트(`dojang: pre-compose`) 후 순차 forward 적용(`git apply --3way`, `ensemble::compose`
 /// 재사용)한다. 충돌 시 실패 hunk 목록과 함께 fail-closed(체크포인트 원복). 커밋은 만들지 않는다
 /// (승인은 기존 `task_approve` 경로 재사용). 성공 시 체크포인트를 영속해 기존 `partial_rollback`
 /// 경로로 되돌릴 수 있게 한다(DR-P1: 롤백 재사용).

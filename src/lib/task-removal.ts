@@ -80,7 +80,7 @@ export function removalDetail(task: TaskRemovalTarget): string {
     }
     return "진행 중인 작업을 중단하고 워크트리를 정리합니다.";
   }
-  return "세션 이력과 Praxis가 보관한 대화 원본·첨부를 삭제합니다.";
+  return "세션 이력과 Dojang이 보관한 대화 원본·첨부를 삭제합니다.";
 }
 
 /** 유예 배너에 세우는 이름 — 지시문이 비어 있는 작업은 브랜치로 가린다. */

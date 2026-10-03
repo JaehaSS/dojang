@@ -28,8 +28,7 @@ const VIEWS: { aliases: string[]; view: View }[] = [
   { aliases: ["워크스페이스", "작업공간", "작업", "workspace"], view: "workspace" },
   { aliases: ["앙상블", "ensemble"], view: "ensemble" },
   { aliases: ["인사이트", "통계", "insights"], view: "insights" },
-  // 메모리는 Wiki 공간의 필터가 됐다 — 옛 별칭도 같은 화면으로 보낸다.
-  { aliases: ["위키", "메모리", "기억", "wiki", "memory"], view: "wiki" },
+  { aliases: ["단어장", "vocab"], view: "vocab" },
   { aliases: ["환경설정", "설정", "settings"], view: "settings" },
 ];
 

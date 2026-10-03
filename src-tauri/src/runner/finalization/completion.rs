@@ -43,16 +43,6 @@ async fn record_terminal_outcome(
     decision: &str,
     now: i64,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE memory_usages SET outcome = ? WHERE task_id = ? AND outcome IS NULL")
-        .bind(decision)
-        .bind(task_id)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query("UPDATE memory_injections SET outcome = ? WHERE task_id = ? AND outcome IS NULL")
-        .bind(decision)
-        .bind(task_id)
-        .execute(&mut **tx)
-        .await?;
     sqlx::query("INSERT INTO runner_events (task_id, ts, kind) VALUES (?, ?, ?)")
         .bind(task_id)
         .bind(now)

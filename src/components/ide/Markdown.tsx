@@ -1,10 +1,11 @@
-import { memo, type ReactNode, useSyncExternalStore } from "react";
+import { memo, type ReactNode, useMemo, useSyncExternalStore } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { remarkFilePathLinks } from "../../lib/file-path-links";
 import { getActiveTheme, subscribeTheme } from "../../lib/themes";
 import { looksLikeHtml } from "../../lib/looks-like-html";
+import { rehypeExpressions } from "../../lib/vocab";
 import { CodeCopyButton } from "./CodeCopyButton";
 import { HtmlDoc } from "./HtmlDoc";
 import { extractText, type CodeChild } from "./markdown-code";
@@ -54,6 +55,12 @@ interface Props {
   onLinkMenu?: (link: string, at: { x: number; y: number }) => void;
   /** 이 텍스트가 더 자라지 않는가. 스트리밍 중이면 거짓을 준다 — 아래 HTML 분기 주석 참조. */
   stable?: boolean;
+  /**
+   * 공부할 표현 — 글자 노드에서 찾아 `renderHighlight`로 감싼다(`src/lib/vocab.ts`). 코드·링크 안은 긋지 않는다.
+   * 배열 정체성이 바뀌면 다시 파싱하므로 부모가 고정해서 준다.
+   */
+  highlights?: string[];
+  renderHighlight?: (index: number, children: ReactNode) => ReactNode;
 }
 
 const agentUrlTransform = (value: string) =>
@@ -69,7 +76,14 @@ export const Markdown = memo(function Markdown({
   onOpenLink,
   onLinkMenu,
   stable = true,
+  highlights,
+  renderHighlight,
 }: Props) {
+  const rehypePlugins = useMemo(
+    () => (highlights && highlights.length > 0 && renderHighlight ? [rehypeExpressions(highlights)] : undefined),
+    [highlights, renderHighlight],
+  );
+
   // 메시지 전체가 HTML이면 마크다운 파서는 태그를 글자로 이스케이프해 버린다 — 샌드박스로 넘긴다.
   //
   // 자라는 중인 버퍼로는 판정하지 않는다(stable=false). "표를 그리고 문장으로 마무리"하는 답변은
@@ -94,6 +108,7 @@ export const Markdown = memo(function Markdown({
     >
       <ReactMarkdown
         remarkPlugins={onOpenLink ? AGENT_PLUGINS : PLAIN_PLUGINS}
+        rehypePlugins={rehypePlugins}
         urlTransform={onOpenLink ? agentUrlTransform : undefined}
         components={{
           pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
@@ -149,6 +164,10 @@ export const Markdown = memo(function Markdown({
             </th>
           ),
           td: ({ children }) => <td className="border border-border px-2 py-1 align-top">{children}</td>,
+          mark: ({ node, children }) => {
+            const index = Number(node?.properties?.dataExpression);
+            return renderHighlight && Number.isInteger(index) ? renderHighlight(index, children) : <mark>{children}</mark>;
+          },
         }}
       >
         {text}

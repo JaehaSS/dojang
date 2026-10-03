@@ -18,6 +18,7 @@ pub mod runtime_schema;
 mod scan;
 mod schema;
 mod scope;
+pub(crate) mod selected_attachments;
 pub mod settings;
 pub(crate) mod task_retention;
 pub mod usage;

@@ -5,7 +5,7 @@ import { PROJECT_GROUP_COLORS, type ProjectGroupColorId } from "../../lib/projec
 import type { ProjectGroup } from "../../lib/project-groups";
 import { groupPath } from "../../lib/project-group-tree";
 import { swallowNextClick } from "./ContextMenuShell";
-import { preservedBranchLabel } from "./discard-confirm";
+import { isDirectRun, preservedBranchLabel } from "./discard-confirm";
 import { Icon } from "./icons";
 
 export type TaskNavigationMenuState =
@@ -39,6 +39,11 @@ interface Props extends GroupActions {
   activeTasks: Task[];
   onClose: () => void;
   onDeleteTask: (task: Task) => void;
+  /**
+   * 검토 대기 작업을 리뷰 바의 승인과 같은 경로로 `task.base`(생성 시 체크아웃돼 있던 브랜치)에 머지한다.
+   * 안 넘기면 항목이 그려지지 않는다.
+   */
+  onMergeTask?: (task: Task) => void;
   onRemoveProject: (repo: string) => void;
 }
 
@@ -152,7 +157,19 @@ function GroupColorPage({
 
 const Divider = () => <div className="my-1 border-t border-border" />;
 
-function TaskMenu({ task, onRun }: { task: Task; onRun: () => void }) {
+/** 머지는 워크트리 작업에만 뜻이 있다 — 직접 실행은 이미 체크아웃된 브랜치에서 돌았다. */
+const canMerge = (task: Task): boolean =>
+  task.state === "AwaitingReview" && !task.stale && !isDirectRun(task);
+
+function TaskMenu({
+  task,
+  onRun,
+  onMerge,
+}: {
+  task: Task;
+  onRun: () => void;
+  onMerge?: () => void;
+}) {
   return (
     <>
       <div className="px-3 py-1 text-xs text-text-muted truncate">
@@ -165,6 +182,13 @@ function TaskMenu({ task, onRun }: { task: Task; onRun: () => void }) {
         </div>
       )}
       <Divider />
+      {onMerge && canMerge(task) && (
+        <button className={ITEM} onClick={onMerge} title={`${task.branch} → ${task.base}`}>
+          <Icon name="check" size={13} />
+          <span className="min-w-0 truncate">{task.base}</span>
+          <span className="shrink-0">에 머지</span>
+        </button>
+      )}
       <button
         className="w-full text-left flex items-center gap-2 px-3 py-1.5 text-sm text-status-failed hover:bg-surface"
         onClick={onRun}
@@ -425,6 +449,7 @@ export function TaskNavigationMenu({
   activeTasks,
   onClose,
   onDeleteTask,
+  onMergeTask,
   onRemoveProject,
   ...actions
 }: Props) {
@@ -467,6 +492,13 @@ export function TaskNavigationMenu({
             onClose();
             onDeleteTask(menu.task);
           }}
+          onMerge={
+            onMergeTask &&
+            (() => {
+              onClose();
+              onMergeTask(menu.task);
+            })
+          }
         />
       )}
       {menu.kind === "project" && (

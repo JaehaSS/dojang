@@ -5,7 +5,7 @@ use super::super::*;
 static DATABASE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[tokio::test]
-async fn loads_candidate_identity_events_and_memory_counts_for_one_ensemble() {
+async fn loads_candidate_identity_and_events_for_one_ensemble() {
     let pool = test_pool().await;
     let claude = insert_candidate(&pool, "claude", "ens-metrics", 1).await;
     let codex = insert_candidate(&pool, "codex", "ens-metrics", 2).await;
@@ -23,11 +23,8 @@ async fn loads_candidate_identity_events_and_memory_counts_for_one_ensemble() {
         r#"{"kind":"result","is_error":false,"tokens_in":12,"tokens_out":3,"cost_usd":0.04}"#,
     )
     .await;
-    record_memory(&pool, claude, 1).await;
-    record_memory(&pool, claude, 2).await;
     append_model(&pool, codex, 10, Some("gpt-5.6-sol"), None).await;
     append_model(&pool, codex, 11, None, Some("gpt-5.6-sol")).await;
-    record_memory(&pool, codex, 3).await;
 
     let metrics = candidate_metrics(&pool, "ens-metrics").await.unwrap();
 
@@ -41,11 +38,9 @@ async fn loads_candidate_identity_events_and_memory_counts_for_one_ensemble() {
     );
     assert_eq!(metrics[0].active_seconds, 4);
     assert_eq!(metrics[0].tokens_in, 12);
-    assert_eq!(metrics[0].memory_count, 2);
     assert_eq!(metrics[1].task_id, codex);
     assert_eq!(metrics[1].model.as_deref(), Some("gpt-5.6-sol"));
     assert_eq!(metrics[1].resolved_model.as_deref(), Some("gpt-5.6-sol"));
-    assert_eq!(metrics[1].memory_count, 1);
 }
 
 async fn test_pool() -> sqlx::SqlitePool {
@@ -94,15 +89,6 @@ async fn append_model(
 
 async fn append_event(pool: &sqlx::SqlitePool, task_id: i64, timestamp: i64, event: &str) {
     crate::db::append_convo_event(pool, task_id, event, timestamp)
-        .await
-        .unwrap();
-}
-
-async fn record_memory(pool: &sqlx::SqlitePool, task_id: i64, memory_id: i64) {
-    sqlx::query("INSERT INTO memory_usages (memory_id, task_id, injected_at) VALUES (?, ?, 1)")
-        .bind(memory_id)
-        .bind(task_id)
-        .execute(pool)
         .await
         .unwrap();
 }

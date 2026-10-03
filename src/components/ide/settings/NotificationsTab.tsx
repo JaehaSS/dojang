@@ -56,7 +56,7 @@ export function NotificationsTab() {
           hint={
             <>
               {permission === "unknown"
-                ? "이 앱은 OS 권한 상태를 확인할 수 없습니다. 시스템 알림 설정에서 Praxis를 확인하세요."
+                ? "이 앱은 OS 권한 상태를 확인할 수 없습니다. 시스템 알림 설정에서 Dojang을 확인하세요."
                 : `권한 상태: ${permission ?? "확인 중"}`}
               {error && <div className="text-xs text-status-failed">{error}</div>}
               <button

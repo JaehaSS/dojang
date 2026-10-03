@@ -47,7 +47,8 @@ type Name =
   | "popout"
   | "panelRight"
   | "splitRight"
-  | "splitDown";
+  | "splitDown"
+  | "book";
 
 // 각 아이콘은 서브패스 배열 — 문자열 split 파서 없이 그대로 <path>로 렌더.
 const PATHS: Record<Name, string[]> = {
@@ -93,6 +94,7 @@ const PATHS: Record<Name, string[]> = {
     "M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3",
   ],
   chart: ["M4 4v16h16", "M8 16v-4", "M12 16V8", "M16 16v-6"],
+  book: ["M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z", "M5 17a3 3 0 0 1 3-3h11"],
   play: ["M7 5l12 7-12 7z"],
   scale: ["M12 4v16", "M6 8h12", "M6 8l-3 6a3 3 0 0 0 6 0z", "M18 8l-3 6a3 3 0 0 0 6 0z", "M8 20h8"],
   stop: ["M7 7h10v10H7z"],

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { Icon } from "./icons";
 import { mentionKey, sourceLabel, type MentionItem } from "../../lib/mention-knowledge";
 
@@ -28,15 +29,25 @@ export function MentionDropdown({
   onHover,
   onSelect,
 }: Props) {
+  const listRef = useRef<HTMLDivElement>(null);
+  // ↑↓로 옮긴 선택이 max-h 밖으로 나가면 보이는 데까지만 끌어온다(jsdom에는 scrollIntoView가 없다).
+  useEffect(() => {
+    if (!open) return;
+    listRef.current?.querySelector<HTMLElement>('[data-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
+  }, [open, sel, items.length]);
   if (!open) return null;
   return (
-    <div className="absolute bottom-full left-0 mb-1 z-30 w-[28rem] max-h-56 overflow-auto rounded-lg border border-border-strong bg-raised py-1 shadow-xl">
+    <div
+      ref={listRef}
+      className="absolute bottom-full left-0 mb-1 z-30 w-[28rem] max-h-56 overflow-auto rounded-lg border border-border-strong bg-raised py-1 shadow-xl"
+    >
       <div className="px-3 py-1 text-xs text-text-muted flex items-center gap-1">
         <Icon name="at" size={12} /> 멘션{token && ` · ${token}`}
         {knowledgePending && <span className="ml-auto text-text-muted">지식 검색 중…</span>}
       </div>
       {items.map((item, i) => (
         <button
+          data-selected={i === sel}
           key={mentionKey(item)}
           className={`w-full text-left px-3 py-1 text-sm flex items-center gap-2 ${
             i === sel ? "bg-surface text-text" : "text-text-secondary"

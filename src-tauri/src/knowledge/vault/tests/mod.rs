@@ -6,6 +6,7 @@ mod notes;
 mod ownership;
 mod performance;
 mod search;
+mod selected_attachments;
 mod storage;
 mod task_retention;
 mod wiki;

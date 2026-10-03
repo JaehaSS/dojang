@@ -8,6 +8,7 @@ import { LOCAL_HOST } from "../lib/transport";
 import { FilterSegment, type FilterSegmentItem } from "./FilterSegment";
 import { MetaTag } from "./MetaTag";
 import { HarnessExperiencePanel } from "./HarnessExperiencePanel";
+import { useExperimentalFeatures } from "../lib/experimental-features";
 
 /** 에이전트 렌즈 — 값은 벤더 문자열과 같다(`all`만 예외). */
 const LENSES = [
@@ -170,6 +171,7 @@ interface Props {
  * 스킬 목록은 본문 펼침만 제공한다 (설계 0052 §C). 별도 경험 패널은 조회·초안 복사를 제공한다.
  */
 export function SkillsView({ repo, onOpenMemory = () => {} }: Props) {
+  const advancedFeatures = useExperimentalFeatures();
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -284,7 +286,7 @@ export function SkillsView({ repo, onOpenMemory = () => {} }: Props) {
                       </MetaTag>
                       {lens !== "all" && (
                         <MetaTag tone={native ? "default" : "accent"}>
-                          {native ? "네이티브" : "Praxis 확장"}
+                          {native ? "네이티브" : "Dojang 확장"}
                         </MetaTag>
                       )}
                       {sk.orphan ? (
@@ -314,7 +316,7 @@ export function SkillsView({ repo, onOpenMemory = () => {} }: Props) {
             })}
           </div>
         )}
-        <HarnessExperiencePanel repo={repo} onOpenMemory={onOpenMemory} />
+        {advancedFeatures && <HarnessExperiencePanel repo={repo} onOpenMemory={onOpenMemory} />}
       </div>
     </div>
   );

@@ -11,8 +11,6 @@ pub(super) struct CandidateFeedbackRow {
     pub(super) task_model: Option<String>,
     pub(super) state: String,
     pub(super) updated_at: i64,
-    pub(super) memory_count: i64,
-    pub(super) approved_memory_count: i64,
 }
 
 #[derive(Default)]
@@ -32,12 +30,9 @@ pub(super) async fn load_candidates(
            GROUP BY ensemble ORDER BY latest_at DESC, ensemble DESC LIMIT ? \
          ) \
          SELECT t.ensemble, t.id AS task_id, t.agent, t.branch, t.model AS task_model, \
-                t.state, t.updated_at, COUNT(DISTINCT u.memory_id) AS memory_count, \
-                COUNT(DISTINCT CASE WHEN u.outcome = 'approved' THEN u.memory_id END) \
-                  AS approved_memory_count \
+                t.state, t.updated_at \
          FROM recent r JOIN tasks t ON t.ensemble = r.ensemble \
-         LEFT JOIN memory_usages u ON u.task_id = t.id \
-         GROUP BY t.id ORDER BY r.latest_at DESC, r.ensemble DESC, t.id ASC",
+         ORDER BY r.latest_at DESC, r.ensemble DESC, t.id ASC",
     )
     .bind(limit)
     .fetch_all(pool)

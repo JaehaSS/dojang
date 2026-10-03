@@ -15,10 +15,10 @@ pub async fn set_checked(pool: &SqlitePool, id: i64, tier: &str) -> Result<Task,
         .ok_or("작업을 찾을 수 없습니다")?;
     if task.mode != "conversation"
         || task.ensemble.as_deref().is_some_and(|s| !s.is_empty())
-        || db::debate_side(pool, id)
+        || !db::debate_sides(pool, id)
             .await
             .map_err(|e| e.to_string())?
-            .is_some()
+            .is_empty()
     {
         return Err("실행 속도는 Codex 일반 대화에서만 선택할 수 있습니다".into());
     }

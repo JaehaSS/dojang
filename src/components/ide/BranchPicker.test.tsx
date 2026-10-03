@@ -206,3 +206,58 @@ describe("BranchPicker 검색", () => {
     expect(options()).toHaveLength(MANY.length);
   });
 });
+
+describe("BranchPicker 체크아웃", () => {
+  async function openWithCheckout(onCheckout: (b: string) => void, onPick = vi.fn()): Promise<void> {
+    await act(async () => {
+      root?.render(
+        <BranchPicker value="" current="main" branches={MANY} onPick={onPick} onCheckout={onCheckout} />,
+      );
+    });
+    await act(async () => chip()?.click());
+  }
+  const checkoutButton = (): HTMLButtonElement | null =>
+    [...(container?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+      (b) => b.textContent === "체크아웃",
+    ) ?? null;
+
+  it("커서 행의 체크아웃 버튼은 고르지 않고 전환만 요청한다", async () => {
+    const onCheckout = vi.fn();
+    const onPick = vi.fn();
+    await openWithCheckout(onCheckout, onPick);
+    await press("ArrowDown"); // main(3) → dev(4)
+    await act(async () => checkoutButton()?.click());
+    expect(onCheckout).toHaveBeenCalledWith("dev");
+    expect(onPick).not.toHaveBeenCalled();
+    expect(search()).toBeNull();
+  });
+
+  it("이미 체크아웃된 브랜치에는 체크아웃 버튼이 없다", async () => {
+    const onCheckout = vi.fn();
+    await openWithCheckout(onCheckout);
+    // 열면 커서가 현재 브랜치 main 위에 선다.
+    expect(checkoutButton()).toBeNull();
+    await act(async () => {
+      search()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true }));
+    });
+    expect(onCheckout).not.toHaveBeenCalled();
+  });
+
+  it("Shift+Enter는 커서 행으로 체크아웃한다", async () => {
+    const onCheckout = vi.fn();
+    const onPick = vi.fn();
+    await openWithCheckout(onCheckout, onPick);
+    await type("popout height");
+    await act(async () => {
+      search()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true }));
+    });
+    expect(onCheckout).toHaveBeenCalledWith("fix/popout-height-regression");
+    expect(onPick).not.toHaveBeenCalled();
+  });
+
+  it("onCheckout이 없으면 체크아웃 버튼을 두지 않는다", async () => {
+    await open();
+    await press("ArrowDown");
+    expect(checkoutButton()).toBeNull();
+  });
+});

@@ -2,9 +2,7 @@ import { useEffect, useState } from "react";
 import {
   captureProfileGet,
   captureProfileSet,
-  captureLastRuns,
   type CaptureProfile,
-  type CaptureRun,
   blockUnverifiedGet,
   blockUnverifiedSet,
   lspAutoinjectGet,
@@ -27,6 +25,8 @@ import { modelsForAgentWithObserved, AGENT_MODEL_CATALOG } from "../../../lib/mo
 import { useObservedModels } from "../../../lib/use-observed-models";
 import { AGENT_PRESETS } from "../../../lib/agents";
 import { SettingRow, SettingSection, SettingsTabShell, Switch, TabSummary } from "./SettingRow";
+import { setSessionStyle, useSessionStyle, type SessionStyle } from "../../../lib/session-style";
+import { TranslateSection } from "./TranslateSection";
 
 /** 토론 라운드 상한 — 백엔드 `debate::DEFAULT_ROUND_CAP`·`ROUND_CAP_RANGE`와 같은 값이다. */
 const DEBATE_ROUND_CAP_DEFAULT = 3;
@@ -51,7 +51,7 @@ interface Props {
 export function RunTab({ onUseWorktreeChange }: Props) {
   const observedModelList = useObservedModels();
   const [captureProfile, setCaptureProfile] = useState<CaptureProfile | null>(null);
-  const [captureRuns, setCaptureRuns] = useState<Record<string, CaptureRun>>({});
+  const style = useSessionStyle();
   const [blockUnverified, setBlockUnverified] = useState(false);
   const [lspAutoinject, setLspAutoinject] = useState(true);
   const [useWorktree, setUseWorktree] = useState(true);
@@ -70,7 +70,6 @@ export function RunTab({ onUseWorktreeChange }: Props) {
 
   useEffect(() => {
     captureProfileGet().then(setCaptureProfile).catch(() => {});
-    captureLastRuns().then(setCaptureRuns).catch(() => {});
     blockUnverifiedGet().then(setBlockUnverified).catch(() => {});
     lspAutoinjectGet().then(setLspAutoinject).catch(() => {});
     refreshBaseGet().then(setRefreshBase).catch(() => {});
@@ -273,6 +272,22 @@ export function RunTab({ onUseWorktreeChange }: Props) {
         hint="새 작업을 만들 때 적용되는 값입니다. 작업마다 따로 덮어쓸 수 있는 것도 있습니다."
       >
         <SettingRow
+          id="session-style"
+          title="세션 방식"
+          hint="대화: 턴마다 CLI를 실행해 말풍선으로 보여 주고 앱 컴포저로 입력합니다. 터미널: 실제 CLI를 앱 터미널에 띄우고 터미널 안에서만 입력합니다(작업 중 입력·Esc 중단·Shift+Tab 권한 모드·슬래시 명령). 터미널에서는 @파일 멘션·캡처 첨부·질문 카드를 쓸 수 없습니다. 로컬에서 Claude나 Codex 하나로 새로 시작하는 작업에만 적용되고, 이미 만든 작업은 만들 때의 방식을 유지합니다."
+        >
+          <select
+            aria-label="세션 방식"
+            className="bg-bg border border-border rounded px-2 py-1 text-xs text-text"
+            value={style}
+            onChange={(e) => setSessionStyle(e.target.value as SessionStyle)}
+          >
+            <option value="conversation">대화</option>
+            <option value="terminal">터미널 (CLI 그대로)</option>
+          </select>
+        </SettingRow>
+
+        <SettingRow
           id="use-worktree"
           title="워크트리 격리"
           risk="safety"
@@ -374,7 +389,7 @@ export function RunTab({ onUseWorktreeChange }: Props) {
           </div>
           {captureProfile.model_raw.trim() !== "" && !CLAUDE_MODEL_IDS.has(captureProfile.model_raw.trim()) && (
             <div className="text-xs text-status-failed">
-              확인되지 않은 모델입니다 — 오타면 호출이 조용히 실패합니다. 아래 마지막 실행에서 결과를 확인하세요.
+              확인되지 않은 모델입니다 — 오타면 호출이 조용히 실패합니다.
             </div>
           )}
 
@@ -407,42 +422,10 @@ export function RunTab({ onUseWorktreeChange }: Props) {
               label="린 인보케이션"
             />
           </SettingRow>
-
-          {Object.keys(captureRuns).length > 0 && (
-            <div className="space-y-1 pt-1">
-              <div className="text-xs text-text-muted">마지막 실행</div>
-              {(["extract", "reflect"] as const).map((kind) => {
-                const r = captureRuns[kind];
-                if (!r) return null;
-                const label = kind === "extract" ? "추출" : "회고";
-                return (
-                  <div key={kind} className="text-xs text-text-muted">
-                    <span className="text-text">{label}</span> · {r.model}/{r.effort} ·{" "}
-                    {/* cost는 lean=false(봉투 없음)에서도, 실패해서 봉투에 닿지
-                        못했을 때도 null이다. 둘을 같은 문구로 말하면 린이 켜진
-                        화면에서 "(lean=false)"라고 하게 된다. */}
-                    {r.cost_usd !== null
-                      ? `$${r.cost_usd.toFixed(4)}`
-                      : r.lean
-                        ? "비용 미상"
-                        : "비용 미측정(lean=false)"}{" "}
-                    ·{" "}
-                    {!r.ok ? (
-                      <span className="text-status-failed">실패{r.err ? ` — ${r.err}` : ""}</span>
-                    ) : !r.parsed_ok ? (
-                      <span className="text-status-failed">파싱 실패 — 결과가 저장되지 않았습니다</span>
-                    ) : r.citation_found === false ? (
-                      <span className="text-status-failed">인용 판정 섹션 없음</span>
-                    ) : (
-                      "정상"
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
         </SettingSection>
       )}
+
+      <TranslateSection />
     </SettingsTabShell>
   );
 }

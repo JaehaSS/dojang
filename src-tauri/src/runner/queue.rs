@@ -301,30 +301,9 @@ async fn execute_task(
 }
 
 async fn verify_and_promote_start(pool: &SqlitePool, task: &Task, now: i64) -> Result<(), String> {
-    // 영수증이 `None`이면 파일형 투영이다(설계 2026-09-13) — 검증할 원장이 없으므로
-    // 시작 영수증 없이 승격한다. 옛 DB 투영을 받은 작업은 여전히 원장 검증을 통과해야 한다.
-    let receipt = match crate::memory::verify_task_projection_for_start(pool, task.id, now).await {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            let detail = error.to_string();
-            return Err(cleanup_failed_start(pool, task.id, now, &detail).await);
-        }
-    };
-    let checks = match receipt
-        .as_ref()
-        .map(|receipt| serde_json::to_string(&receipt.source_check_ids))
-        .transpose()
-    {
-        Ok(checks) => checks,
-        Err(error) => {
-            return Err(cleanup_failed_start(pool, task.id, now, &error.to_string()).await)
-        }
-    };
-    let start_receipt = receipt
-        .as_ref()
-        .zip(checks.as_deref())
-        .map(|(receipt, checks)| (receipt.projection_id, checks));
-    let promoted = match db::promote_starting_task(pool, task.id, start_receipt, now).await {
+    // 메모리 정본은 창고 안 파일이다(설계 2026-09-13, P1) — 검증할 원장이 없으므로 시작
+    // 영수증 없이 항상 승격한다. 옛 DB 투영(P2) 재검증은 제거됐다.
+    let promoted = match db::promote_starting_task(pool, task.id, now).await {
         Ok(promoted) => promoted,
         Err(error) => return Err(cleanup_failed_start(pool, task.id, now, &error.to_string()).await),
     };
@@ -335,9 +314,6 @@ async fn verify_and_promote_start(pool: &SqlitePool, task: &Task, now: i64) -> R
 }
 
 async fn cleanup_failed_start(pool: &SqlitePool, task_id: i64, now: i64, detail: &str) -> String {
-    if let Err(error) = crate::memory::retire_task_projection_if_present(pool, task_id, now).await {
-        return format!("{detail}; projection cleanup failed: {error}");
-    }
     match db::fail_starting_task(pool, task_id, now, detail).await {
         Ok(true) => detail.to_string(),
         Ok(false) => format!("{detail}; Starting state changed before failure recording"),

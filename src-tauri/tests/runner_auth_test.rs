@@ -9,6 +9,7 @@ use praxis_lib::db;
 use praxis_lib::runner::auth::{authorize_repository_path, RunnerAuth};
 use praxis_lib::runner::config::RunnerConfig;
 use praxis_lib::runner::events::EventHub;
+use praxis_lib::runner::actions::RunnerTaskActions;
 use praxis_lib::runner::http::{self, RunnerHttpState};
 use praxis_lib::runner::queue::QueueWorker;
 use tower::ServiceExt;
@@ -44,7 +45,7 @@ async fn missing_or_wrong_token_and_untrusted_peer_are_rejected() {
         started_at: 0,
         review_claims: Default::default(),
     };
-    let app = http::router(state);
+    let app = http::mobile_surface_router(state, std::sync::Arc::new(RunnerTaskActions));
     let no_peer = app
         .oneshot(
             Request::builder()

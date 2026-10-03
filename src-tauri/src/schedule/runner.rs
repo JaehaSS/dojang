@@ -8,7 +8,6 @@ use tauri::Manager;
 use crate::commands::{self, AppState};
 use crate::db;
 use crate::quiz;
-use crate::retro;
 
 /// 크론 틱 주기.
 const TICK_INTERVAL_SECS: u64 = 60;
@@ -28,20 +27,6 @@ struct TaskPayload {
 #[derive(serde::Deserialize)]
 struct ReminderPayload {
     text: String,
-}
-
-/// `kind="retro"` 스케줄의 payload JSON (설계 0054).
-///
-/// 퀴즈와 달리 count가 없다 — 한 주에 다이제스트는 하나다.
-///
-/// `repo`가 비어도 된다 — 회고 수치는 저장소와 무관하고(`retro::collect_facts`), repo는
-/// 헤드리스 작업이 돌 자리일 뿐이다. 비면 최근 작업의 저장소로 해석한다.
-#[derive(serde::Deserialize)]
-struct RetroPayload {
-    #[serde(default)]
-    repo: String,
-    #[serde(default)]
-    agent: String,
 }
 
 /// `kind="quiz"` 스케줄의 payload JSON (설계 0044).
@@ -96,10 +81,6 @@ pub async fn tick_loop(app: tauri::AppHandle) {
         for sched in schedules {
             run_schedule_if_due(&app, &pool, &sched).await;
         }
-        // Goal Run 재진입(계획 0036) — 새 상주 루프를 만들지 않고 여기 얹는다. 스케줄 뒤에
-        // 두는 이유: 게이트 평가가 빌드·테스트를 돌려 이 틱을 길게 잡을 수 있는데, 그 지연이
-        // 시각 기반 스케줄의 due 판정보다 앞서면 안 된다.
-        crate::goal_run::tick::run_due_goal_runs(&app, &pool).await;
     }
 }
 
@@ -146,7 +127,6 @@ async fn run_schedule_if_due(
         "task" => run_task_schedule(app, sched).await,
         "reminder" => run_reminder_schedule(app, sched).await,
         "quiz" => run_quiz_schedule(app, pool, sched).await,
-        "retro" => run_retro_schedule(app, pool, sched).await,
         other => eprintln!("스케줄 #{} 알 수 없는 kind: {other}", sched.id),
     }
     // 1회성(run_at 있음)은 재발화하지 않도록 자동 비활성화 — best-effort.
@@ -195,7 +175,7 @@ async fn run_task_schedule(app: &tauri::AppHandle, sched: &db::Schedule) {
             let _ = app
                 .notification()
                 .builder()
-                .title(format!("Praxis · 작업 #{} 승인 대기", task.id))
+                .title(format!("Dojang · 작업 #{} 승인 대기", task.id))
                 .body(format!("⏰ {repo} — {}", sched.label))
                 .show();
         }
@@ -211,7 +191,7 @@ async fn run_task_schedule(app: &tauri::AppHandle, sched: &db::Schedule) {
 ///    알림이 울리면 정작 봐야 할 알림이 묻힌다.
 ///
 /// **승인 대기는 그대로 둔다**(`TaskOrigin::External`). 자동으로 뜬 에이전트가 승인을
-/// 우회하지 않는다는 원칙은 퀴즈에도 적용된다 — `goal_run/tick.rs:161`과 같은 이유다.
+/// 우회하지 않는다는 원칙은 퀴즈에도 적용된다.
 async fn run_quiz_schedule(app: &tauri::AppHandle, pool: &sqlx::SqlitePool, sched: &db::Schedule) {
     let payload: QuizPayload = match serde_json::from_str(&sched.payload) {
         Ok(p) => p,
@@ -283,106 +263,6 @@ async fn run_quiz_schedule(app: &tauri::AppHandle, pool: &sqlx::SqlitePool, sche
     }
 }
 
-/// payload의 repo를 확정한다 — 비어 있으면 가장 최근 작업의 저장소로 대체한다.
-/// 그것마저 없으면 `None`(작업을 만들 자리가 없으니 이번 회차는 건너뛴다).
-async fn resolve_retro_repo(
-    pool: &sqlx::SqlitePool,
-    payload_repo: &str,
-) -> anyhow::Result<Option<String>> {
-    if !payload_repo.is_empty() {
-        return Ok(Some(payload_repo.to_string()));
-    }
-    db::latest_task_repo(pool).await
-}
-
-/// `kind="retro"` 실행 — 지난주 회고를 쓸 헤드리스 작업을 생성한다(설계 0054 DR-5).
-///
-/// **대상은 이번 주가 아니라 직전 주다.** 진행 중인 주를 회고하면 적재 시점에 수치를 다시
-/// 셀 때 값이 달라진다(`inbox::store`가 그렇게 한다) — 끝난 주만 안정적이다.
-///
-/// 퀴즈와 마찬가지로 승인 대기(`TaskOrigin::External`)를 그대로 둔다. 자동으로 뜬 에이전트가
-/// 승인을 우회하지 않는다는 원칙은 여기에도 적용된다. 그 승인 알림이 곧 주 1회 인사이트
-/// 진입 트리거이기도 하다(설계 0054 DR-6).
-async fn run_retro_schedule(
-    app: &tauri::AppHandle,
-    pool: &sqlx::SqlitePool,
-    sched: &db::Schedule,
-) {
-    let payload: RetroPayload = match serde_json::from_str(&sched.payload) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("스케줄 #{} retro payload 파싱 실패: {e}", sched.id);
-            return;
-        }
-    };
-    let repo = match resolve_retro_repo(pool, payload.repo.trim()).await {
-        Ok(Some(repo)) => repo,
-        Ok(None) => {
-            eprintln!(
-                "스케줄 #{} 회고 생략 — payload.repo가 비었고 최근 작업 저장소도 없다",
-                sched.id
-            );
-            return;
-        }
-        Err(e) => {
-            eprintln!("스케줄 #{} 최근 작업 저장소 조회 실패: {e}", sched.id);
-            return;
-        }
-    };
-
-    let now_ts = crate::now();
-    let week_start =
-        retro::week_start_of(now_ts, sched.tz_offset_secs as i64) - retro::WEEK_SECS;
-
-    // 이미 쓴 주는 다시 시키지 않는다 — 작업만 늘고 `inbox::store`가 어차피 거부한다.
-    match retro::get(pool, Some(week_start)).await {
-        Ok(Some(_)) => return,
-        Ok(None) => {}
-        Err(e) => {
-            eprintln!("스케줄 #{} 기존 회고 조회 실패: {e}", sched.id);
-            return;
-        }
-    }
-
-    let facts = match retro::collect_facts(pool, week_start).await {
-        Ok(facts) => facts,
-        Err(e) => {
-            eprintln!("스케줄 #{} 회고 수치 집계 실패: {e}", sched.id);
-            return;
-        }
-    };
-
-    let inbox = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join(retro::generate::INBOX_SUBDIR);
-
-    let Some(instruction) =
-        retro::generate::build_instruction(&facts, &inbox.to_string_lossy())
-    else {
-        // 그 주에 작업이 하나도 없었다. 쓸 것이 없는데 시키면 없는 이야기가 나온다.
-        eprintln!("스케줄 #{} 회고 생략 — 지난주 작업이 없다", sched.id);
-        return;
-    };
-
-    let state = app.state::<AppState>();
-    let agent = if payload.agent.trim().is_empty() {
-        "claude".to_string()
-    } else {
-        payload.agent
-    };
-    let params = commands::CreateTaskParams::headless_terminal(
-        repo,
-        instruction,
-        agent,
-        commands::TaskOrigin::External,
-    );
-    if let Err(e) = commands::create_task_internal(app, &state, params).await {
-        eprintln!("스케줄 #{} 회고 생성 작업 실패: {e}", sched.id);
-    }
-}
-
 /// `kind="reminder"` 실행 — payload의 text를 로컬 OS 알림으로 띄운다(best-effort).
 async fn run_reminder_schedule(app: &tauri::AppHandle, sched: &db::Schedule) {
     let payload: ReminderPayload = match serde_json::from_str(&sched.payload) {
@@ -396,7 +276,7 @@ async fn run_reminder_schedule(app: &tauri::AppHandle, sched: &db::Schedule) {
     let _ = app
         .notification()
         .builder()
-        .title("Praxis 리마인더")
+        .title("Dojang 리마인더")
         .body(&payload.text)
         .show();
 }

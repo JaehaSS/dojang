@@ -80,7 +80,7 @@ fn create_project_window<R: Runtime>(
     opening: Arc<Opening>,
 ) -> Result<ProjectEditorInfo, String> {
     let title = format!(
-        "Praxis Project Editor — {}",
+        "Dojang Project Editor — {}",
         root.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("Project")

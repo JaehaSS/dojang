@@ -1,14 +1,24 @@
-import { memo, useCallback, useLayoutEffect, useReducer, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState, type ReactNode } from "react";
 import type { SubagentThread } from "../../lib/activity";
-import { isConversationNearBottom } from "./conversationScroll";
+import {
+  captureScrollAnchor,
+  isConversationNearBottom,
+  restoreScrollAnchor,
+  type ConversationScrollAnchor,
+} from "./conversationScroll";
 import { Icon } from "./icons";
 import { Markdown } from "./Markdown";
+import { TranslatableReply, isReplyTranslateShortcut, type ReplyHighlights } from "./MessageTranslation";
+import { isMostlyKorean } from "../../lib/translate";
 import { SubagentCard } from "./SubagentCard";
 import { fmtAge } from "../../lib/usage";
 import { useQuizGate } from "../../lib/use-quiz-gate";
 import { InsightCard } from "../InsightCard";
 import { QuizPanel } from "../QuizPanel";
 import { QuizReviewPanel } from "../QuizReviewPanel";
+import type { ToolOutputContent } from "../../lib/ipc";
+import { normalizeToolOutputContents } from "../../lib/tool-output-media";
+import { ToolOutput } from "./ToolOutput";
 
 /** `inherited`는 모든 role에 붙는다 — 이어받기 체인에서 **다른 작업**의 이벤트임을 표시하고,
  *  뷰는 이 플래그로 흐리게 그린다(살짝, 눈에 거슬리지 않게). eventToItems가 원본 이벤트의
@@ -19,6 +29,7 @@ export type ConvoItem =
   | { role: "text"; text: string; streamId?: string; complete?: boolean; parentId?: string; inherited?: boolean }
   | { role: "tool"; name: string; summary: string; toolId?: string; parentId?: string; inherited?: boolean }
   | { role: "tool_result"; summary: string; is_error: boolean; toolUseId?: string; parentId?: string; inherited?: boolean }
+  | { role: "tool_output"; contents: ToolOutputContent[]; toolUseId: string; parentId?: string; inherited?: boolean }
   /** 서브 에이전트 실행 모델 관측 — 렌더용이 아니라 카드 헤더 칩의 원천이다. */
   | { role: "subagent_model"; parentId: string; model: string; inherited?: boolean }
   | { role: "meta"; cost: number; turns: number; tokensIn: number; tokensOut: number; inherited?: boolean }
@@ -58,6 +69,7 @@ export type ConvoEventLike = {
   tool_id?: string;
   tool_use_id?: string;
   parent_id?: string;
+  contents?: ToolOutputContent[];
   /** 이어받기 체인에서 원본 작업(들)로부터 물려받은 이벤트인가 — `commands.rs::inherited_convo_history`가 박는다.
    *  현재 작업 id로 실행하면 엉뚱한 워크트리를 건드리므로, 이 이벤트에 걸린 파괴적/작업 귀속 동작은 잠가야 한다. */
   inherited?: boolean;
@@ -172,6 +184,10 @@ const mapConvoEvent = (
           parentId: ev.parent_id,
         },
       ];
+    case "tool_output":
+      if (!ev.tool_use_id) return [];
+      const contents = normalizeToolOutputContents(ev.contents);
+      return contents.length ? [{ role: "tool_output", toolUseId: ev.tool_use_id, contents, parentId: ev.parent_id }] : [];
     case "subagent_model":
       // 아이템으로 만들되 대화에 그려지지는 않는다 — 서브 에이전트 폴드가 카드 칩으로 접는다.
       if (!ev.parent_id || !ev.model) return [];
@@ -242,7 +258,13 @@ interface Props {
    * 앙상블·서브 에이전트 뷰는 같은 컴포넌트를 쓰지만 사람이 기다리는 자리가 아니다.
    */
   waitTaskId?: number | null;
+  /** 영어 답변에 `번역` 버튼을 달고 ⌥⌘J를 받는다. 사람이 읽는 메인 대화에서만 켠다. */
+  translatable?: boolean;
 }
+
+/** 번역을 달 답변인가 — 스트리밍이 끝났고 한국어로 쓰이지 않았다. */
+const replyReady = (it: ConvoItem, isLast: boolean, busy: boolean) =>
+  it.role === "text" && (it.complete ?? (!busy || !isLast));
 
 interface ConversationScrollState {
   scrollTop: number;
@@ -298,6 +320,7 @@ export const ConversationView = memo(function ConversationView({
   hidden = false,
   onAskSeparately,
   waitTaskId = null,
+  translatable = false,
 }: Props) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const shouldFollowRef = useRef(true);
@@ -308,6 +331,10 @@ export const ConversationView = memo(function ConversationView({
     new Map<number | string, ConversationScrollState>(),
   );
   const waitCardObserverRef = useRef<ResizeObserver | null>(null);
+  /** 스크롤할 때마다 잡아 두는 보던 자리. 폭이 바뀐 뒤 이것으로 되돌린다. */
+  const scrollAnchorRef = useRef<ConversationScrollAnchor | null>(null);
+  /** 보던 자리를 잡았을 때의 폭. 이 값과 다르면 줄바꿈이 이미 바뀐 뒤다. */
+  const anchorWidthRef = useRef(0);
 
   // 렌더 윈도우 — 세션별 확장량은 ref에 남기고 확장은 강제 리렌더로 반영한다.
   // state로 두면 세션 전환마다 초기화 타이밍을 맞춰야 하지만, ref는 키로 읽으므로 그럴 필요가 없다.
@@ -315,6 +342,36 @@ export const ConversationView = memo(function ConversationView({
   const [, bumpWindow] = useReducer((n: number) => n + 1, 0);
   /** 확장 직전 scrollHeight — 위쪽에 붙은 만큼 scrollTop을 밀어 보던 위치를 고정한다. */
   const expandAnchorRef = useRef<number | null>(null);
+
+  // 펼친 번역 — 전체 기준 절대 인덱스. 세션이 바뀌면 비운다(인덱스는 대화마다 다르다).
+  const [openTranslations, setOpenTranslations] = useState<ReadonlySet<number>>(() => new Set());
+  useEffect(() => setOpenTranslations(new Set()), [conversationId]);
+  const toggleTranslation = useCallback((index: number) => {
+    setOpenTranslations((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(index)) next.add(index);
+      return next;
+    });
+  }, []);
+  const translateTargetRef = useRef({ items, busy });
+  translateTargetRef.current = { items, busy };
+  useEffect(() => {
+    if (!translatable || hidden) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || !isReplyTranslateShortcut(e)) return;
+      const { items: all, busy: running } = translateTargetRef.current;
+      for (let index = all.length - 1; index >= 0; index -= 1) {
+        const it = all[index];
+        if (it.role !== "text" || it.parentId || isMostlyKorean(it.text)) continue;
+        if (!replyReady(it, index === all.length - 1, running)) continue;
+        e.preventDefault();
+        toggleTranslation(index);
+        return;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [translatable, hidden, toggleTranslation]);
 
   const windowKey = conversationId ?? "";
   const windowSize = windowByConversationRef.current.get(windowKey) ?? INITIAL_WINDOW;
@@ -352,6 +409,30 @@ export const ConversationView = memo(function ConversationView({
     });
     observer.observe(node);
     waitCardObserverRef.current = observer;
+  }, []);
+
+  // 대화 영역 자체의 높이도 버튼 하나로 바뀐다 — 아래 컴포저·대기열·승인 바가 자라면 영역이 줄어드는데,
+  // 브라우저는 scrollTop을 그대로 두므로 하단을 보던 사람에게는 마지막 답변이 그만큼 가려져 화면이 위로
+  // 튄 것처럼 보인다. 스크롤 이벤트도 나지 않아 follow 판정이 이를 알 길이 없다. 따라가던 중이면 다시 붙인다.
+  //
+  // 폭도 마찬가지다 — 코드 열이 열리고 닫히면(팝아웃·팝인 포함) 줄바꿈이 달라져 같은 scrollTop이
+  // 다른 문단을 가리킨다. WKWebView에는 스크롤 앵커링이 없으므로, 위로 읽어 올라가 있던 중이면
+  // 보던 항목을 같은 자리에 다시 놓는다.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (container.clientHeight === 0) return;
+      const widthChanged = container.clientWidth !== anchorWidthRef.current;
+      anchorWidthRef.current = container.clientWidth;
+      if (shouldFollowRef.current) {
+        container.scrollTop = container.scrollHeight;
+        return;
+      }
+      if (widthChanged) restoreScrollAnchor(container, scrollAnchorRef.current);
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
   }, []);
 
   useLayoutEffect(() => {
@@ -393,6 +474,8 @@ export const ConversationView = memo(function ConversationView({
     }
     if (activeConversationRef.current !== conversationId) {
       activeConversationRef.current = conversationId;
+      // 항목 DOM은 인덱스 key로 재사용된다 — 이전 대화에서 잡은 자리는 이 대화의 것이 아니다.
+      scrollAnchorRef.current = null;
       const savedState =
         conversationId == null
           ? undefined
@@ -416,6 +499,10 @@ export const ConversationView = memo(function ConversationView({
     if (hidden || restoringScrollRef.current) return;
     const container = scrollContainerRef.current;
     if (!container) return;
+    // 폭이 바뀌어 줄바꿈이 끝난 뒤 들어온 스크롤(길이가 줄어 생긴 clamp)은 사용자가 움직인 것이
+    // 아니다. 여기서 자리를 다시 잡으면 되돌릴 기준이 사라진다 — ResizeObserver가 먼저 정리한다.
+    if (container.clientWidth !== anchorWidthRef.current) return;
+    scrollAnchorRef.current = captureScrollAnchor(container);
     const savedState =
       conversationId == null
         ? undefined
@@ -546,6 +633,7 @@ export const ConversationView = memo(function ConversationView({
               </div>
             );
           }
+          if (it.role === "tool_output") return <div key={i} className={dimCls || undefined}><ToolOutput contents={it.contents} onOpenLink={onOpenLink} /></div>;
           if (it.role === "meta") {
             // claude는 달러+턴수, codex는 토큰만 제공 — 있는 것을 보여준다.
             const kf = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
@@ -590,16 +678,36 @@ export const ConversationView = memo(function ConversationView({
           // 서브 스레드로 흡수되지만, 부모 스폰을 못 본 이벤트는 여기까지 흘러든다 —
           // 명시적으로 좁히지 않으면 아래 fallthrough가 그것까지 본문으로 그리려 든다.
           if (it.role === "subagent_model") return null;
+          // 스트리밍 중인 것은 마지막 항목뿐이다 — 그것만 아직 자라는 버퍼다.
+          const stable = it.complete ?? (!busy || offset < visibleItems.length - 1);
+          const renderMarkdown = (source: string, highlights?: ReplyHighlights) => (
+            <Markdown
+              text={source}
+              onOpenLink={onOpenLink}
+              onLinkMenu={onLinkMenu}
+              stable={stable}
+              highlights={highlights?.phrases}
+              renderHighlight={highlights?.render}
+            />
+          );
+          const askAction = onAskSeparately && <SeparateQuestionAction text={it.text} onAsk={onAskSeparately} />;
           return (
             <div key={i} className={`max-w-[88%] text-md text-text ${dimCls}`.trim()}>
-              {/* 스트리밍 중인 것은 마지막 항목뿐이다 — 그것만 아직 자라는 버퍼다. */}
-              <Markdown
-                text={it.text}
-                onOpenLink={onOpenLink}
-                onLinkMenu={onLinkMenu}
-                stable={it.complete ?? (!busy || offset < visibleItems.length - 1)}
-              />
-              {onAskSeparately && <SeparateQuestionAction text={it.text} onAsk={onAskSeparately} />}
+              {translatable && !isMostlyKorean(it.text) ? (
+                <TranslatableReply
+                  text={it.text}
+                  open={openTranslations.has(i)}
+                  ready={replyReady(it, i === items.length - 1, busy)}
+                  onToggle={() => toggleTranslation(i)}
+                  renderMarkdown={renderMarkdown}
+                  actions={askAction}
+                />
+              ) : (
+                <>
+                  {renderMarkdown(it.text)}
+                  {askAction}
+                </>
+              )}
             </div>
           );
         })}

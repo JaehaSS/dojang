@@ -6,6 +6,7 @@ use praxis_lib::db;
 use praxis_lib::runner::auth::RunnerAuth;
 use praxis_lib::runner::config::{ExecutionPolicy, RunnerConfig};
 use praxis_lib::runner::events::EventHub;
+use praxis_lib::runner::actions::RunnerTaskActions;
 use praxis_lib::runner::http::{self, RunnerHttpState};
 use praxis_lib::runner::queue::QueueWorker;
 use tower::ServiceExt;
@@ -18,7 +19,7 @@ const TOKEN: &str = "abababababababababababababababababababababababababababababa
 #[tokio::test]
 async fn runner_review_routes_persist_host_owned_evidence() {
     let fixture = fixture().await;
-    let app = http::router(fixture.state.clone());
+    let app = http::mobile_surface_router(fixture.state.clone(), std::sync::Arc::new(RunnerTaskActions));
     let preview_response = app
         .clone()
         .oneshot(paths::request(
@@ -81,7 +82,7 @@ async fn review_routes_enforce_auth_and_task_root_ownership() {
     )
     .await
     .unwrap();
-    let app = http::router(fixture.state.clone());
+    let app = http::mobile_surface_router(fixture.state.clone(), std::sync::Arc::new(RunnerTaskActions));
     let unauthorized = app
         .clone()
         .oneshot(paths::request(
@@ -129,7 +130,7 @@ struct Fixture {
 #[tokio::test]
 async fn approval_inspection_enforces_auth_and_both_path_roots_without_writes() {
     let fixture = fixture().await;
-    let app = http::router(fixture.state.clone());
+    let app = http::mobile_surface_router(fixture.state.clone(), std::sync::Arc::new(RunnerTaskActions));
     let unauthorized = app.clone().oneshot(paths::request(TOKEN, Method::GET, "/v1/tasks/1/approval-status", None, false)).await.unwrap();
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM task_events").fetch_one(&fixture.state.pool).await.unwrap();
@@ -201,7 +202,7 @@ async fn fixture() -> Fixture {
 #[tokio::test]
 async fn repair_routes_require_auth_and_both_authorized_paths() {
     let fixture = fixture().await;
-    let app = http::router(fixture.state.clone());
+    let app = http::mobile_surface_router(fixture.state.clone(), std::sync::Arc::new(RunnerTaskActions));
     let outside = paths::temporary_dir("repair-outside");
     let body = serde_json::json!({"session_id":"not-started"});
     for (method, suffix) in [(Method::GET,""),(Method::POST,""),(Method::POST,"/run"),(Method::POST,"/accept"),(Method::POST,"/cancel")] {

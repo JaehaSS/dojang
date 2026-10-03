@@ -19,27 +19,8 @@
 
 ## 그 외 — 서드파티 에셋 없음
 
-`src/assets/village/`·`src/assets/agents/`의 픽셀
-자산은 전부 `tools/sprites/`의 굽기 스크립트가 코드로 생성한 것이라 라이선스 의무가 없다.
-
-| 산출물 | 굽는 스크립트 |
-|---|---|
-| `src/assets/village/*.png` (지면·건물 3겹) | `tools/sprites/build-village-scene.py` |
-| `src/assets/agents/praxis-agent-sprites.png` (역할 6종 × 프레임 7) | `tools/sprites/build-village-characters.py` |
-
-팔레트는 `src/index.css`의 `.dark` 토큰에서 가져온다. 자산이 UI에서 떠 보이면 그쪽을
-먼저 볼 것.
-
-## 왜 사는 대신 그렸나
-
-계획 0042는 LimeZu 팩 3종($5~7)을 크롭할 예정이었다. 구매하지 않기로 하면서 CC0 대안인
-[Kenney Tiny Town](https://kenney.nl/assets/tiny-town)을 받아 확인했는데 **중세 RPG 마을**
-이라 책상·모니터·회의 테이블이 하나도 없었다 — 소재가 없어 "작업 중 캐릭터는 책상 앞에
-앉은 프레임"을 만들 수 없다. 팩을 섞는 쪽도 명암·채도·비율이 어긋나는 무료 에셋 조합의
-고질적 실패 모드에 걸린다.
-
-직접 찍으면 팔레트가 UI와 한 톤이고, 라이선스 조건도 사라진다. 저해상도(28×56 도트)라
-손 도트 작업과 달리 파라미터화가 되는 것이 결정적이었다.
+`src/assets/village/`·`src/assets/agents/`(어항/마을/스튜디오 씬용 픽셀 자산)와 그 굽기
+스크립트 `tools/sprites/`는 씬 제거와 함께 걷어냈다. 파일 타입 아이콘 외에는 서드파티 에셋이 없다.
 
 ## 나중에 서드파티 팩을 도입한다면
 

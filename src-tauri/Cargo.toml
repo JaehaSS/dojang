@@ -1,6 +1,6 @@
 [package]
 name = "praxis"
-version = "0.1.0"
+version = "1.0.0"
 description = "Praxis — AI agent orchestration IDE"
 authors = ["sinjaeha"]
 edition = "2021"
@@ -57,7 +57,7 @@ parquet = { version = "60.0.0", default-features = false, features = ["snap", "z
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.27", features = ["signal", "resource"] }
 
-# 텔레그램 봇 토큰 등 시크릿 저장 — 현재 배포 플랫폼(macOS)의 OS 키체인만 지원.
+# Gmail·사용량 토큰 등 시크릿 저장 — 현재 배포 플랫폼(macOS)의 OS 키체인만 지원.
 # 크로스플랫폼 확장 시 windows-native-keyring-store 등을 각 target cfg에 추가.
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.0", features = ["keychain"] }

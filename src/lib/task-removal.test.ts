@@ -143,7 +143,7 @@ describe("removalDetail", () => {
   });
 
   it("종료 상태는 워크트리도 브랜치도 건드리지 않는다", () => {
-    expect(removalDetail({ state: "Done" })).toBe("세션 이력과 Praxis가 보관한 대화 원본·첨부를 삭제합니다.");
+    expect(removalDetail({ state: "Done" })).toBe("세션 이력과 Dojang이 보관한 대화 원본·첨부를 삭제합니다.");
   });
 
   it("직접 실행에는 지울 워크트리를 그리지 않는다 — 문구가 거짓이면 아무도 안 읽는다", () => {

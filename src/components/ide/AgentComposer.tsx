@@ -20,11 +20,11 @@ import { CaptureAttachmentChips } from "./CaptureAttachmentChips";
 import { useSessionCaptureAttachments } from "./useSessionCaptureAttachments";
 import { AgentComposerActions } from "./AgentComposerActions";
 import { useTextareaUndo } from "./useTextareaUndo";
+import { EnglishPromptAssistPanel, useEnglishPromptAssist } from "./useEnglishPromptAssist";
 import { pushCapture } from "../../lib/designmode/store";
 import { subscribeComposerFocus } from "../../lib/composer-focus";
 import { findImageFile, blobToBase64 } from "../../lib/paste-image";
 import { getTransport } from "../../lib/transport";
-import { VaultReferences } from "../knowledge-vault/VaultReferences";
 
 interface Props {
   value: string;
@@ -48,7 +48,6 @@ interface Props {
   gauge?: ReactNode;
   /** 중앙 diff가 보일 때 외부 포커스 요청을 받지 않는다. */
   active?: boolean;
-  onVaultMutationPendingChange?: (pending: boolean) => void;
   /** 초안이 사는 세션 좌표 — 세션이 바뀌면 되돌리기 스택을 버린다. */
   draftKey?: string | null;
   label?: string;
@@ -71,7 +70,6 @@ export function AgentComposer({
   host,
   gauge,
   active = true,
-  onVaultMutationPendingChange,
   draftKey = null,
   label,
   sendLabel,
@@ -80,13 +78,16 @@ export function AgentComposer({
 }: Props) {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const undo = useTextareaUndo({ value, setValue: onChange, ref: taRef, resetKey: draftKey });
-  const captureAttachments = useSessionCaptureAttachments({ taskId, host, value, onSend });
+  const assist = useEnglishPromptAssist({ value, onChange, draftKey });
+  const clearAssist = assist.clear;
+  // 보냈으면 제안·원문 패널을 걷는다. 전송 가드에 걸려(false) 초안이 남았으면 그대로 둔다.
+  const sendAndClearAssist = useCallback(async (text: string, imagePaths: string[]) => {
+    const result = await onSend(text, imagePaths);
+    if (result !== false) clearAssist();
+    return result;
+  }, [onSend, clearAssist]);
+  const captureAttachments = useSessionCaptureAttachments({ taskId, host, value, onSend: sendAndClearAssist });
   const [pasteError, setPasteError] = useState<string | null>(null);
-  const [vaultMutationPending, setVaultMutationPending] = useState(false);
-  const handleVaultMutationPending = useCallback((pending: boolean) => {
-    setVaultMutationPending(pending);
-    onVaultMutationPendingChange?.(pending);
-  }, [onVaultMutationPendingChange]);
 
   // @파일 멘션 드롭다운
   const [menuOpen, setMenuOpen] = useState(false);
@@ -229,6 +230,8 @@ export function AgentComposer({
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (undo.onKeyDown(e)) return;
+    // ⌘J 영어로 다듬기 — 조합 중이면 스스로 무시한다.
+    if (assist.onKeyDown(e)) return;
     // Korean/Japanese composition confirmation must not submit (including Safari keyCode 229).
     if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     // /스킬 드롭다운 우선 (↑↓/Tab/Esc — Enter는 전송으로 fallthrough).
@@ -251,7 +254,7 @@ export function AgentComposer({
       return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (vaultMutationPending || disabled || !value.trim()) return;
+      if (disabled || !value.trim()) return;
       void captureAttachments.send();
       return;
     }
@@ -266,7 +269,6 @@ export function AgentComposer({
     <div className="relative">
       {label && <label htmlFor={`agent-composer-${draftKey ?? taskId}`} className="mb-1 block text-xs text-text-secondary">{label}</label>}
       {attachments}
-      <VaultReferences host={host} repo={repo} query={value} clientRef={`vault-followup:${taskId}`} taskId={taskId} onVaultMutationPendingChange={handleVaultMutationPending} />
       <SkillDropdown open={skillOpen} items={skills} sel={skillSel} onHover={setSkillSel} onSelect={insertSkill} />
       <MentionDropdown
         open={menuOpen}
@@ -281,6 +283,7 @@ export function AgentComposer({
         captures={captureAttachments.captures}
         onRemove={captureAttachments.remove}
       />
+      <EnglishPromptAssistPanel state={assist.state} onDismiss={assist.clear} />
       {pasteError && (
         <div className="mb-1 text-xs text-status-failed">이미지 첨부 실패: {pasteError}</div>
       )}
@@ -291,7 +294,7 @@ export function AgentComposer({
           ref={taRef}
           rows={1}
           className="flex-1 bg-transparent outline-none text-md text-text placeholder:text-text-muted resize-none leading-relaxed max-h-52"
-          placeholder="에이전트에게 질의 — Enter 전송 · Shift+Enter 줄바꿈 · @파일 · /스킬 · ⌘L 선택 코드 · 이미지 붙여넣기 · ↑↓ 히스토리"
+          placeholder="에이전트에게 질의 — Enter 전송 · Shift+Enter 줄바꿈 · @파일 · /스킬 · ⌘L 선택 코드 · 이미지 붙여넣기 · ↑↓ 히스토리 · ⌘J 영어로"
           value={value}
           onChange={undo.onChange}
           onKeyDown={onKeyDown}
@@ -302,10 +305,10 @@ export function AgentComposer({
         />
         {gauge}
         <AgentComposerActions
-          canSend={Boolean(value.trim()) && !vaultMutationPending && !disabled}
+          canSend={Boolean(value.trim()) && !disabled}
           sendLabel={sendLabel}
           onInterrupt={onInterrupt}
-          onSend={() => { if (!vaultMutationPending && !disabled) void captureAttachments.send(); }}
+          onSend={() => { if (!disabled) void captureAttachments.send(); }}
         />
       </div>
     </div>

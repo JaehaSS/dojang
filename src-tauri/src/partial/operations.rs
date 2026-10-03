@@ -44,7 +44,7 @@ pub fn apply(
     reject_committed(&selected)?;
     let unselected = hunks_to_revert(all_hunks, selected_ids);
     let checkpoint = worktree
-        .checkpoint_commit("praxis: pre-partial")
+        .checkpoint_commit("dojang: pre-partial")
         .map_err(|error| PartialError::Git(error.to_string()))?;
 
     let mut failed = Vec::new();

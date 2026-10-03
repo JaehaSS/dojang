@@ -19,7 +19,6 @@ const h = vi.hoisted(() => ({
   }>,
   nextPaneId: 0,
   references: new Map<string, { complete: (targets: LspTarget[]) => void }>(),
-  graphPaths: [] as Array<string | null>,
 }));
 
 const target = (path: string): LspTarget => ({
@@ -48,7 +47,6 @@ vi.mock("./EditorPane", async () => {
       onNavigateTarget?: (target: LspTarget, origin: Record<string, unknown>) => void;
       beginReferences?: () => number;
       onReferences?: (targets: LspTarget[], sourcePath: string, request: number, origin?: Record<string, unknown>) => void;
-      graphTool?: { onNeighborhood: (source: Record<string, unknown>) => void };
       onSelect: (key: string) => void;
       onSplit: (axis: "row" | "column") => void;
       onCloseGroup?: () => void;
@@ -112,10 +110,6 @@ vi.mock("./EditorPane", async () => {
             });
           },
         }),
-        React.createElement("button", {
-          "aria-label": `graph-${active}`,
-          onClick: () => props.graphTool?.onNeighborhood({ path: active, dirty: false, ...position(active) }),
-        }),
       );
     },
   };
@@ -127,28 +121,6 @@ vi.mock("./ReferencesPanel", () => ({
       <button aria-label="open-reference" onClick={() => onOpen(targets[0])} />
     </div>
   ),
-}));
-
-vi.mock("./CodeGraphView", () => ({
-  CodeGraphView: ({ onOpen }: { onOpen: (node: { relPath: string; line: number; character: number }) => void }) => (
-    <button aria-label="open-graph-node" onClick={() => onOpen({ relPath: "b.ts", line: 21, character: 2 })} />
-  ),
-}));
-
-vi.mock("./useCodeGraphPanel", () => ({
-  useCodeGraphPanel: (options: { path: string | null }) => {
-    h.graphPaths.push(options.path);
-    return {
-      impact: null,
-      neighborhood: { nodes: [], edges: [] },
-      error: null,
-      invalidate: vi.fn(),
-      index: async () => undefined,
-      inspect: async () => undefined,
-      inspectNeighborhood: async () => undefined,
-      close: vi.fn(),
-    };
-  },
 }));
 
 vi.mock("../../lib/ipc", async (original) => ({
@@ -203,7 +175,6 @@ beforeEach(() => {
   h.deliveries.length = 0;
   h.nextPaneId = 0;
   h.references.clear();
-  h.graphPaths.length = 0;
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -280,18 +251,12 @@ describe("EditorSplitView navigation integration", () => {
     expect(h.reveals[h.reveals.length - 1]).toMatchObject({ path: "a.ts", restore: true });
   });
 
-  it("routes a reference and a graph node through navigation while retaining the graph anchor", async () => {
+  it("routes a reference through navigation", async () => {
     await render(["a.ts", "b.ts"]);
     await click('[aria-label="references-a.ts"]');
     await act(async () => h.references.get("a.ts")?.complete([target("b.ts")]));
     await click('[aria-label="open-reference"]');
 
     expect(Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "뒤로")?.disabled).toBe(false);
-
-    await click('[aria-label="graph-b.ts"]');
-    await click('[aria-label="select-b.ts-a.ts"]');
-    await click('[aria-label="open-graph-node"]');
-
-    expect(h.graphPaths[h.graphPaths.length - 1]).toBe("b.ts");
   });
 });

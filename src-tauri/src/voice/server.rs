@@ -327,7 +327,7 @@ fn spawn(
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    crate::usage::home_dir()
 }
 
 fn log_path() -> Option<PathBuf> {

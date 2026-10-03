@@ -136,7 +136,7 @@ export function describeConnection(state: ConnectionState, nowSecs: number): Ban
       return {
         tone: "awaiting",
         title: "세션이 만료되었습니다",
-        detail: "데스크톱 Praxis 설정에서 QR을 다시 스캔하세요.",
+        detail: "데스크톱 Dojang 설정에서 QR을 다시 스캔하세요.",
         retryable: true,
       };
     case "error":

@@ -136,7 +136,6 @@ pub async fn preview_workbench_send(
         app.clone(),
         pool_of(&state)?,
         state.convo_active.clone(),
-        state.capture_gates(),
         task_id,
         task.repo,
         task.worktree_path,

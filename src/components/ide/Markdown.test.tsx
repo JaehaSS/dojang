@@ -75,6 +75,45 @@ describe("Markdown plain file paths", () => {
     expect(html).toContain(">원장</a>");
   });
 
+  it("links bare file names in a list under a directory lead-in", () => {
+    const html = renderToStaticMarkup(
+      <Markdown
+        text={[
+          "**만든 문서** (`~/Documents/째하 지식창고/개인/웹어셈블리/`)",
+          "- `README.md`: 목차",
+          "- `웹어셈블리-구조.md:12`: 구조",
+        ].join("\n")}
+        onOpenLink={() => {}}
+      />,
+    );
+
+    const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map((m) => decodeURIComponent(m[1]));
+    expect(hrefs).toEqual([
+      "~/Documents/째하 지식창고/개인/웹어셈블리/README.md",
+      "~/Documents/째하 지식창고/개인/웹어셈블리/웹어셈블리-구조.md:12",
+    ]);
+  });
+
+  it("does not carry a directory past the list that follows it", () => {
+    const html = renderToStaticMarkup(
+      <Markdown
+        text={"`docs/plans/` 아래:\n\n- `a.md`\n\n다른 문단의 `package.json`"}
+        onOpenLink={() => {}}
+      />,
+    );
+
+    expect(html).toContain('href="docs/plans/a.md"');
+    expect(html.match(/<a /g)).toHaveLength(1);
+  });
+
+  it("leaves bare file names alone without a directory", () => {
+    const html = renderToStaticMarkup(
+      <Markdown text={"- `README.md`: 목차"} onOpenLink={() => {}} />,
+    );
+
+    expect(html).not.toContain("<a");
+  });
+
   it("makes no link when the host cannot open one", () => {
     const html = renderToStaticMarkup(<Markdown text="docs/plans/0014.md 를 보라" />);
 

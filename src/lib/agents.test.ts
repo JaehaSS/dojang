@@ -4,6 +4,7 @@ import {
   badgeLabelFor,
   labelFor,
   normalizeAgentSelection,
+  singleAgentSelection,
 } from "./agents";
 
 describe("AGENT_PRESETS", () => {
@@ -64,5 +65,13 @@ describe("badgeLabelFor", () => {
       expect(p.badge.length).toBeGreaterThan(0);
       expect(badgeLabelFor(p.key)).toBe(p.badge);
     }
+  });
+});
+
+describe("singleAgentSelection", () => {
+  it("앙상블 시절 저장된 다중 선택은 첫 에이전트만 남긴다", () => {
+    expect(singleAgentSelection(["codex", "claude"])).toEqual(["codex"]);
+    expect(singleAgentSelection(["gemini", "codex"])).toEqual(["agy"]);
+    expect(singleAgentSelection([])).toEqual(["claude"]);
   });
 });

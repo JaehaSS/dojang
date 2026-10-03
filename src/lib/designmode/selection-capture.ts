@@ -58,40 +58,6 @@ export function buildSelectionCapture(input: SelectionCaptureInput): DesignCaptu
   };
 }
 
-export interface WikiCaptureInput {
-  taskId: number;
-  /** 창고 안 문서의 절대 경로. 에이전트가 기존 `@파일`과 똑같이 열 수 있어야 한다. */
-  filePath: string;
-  title: string;
-  body: string;
-}
-
-/**
- * 위키 문서 첨부. 에디터 캡처와 **같은 모듈에 둔다** — id의 `seq`를 공유해야 하기 때문이다.
- * 모듈을 나누면 두 카운터가 각자 0부터 세어 `local-42-0`이 겹치고, 칩 하나를 지울 때
- * `removeCapture`가 id로 걸러 남의 칩까지 지운다.
- *
- * 본문이 비어 있어도 null로 돌리지 않는다. 경로만 있어도 에이전트가 파일을 열 수 있으므로
- * 빈 문서를 첨부하는 것이 실패할 이유가 없다.
- */
-export function buildWikiCapture(input: WikiCaptureInput): DesignCaptureRecord {
-  return {
-    id: `${LOCAL_CAPTURE_PREFIX}${input.taskId}-${seq++}`,
-    task_id: input.taskId,
-    source: "wiki",
-    // 제목을 여기 싣는다. 레코드에 이름을 담을 칸이 따로 없고, 위키 블록·칩만 이 값을 읽는다.
-    outer_html: input.title,
-    computed_css: {},
-    bounding_rect: { x: 0, y: 0, width: 0, height: 0 },
-    captured_at: Date.now(),
-    image_path: null,
-    file_path: input.filePath,
-    selection_text: truncateSelection(input.body),
-    selection_start_line: null,
-    selection_end_line: null,
-  };
-}
-
 /**
  * 팝아웃 창이 만든 로컬 캡처 id에 창 스코프(`w`)를 섞는다.
  *

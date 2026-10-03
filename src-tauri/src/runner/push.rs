@@ -133,8 +133,9 @@ pub fn default_key_path() -> PathBuf {
     std::env::var("PRAXIS_RUNNER_VAPID")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".config/praxis/vapid.key")
+            crate::usage::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".config/praxis/vapid.key")
         })
 }
 

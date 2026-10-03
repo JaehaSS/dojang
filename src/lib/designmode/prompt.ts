@@ -33,21 +33,6 @@ function formatEditorCaptureBlock(record: DesignCaptureRecord, index: number): s
   return parts.join("\n");
 }
 
-/**
- * 위키 문서 첨부 — 절대 경로와 본문 발췌.
- *
- * 경로를 먼저 적는다. 발췌는 상한에 걸려 잘릴 수 있고, 그때 에이전트가 이어서 읽을 곳이 경로다.
- */
-function formatWikiCaptureBlock(record: DesignCaptureRecord, index: number): string {
-  const parts = [
-    `[위키 문서 ${index}]`,
-    `제목: ${record.outer_html || "(제목 없음)"}`,
-    `파일: ${record.file_path ?? "(경로 없음)"}`,
-  ];
-  if (record.selection_text) parts.push("본문:", "```markdown", record.selection_text, "```");
-  return parts.join("\n");
-}
-
 /** 클립보드 붙여넣기 캡처 — HTML/CSS 없이 이미지 경로만 전달한다. */
 function formatPastedCaptureBlock(record: DesignCaptureRecord, index: number): string {
   return [
@@ -60,7 +45,6 @@ function formatPastedCaptureBlock(record: DesignCaptureRecord, index: number): s
 /** 캡처 1건 → HTML/CSS 블록(+있으면 이미지 경로). Composer 전송 시 프롬프트에 그대로 삽입한다. */
 export function formatCaptureBlock(record: DesignCaptureRecord, index: number): string {
   if (record.source === "editor") return formatEditorCaptureBlock(record, index);
-  if (record.source === "wiki") return formatWikiCaptureBlock(record, index);
   if (record.source === "paste") return formatPastedCaptureBlock(record, index);
   const parts = [
     `[Design Mode 캡처 ${index}]`,

@@ -23,9 +23,6 @@ fn approval(instruction: &str) -> ApprovalProvenance {
     ApprovalProvenance {
         task_id: 42,
         instruction_digest: decision::provenance::digest(instruction),
-        start_receipts: vec![8, 3, 8],
-        memory_versions: vec![(9, 2), (4, 1), (9, 2)],
-        evidence_checks: vec![12, 5, 12],
         verification_run: Some(decision::provenance::verification_ref(42, 1_700)),
         commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
     }
@@ -45,8 +42,8 @@ fn approval_links_are_typed_deduplicated_and_stable() {
         })
         .collect();
 
-    // fixed 4 + receipts 2 + memory versions 2 + checks 2 + verification 1
-    assert_eq!(actual.len(), 11);
+    // fixed 4 + verification 1
+    assert_eq!(actual.len(), 5);
     assert_eq!(actual[0], ("approved_by", "actor", "local-human"));
     assert!(actual.contains(&("derived_from", "task", "42")));
     assert!(actual.contains(&("generated", "git_commit", approval("x").commit_sha.as_str())));
@@ -97,7 +94,7 @@ async fn assert_counts_and_privacy(pool: &sqlx::SqlitePool) {
         .await
         .unwrap();
     assert_eq!(record_count, 1);
-    assert_eq!(link_count, 11);
+    assert_eq!(link_count, 5);
     let text: String = sqlx::query_scalar(
         "SELECT decision_key_hash || COALESCE(kind, '') || COALESCE(outcome, '') || \
          COALESCE(actor_kind, '') || COALESCE(summary, '') FROM decision_records",
@@ -110,7 +107,7 @@ async fn assert_counts_and_privacy(pool: &sqlx::SqlitePool) {
 
 async fn assert_payload_conflict(pool: &sqlx::SqlitePool, provenance: &ApprovalProvenance) {
     let mut changed = provenance.clone();
-    changed.start_receipts.push(99);
+    changed.verification_run = Some(decision::provenance::verification_ref(42, 1_701));
     let mut conflict_tx = pool.begin().await.unwrap();
     let error = decision::record::record_approval(&mut conflict_tx, &changed, 2_002)
         .await

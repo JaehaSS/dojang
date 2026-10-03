@@ -1,4 +1,4 @@
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::SqlitePool;
 
 pub(crate) const FOLLOWUP_OBSERVATION_STARTED: &str = "followup_observation_started";
 pub(crate) const USER_FOLLOWUP_INPUT_OBSERVED: &str = "user_followup_input_observed";
@@ -23,8 +23,11 @@ impl ConversationInputOrigin {
     }
 }
 
+/// 파일 메모리가 실제 내용(사용자·레포 `Capped` 중 본문이 있는 쪽)과 함께 주입됐다는 마커.
+/// "메모리 안내 후 재설명 없음" 인사이트(`insights::outcomes`)가 이 이벤트의 존재로 대상
+/// 작업의 자격을 가른다 — 없으면 애초에 메모리를 준 적이 없으니 재설명 여부를 셀 수 없다.
 pub(crate) async fn insert_observation_start(
-    tx: &mut Transaction<'_, Sqlite>,
+    pool: &SqlitePool,
     task_id: i64,
     now: i64,
 ) -> anyhow::Result<()> {
@@ -32,7 +35,7 @@ pub(crate) async fn insert_observation_start(
         .bind(task_id)
         .bind(now)
         .bind(FOLLOWUP_OBSERVATION_STARTED)
-        .execute(&mut **tx)
+        .execute(pool)
         .await?;
     Ok(())
 }

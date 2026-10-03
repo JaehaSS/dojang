@@ -8,7 +8,7 @@ import {
   channelPlacement,
   floatingChannelMinCenter,
 } from "./activity-rail";
-import { MIN_DEBATE_SESSION_WIDTH } from "./workspace-split-width";
+import { debateSessionWidth, MIN_DEBATE_SESSION_WIDTH } from "./workspace-split-width";
 
 const at = (input: Partial<Parameters<typeof channelPlacement>[0]>) =>
   channelPlacement({ centerWidth: 1072, pinned: true, codeOpen: false, ...input });
@@ -45,6 +45,11 @@ describe("channelPlacement", () => {
     expect(at({ centerWidth: 971, sessionMin: MIN_DEBATE_SESSION_WIDTH })).toBe("hidden");
     // 같은 폭이 단일 세션에서는 자리가 있다 — 임계는 세션 열의 최소 폭에서 나온다.
     expect(at({ centerWidth: 971 })).toBe("floating");
+  });
+
+  it("3자 토론이면 면이 셋이라 임계가 1292로 오른다", () => {
+    expect(floatingChannelMinCenter(debateSessionWidth(3))).toBe(1292);
+    expect(at({ centerWidth: 1291, sessionMin: debateSessionWidth(3) })).toBe("hidden");
   });
 
   it("판정은 창 폭이 아니라 중앙 잔여 폭이다 — 사이드바·트리를 켜면 같은 창도 자리가 없다", () => {

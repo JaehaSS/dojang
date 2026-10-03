@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { Task } from "../../lib/ipc";
-import { Sidebar, WIKI_LOCAL_ONLY_REASON } from "./Sidebar";
+import { Sidebar } from "./Sidebar";
 
 const task = (overrides: Partial<Task> = {}): Task => ({
   id: 7,
@@ -22,12 +22,14 @@ const renderSidebar = (
   collapsed = false,
   activeState: Task["state"] = "Running",
   awaitingKind: Task["awaiting_kind"] = null,
+  insightsUnread = 0,
 ): string =>
   renderToStaticMarkup(
     <Sidebar
       browsingHost="local"
       onPickBrowsingHost={() => {}}
       view="home"
+      insightsUnread={insightsUnread}
       onNewTask={() => {}}
       onQuickLink={() => {}}
       collapsed={collapsed}
@@ -93,61 +95,18 @@ describe("Sidebar session task navigation", () => {
     expect(html).not.toContain("완료된 작업");
   });
 
-  it("Orchestrator Views는 일상 사용 뷰 2개만 노출한다", () => {
+  it("Orchestrator Views는 인사이트만 노출한다", () => {
     const html = renderSidebar();
 
-    for (const label of ["인사이트", "Wiki"]) {
-      expect(html).toContain(label);
-    }
+    expect(html).toContain("인사이트");
     // 설계 0016 — 자기개선은 메모리 탭으로, 관리 뷰 3종은 설정 탭으로 이동.
     // ADR 0191 — 파일 채널은 내려가고, 스킬은 설정 탭이 된다.
     // 설계 2026-09-13 — 메모리 채널도 내려가 Wiki 공간의 필터가 된다.
     // 재탐색 2026-09-13 — 리뷰 채널도 내려가 멀티벤더 리뷰는 세션 안 작업 액션이 된다.
-    for (const label of ["메모리", "자기개선", "MCP 서버", "채널", "스케줄", "파일", "스킬", "리뷰"]) {
+    // 2026-09-28 — Wiki 채널을 지우고 지식·메모리는 설정 탭이 된다.
+    for (const label of ["Wiki", "작업 그래프", "메모리", "자기개선", "MCP 서버", "채널", "스케줄", "파일", "스킬", "리뷰"]) {
       expect(html).not.toContain(label);
     }
-  });
-
-  /** 항목을 지우면 사라진 이유가 어디에도 남지 않는다 — 자리는 지키고 잠근다. */
-  const renderRemoteBrowsing = (): string =>
-    renderToStaticMarkup(
-      <Sidebar
-        browsingHost="remote"
-        onPickBrowsingHost={() => {}}
-        view="home"
-        onNewTask={() => {}}
-        onQuickLink={() => {}}
-        collapsed={false}
-        onToggleCollapse={() => {}}
-        tasks={[]}
-        selectedKey={null}
-        projects={[]}
-        onOpenTask={() => {}}
-        onNewInRepo={() => {}}
-        onDeleteTask={() => {}}
-        onRemoveProject={() => {}}
-        onDiscardOrphans={() => {}}
-      />,
-    );
-
-  it("원격 탐색 호스트에서는 Wiki 진입점을 지우지 않고 잠근다", () => {
-    const html = renderRemoteBrowsing();
-
-    expect(html).toContain("Wiki");
-    expect(html).toContain("disabled");
-    expect(html).toContain("로컬 전용");
-  });
-
-  it("잠긴 Wiki 항목은 왜 잠겼는지를 그 자리에서 밝힌다", () => {
-    expect(renderRemoteBrowsing()).toContain(WIKI_LOCAL_ONLY_REASON);
-  });
-
-  it("로컬 탐색 호스트에서는 Wiki 항목이 잠기지 않는다", () => {
-    const html = renderSidebar();
-
-    expect(html).toContain("Wiki");
-    expect(html).not.toContain("로컬 전용");
-    expect(html).not.toContain(WIKI_LOCAL_ONLY_REASON);
   });
 
   it("왼쪽 사이드바를 접으면 세션 작업 목록도 함께 숨긴다", () => {
@@ -206,6 +165,26 @@ describe("Sidebar session task navigation", () => {
 
     expect(html).not.toContain("text-status-question");
     expect(html).not.toContain("· 검토");
+  });
+});
+
+// 인사이트 항목의 점 — 아직 보지 않은 발견 카드 수(설계 2026-09-28 §4, 슬라이스 T5).
+// 예전 회고 신선도 점(retroUnread)과 같은 자리다.
+describe("Sidebar 인사이트 점", () => {
+  it("보지 않은 카드가 있으면 인사이트 항목에 점을 켠다", () => {
+    const html = renderSidebar(false, "Running", null, 3);
+
+    expect(html).toContain("읽지 않은 발견 카드 3건");
+  });
+
+  it("보지 않은 카드가 없으면 점을 그리지 않는다", () => {
+    const html = renderSidebar(false, "Running", null, 0);
+
+    expect(html).not.toContain("읽지 않은 발견 카드");
+  });
+
+  it("prop을 넘기지 않으면 기본값 0으로 점이 꺼진다", () => {
+    expect(renderSidebar()).not.toContain("읽지 않은 발견 카드");
   });
 });
 

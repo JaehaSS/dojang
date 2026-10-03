@@ -9,6 +9,7 @@ interface Pending {
   requestId: string;
   message: string;
   images: string[];
+  contextKey?: string;
 }
 
 /** One immutable request per host/task until admission is known. A failed network reply is
@@ -37,12 +38,12 @@ export class ConversationSubmitter {
     return "unknown";
   }
 
-  async send(key: string, api: ConversationAdmission, message: string, images: string[]): Promise<void> {
+  async send(key: string, api: ConversationAdmission, message: string, images: string[], contextKey?: string): Promise<void> {
     if (this.active.has(key)) throw new Error("전송 상태를 확인하고 있습니다.");
     this.active.add(key);
     try {
       let request = this.pending.get(key);
-      if (request && (request.message !== message || JSON.stringify(request.images) !== JSON.stringify(images))) {
+      if (request && (request.message !== message || JSON.stringify(request.images) !== JSON.stringify(images) || request.contextKey !== contextKey)) {
         const prior = await api.receipt(request.requestId);
         if (prior.status === "accepted" || prior.status === "failed") {
           this.pending.delete(key);
@@ -53,7 +54,7 @@ export class ConversationSubmitter {
         throw new Error("이전 요청의 전송 상태가 아직 불명확합니다. 연결 후 다시 확인해주세요. 현재 초안은 유지됩니다.");
       }
       if (!request) {
-        request = { requestId: crypto.randomUUID(), message, images: [...images] };
+        request = { requestId: crypto.randomUUID(), message, images: [...images], ...(contextKey ? { contextKey } : {}) };
         this.pending.set(key, request);
       }
       let receipt: MessageReceipt;

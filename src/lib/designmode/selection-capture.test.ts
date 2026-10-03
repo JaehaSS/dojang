@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSelectionCapture,
-  buildWikiCapture,
   isLocalCapture,
   scopeLocalCaptureId,
   truncateSelection,
@@ -88,28 +87,3 @@ describe("scopeLocalCaptureId", () => {
   });
 });
 
-describe("buildWikiCapture", () => {
-  it("위키 첨부는 에디터 캡처와 id 카운터를 공유해 같은 세션에서 겹치지 않는다", () => {
-    const ids = [
-      buildWikiCapture({ taskId: 9, filePath: "/창고/a.md", title: "A", body: "본문" }).id,
-      buildSelectionCapture({ taskId: 9, filePath: "src/App.tsx", text: "x", startLine: 1, endLine: 1 })!.id,
-      buildWikiCapture({ taskId: 9, filePath: "/창고/b.md", title: "B", body: "본문" }).id,
-    ];
-    expect(new Set(ids).size).toBe(3);
-    expect(ids.every(isLocalCapture)).toBe(true);
-  });
-
-  it("본문이 비어도 레코드를 만든다 — 경로만으로도 에이전트가 문서를 연다", () => {
-    const capture = buildWikiCapture({ taskId: 1, filePath: "/창고/빈.md", title: "빈 문서", body: "" });
-
-    expect(capture.source).toBe("wiki");
-    expect(capture.selection_text).toBeNull();
-    expect([capture.selection_start_line, capture.selection_end_line]).toEqual([null, null]);
-  });
-
-  it("긴 본문은 에디터 선택과 같은 상한으로 잘린다", () => {
-    const capture = buildWikiCapture({ taskId: 1, filePath: "/창고/긴.md", title: "긴 문서", body: "가".repeat(MAX_SELECTION_TEXT + 10) });
-
-    expect(capture.selection_text).toContain("…truncated");
-  });
-});

@@ -35,7 +35,7 @@ use serde::Serialize;
 use super::action::{command_for, ActionKind};
 use super::detect;
 
-/// 설정 키. 미설정이면 켜진 것으로 본다.
+/// 설정 키. 미설정이면 꺼진 것으로 본다 — 사용자의 전역 CLI를 바꾸는 일이라 명시적 동의가 먼저다.
 pub const SETTING_KEY: &str = "auto_update_on_launch";
 
 /// 결과가 도착했음을 알리는 이벤트 이름. 이미 설정 패널이 열려 있을 때를 위한 것이고,
@@ -81,17 +81,15 @@ pub struct AutoUpdateReport {
     pub finished_at: i64,
 }
 
-/// 설정값 해석. **미설정은 켜짐이다** — 이 기능의 목적이 "누르지 않아도 되게"이므로
-/// 기본값이 꺼짐이면 아무것도 달라지지 않는다.
+/// 설정값 해석. **미설정은 꺼짐이다** — 사용자의 전역 CLI(`npm -g`·`brew`)를 교체하는 일이라
+/// 설치 직후 동의 없이 돌면 안 된다(1.0 공개 배포 결정).
 ///
-/// 반대로 사용자가 명시적으로 끈 것(`"false"`)은 반드시 존중한다. 판정을 `"false"` 하나로
-/// 좁히는 대신 흔한 거짓 표기를 함께 받는다 — 설정을 손으로 고친 사람이 `"0"`이라 적었다고
-/// 바이너리가 교체되면 안 된다.
+/// 명시적으로 켠 흔한 참 표기만 켜짐으로 본다 — 알 수 없는 값으로 바이너리가 교체되면 안 된다.
 pub fn enabled_from(raw: Option<&str>) -> bool {
-    let Some(raw) = raw else { return true };
-    !matches!(
+    let Some(raw) = raw else { return false };
+    matches!(
         raw.trim().to_ascii_lowercase().as_str(),
-        "false" | "0" | "off" | "no"
+        "true" | "1" | "on" | "yes"
     )
 }
 
@@ -367,8 +365,8 @@ mod tests {
     // ── 설정 해석 ────────────────────────────────────────────────
 
     #[test]
-    fn unset_means_on_because_the_point_is_not_having_to_press_anything() {
-        assert!(enabled_from(None));
+    fn unset_means_off_because_updating_global_clis_needs_consent() {
+        assert!(!enabled_from(None));
         assert!(enabled_from(Some("true")));
     }
 

@@ -56,19 +56,6 @@ async fn insert_sources(pool: &sqlx::SqlitePool, task_id: i64) {
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO memory_injections \
-         (memory_id, version, task_id, target_hash, injected_at) VALUES (3, 2, ?, 'hash', 14)",
-    )
-    .bind(task_id)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO memory_usages (memory_id, task_id, injected_at) VALUES (3, ?, 14)")
-        .bind(task_id)
-        .execute(pool)
-        .await
-        .unwrap();
 }
 
 #[tokio::test]
@@ -97,19 +84,15 @@ async fn assert_rolled_back(pool: &sqlx::SqlitePool, task_id: i64) {
         db::get_task(pool, task_id).await.unwrap().unwrap().state,
         db::state::FINALIZING
     );
-    let state: (String, Option<String>, Option<String>, i64, i64) = sqlx::query_as(
+    let state: (String, i64, i64) = sqlx::query_as(
         "SELECT (SELECT state FROM local_approval_finalizations WHERE task_id = ?), \
-                (SELECT outcome FROM memory_injections WHERE task_id = ?), \
-                (SELECT outcome FROM memory_usages WHERE task_id = ?), \
                 (SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'approved'), \
                 (SELECT COUNT(*) FROM decision_records)",
     )
     .bind(task_id)
     .bind(task_id)
-    .bind(task_id)
-    .bind(task_id)
     .fetch_one(pool)
     .await
     .unwrap();
-    assert_eq!(state, ("cleaned".into(), None, None, 0, 0));
+    assert_eq!(state, ("cleaned".into(), 0, 0));
 }

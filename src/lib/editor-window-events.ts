@@ -87,11 +87,11 @@ export interface EditorClosedPayload {
   notification?: EditorNotificationPayload;
 }
 
-export interface EditorNotificationPayload {
+export type EditorNotificationPayload = {
   action: "result" | "changes";
   item: InboxItem;
   request_id: string;
-}
+};
 
 /** 자동 저장 한 건의 되돌릴 지점. `content`가 null이면 파일이 커서 버퍼를 잡지 않았다. */
 export interface AutosaveUndoEntry {

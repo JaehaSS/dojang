@@ -57,7 +57,7 @@ async fn right_row_leaves_the_left_source_untouched() {
         .await
         .expect("capsule");
 
-    db::insert_debate_side(&pool, id, Side::Right, "codex", Some("gpt-5"))
+    db::insert_debate_sides(&pool, id, &[(Side::Right, "codex", Some("gpt-5"))])
         .await
         .expect("insert side");
     db::set_debate_side_session(&pool, id, Side::Right, "right-session")
@@ -67,7 +67,7 @@ async fn right_row_leaves_the_left_source_untouched() {
     let task = db::get_task(&pool, id).await.unwrap().expect("task");
     assert_eq!(task.convo_session_id.as_deref(), Some("left-session"));
     assert_eq!(task.pending_capsule.as_deref(), Some("## 캡슐"));
-    let row = db::debate_side(&pool, id).await.unwrap().expect("side");
+    let row = db::debate_sides(&pool, id).await.unwrap().into_iter().next().expect("side");
     assert_eq!(row.side, "right");
     assert_eq!(row.agent, "codex");
     assert_eq!(row.model.as_deref(), Some("gpt-5"));
@@ -80,29 +80,29 @@ async fn right_row_leaves_the_left_source_untouched() {
 async fn reinserting_the_same_side_conflicts() {
     let (pool, path) = pool().await;
     let id = conversation_task(&pool).await;
-    db::insert_debate_side(&pool, id, Side::Right, "codex", None)
+    db::insert_debate_sides(&pool, id, &[(Side::Right, "codex", None)])
         .await
         .expect("insert side");
-    assert!(db::insert_debate_side(&pool, id, Side::Right, "agy", None)
+    assert!(db::insert_debate_sides(&pool, id, &[(Side::Right, "agy", None)])
         .await
         .is_err());
-    let row = db::debate_side(&pool, id).await.unwrap().expect("side");
+    let row = db::debate_sides(&pool, id).await.unwrap().into_iter().next().expect("side");
     assert_eq!(row.agent, "codex");
     let _ = std::fs::remove_file(&path);
 }
 
-/// (3) 삭제하면 조회가 None이다 — "토론 중"은 이 행의 존재로만 파생된다.
+/// (3) 삭제하면 조회 목록이 빈다 — "토론 중"은 이 행의 존재로만 파생된다.
 #[tokio::test]
 async fn deleting_the_side_ends_the_debate() {
     let (pool, path) = pool().await;
     let id = conversation_task(&pool).await;
-    db::insert_debate_side(&pool, id, Side::Right, "codex", None)
+    db::insert_debate_sides(&pool, id, &[(Side::Right, "codex", None)])
         .await
         .expect("insert side");
-    db::delete_debate_side(&pool, id, Side::Right)
+    db::delete_debate_sides(&pool, id)
         .await
         .expect("delete");
-    assert!(db::debate_side(&pool, id).await.unwrap().is_none());
+    assert!(db::debate_sides(&pool, id).await.unwrap().is_empty());
     let _ = std::fs::remove_file(&path);
 }
 
@@ -186,7 +186,7 @@ async fn runner_refuses_a_task_in_debate() {
     db::update_state(&pool, id, state::RUNNING, 1002)
         .await
         .expect("state");
-    db::insert_debate_side(&pool, id, Side::Right, "codex", None)
+    db::insert_debate_sides(&pool, id, &[(Side::Right, "codex", None)])
         .await
         .expect("insert side");
     let task = db::get_task(&pool, id).await.unwrap().expect("task");

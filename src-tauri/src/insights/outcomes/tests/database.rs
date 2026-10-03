@@ -5,7 +5,7 @@ use super::super::*;
 static DATABASE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[tokio::test]
-async fn aggregates_goal_verification_memory_and_ensemble_outcomes() {
+async fn aggregates_goal_verification_and_ensemble_outcomes() {
     let pool = test_pool().await;
     let selected = insert_task(&pool, "selected", Some("ens-selected"), true, 1_000).await;
     let loser = insert_task(&pool, "loser", Some("ens-selected"), false, 1_000).await;
@@ -24,8 +24,6 @@ async fn aggregates_goal_verification_memory_and_ensemble_outcomes() {
     crate::db::upsert_evidence(&pool, selected, "", 0, "", 0, 1, 0, true, 1_100)
         .await
         .unwrap();
-    record_legacy_memory(&pool, selected).await;
-    record_ledger_memory(&pool, selected).await;
 
     let outcome = compute_outcomes(&pool, "all", 2_000).await.unwrap();
 
@@ -33,8 +31,6 @@ async fn aggregates_goal_verification_memory_and_ensemble_outcomes() {
     assert_eq!(outcome.accepted_task_count, 4);
     assert_eq!(outcome.goal_contract_task_count, 1);
     assert_eq!(outcome.ready_accepted_task_count, 1);
-    assert_eq!(outcome.legacy_memory_task_count, 1);
-    assert_eq!(outcome.ledger_memory_task_count, 1);
     assert_eq!(outcome.ensemble_count, 3);
     assert_eq!(outcome.selected_ensemble_count, 1);
     assert_eq!(outcome.ambiguous_ensemble_count, 1);
@@ -134,21 +130,3 @@ async fn set_state(pool: &sqlx::SqlitePool, task_id: i64, state: &str, now: i64)
         .unwrap();
 }
 
-async fn record_legacy_memory(pool: &sqlx::SqlitePool, task_id: i64) {
-    sqlx::query("INSERT INTO memory_usages (memory_id, task_id, injected_at) VALUES (1, ?, 1)")
-        .bind(task_id)
-        .execute(pool)
-        .await
-        .unwrap();
-}
-
-async fn record_ledger_memory(pool: &sqlx::SqlitePool, task_id: i64) {
-    sqlx::query(
-        "INSERT INTO memory_injections \
-         (memory_id, version, task_id, target_hash, injected_at) VALUES (1, 1, ?, 'hash', 1)",
-    )
-    .bind(task_id)
-    .execute(pool)
-    .await
-    .unwrap();
-}

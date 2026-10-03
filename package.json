@@ -1,7 +1,7 @@
 {
   "name": "praxis",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "build": "tsc && vite build && npm run build:mobile",
@@ -9,9 +9,9 @@
     "tauri": "tauri",
     "dmg": "bash scripts/dmg-only.sh",
     "test": "vitest run",
-    "check:frontend": "tsc --noEmit && npm test && node --test scripts/tests/runner-manifest.node.mjs",
+    "test:files": "vitest list --filesOnly",
+    "check:frontend": "tsc --noEmit && npm test",
     "check:rust": "cargo test --manifest-path src-tauri/Cargo.toml --all-targets -j 2 -- --test-threads=1",
-    "check:workflow": "python3 scripts/tests/workflow-forwarder_test.py && node --test scripts/tests/workflow-runtime-probe.node.mjs && cargo test --manifest-path src-tauri/Cargo.toml --lib workflow:: -- --test-threads=1 && cargo test --manifest-path src-tauri/Cargo.toml --test workflow_lifecycle_test --test workflow_http_test --test workflow_test_db_test --test workflow_contract_test --test workflow_scheduler_test --test workflow_inputs_test --test workflow_store_test --test workflow_resources_test --test workflow_artifacts_test --test workflow_capacity_test --test runner_queue_test -- --test-threads=1",
     "lint:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings -A clippy::too_many_arguments -A clippy::doc_lazy_continuation -A clippy::redundant_closure -A clippy::manual_pattern_char_comparison -A clippy::field_reassign_with_default",
     "check": "npm run check:frontend && npm run check:rust && npm run lint:rust"
   },
@@ -34,8 +34,10 @@
     "react-markdown": "^10.1.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
     "three": "^0.185.1",
-    "three-spritetext": "1.10.0"
+    "three-spritetext": "1.10.0",
+    "unified": "^11.0.5"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

@@ -48,10 +48,36 @@ export function findFilePathSpans(value: string): FilePathSpan[] {
 
 const WHOLE_PATH = new RegExp(`^${PATH_SOURCE}$`, "u");
 
+/** 백틱이 경계를 대신 그어 주므로 인라인 코드 안에서는 공백을 품은 이름도 받는다
+ *  (`~/Documents/째하 지식창고/…`). 다만 `~/`·`/`로 시작하는 절대경로만이다 — 상대경로까지 받으면
+ *  `git add src/a.ts`가 통째로 `git add src` 디렉터리의 경로가 된다. 공백은 디렉터리 이름 안의
+ *  단어 사이 한 칸만이다 — 파일 이름까지 받으면 `/usr/bin/env python3.11` 같은 명령이 경로가 된다. */
+const SPACED_SEGMENT = `[${NAME_CHARS}]+(?: [${NAME_CHARS}]+)*`;
+const WHOLE_SPACED_PATH = new RegExp(
+  `^(?:~/|/)(?:${SPACED_SEGMENT}/)*${FILE_NAME}${LINE_SUFFIX}$`,
+  "u",
+);
+
+/** `docs/plans/`처럼 `/`로 끝나는 인라인 코드 — 뒤따르는 맨 파일 이름의 기준 디렉터리가 된다. */
+const WHOLE_DIRECTORY = new RegExp(
+  `^(?:/?(?:${SEGMENT}/)+|(?:~/|/)(?:${SPACED_SEGMENT}/)+)$`,
+  "u",
+);
+
+/** `README.md`, `notes.md:12` — 슬래시 없는 파일 이름. 기준 디렉터리가 있을 때만 링크가 된다. */
+const WHOLE_BARE_NAME = new RegExp(`^${FILE_NAME}${LINE_SUFFIX}$`, "u");
+
 /** 인라인 코드는 **내용 전체가** 경로일 때만 링크로 만든다.
  *  `npm run docs:project`처럼 경로를 품은 명령을 반쪼가리 링크로 쪼개지 않기 위한 규칙. */
 export function isFilePathOnly(value: string): boolean {
-  return WHOLE_PATH.test(value.trim());
+  const trimmed = value.trim();
+  return WHOLE_PATH.test(trimmed) || WHOLE_SPACED_PATH.test(trimmed);
+}
+
+/** 인라인 코드 전체가 디렉터리 경로면 그 경로를(끝 `/` 포함), 아니면 null. */
+export function directoryOnly(value: string): string | null {
+  const trimmed = value.trim();
+  return WHOLE_DIRECTORY.test(trimmed) ? trimmed : null;
 }
 
 /** mdast에서 실제로 쓰는 부분만. @types/mdast에 얹지 않아 remark 버전과 독립. */
@@ -62,15 +88,33 @@ interface MdNode {
   children?: MdNode[];
 }
 
+/** 에이전트가 흔히 쓰는 "머리말에 디렉터리 하나, 목록에 파일 이름들" 형식을 위한 문맥.
+ *
+ *  ```
+ *  **만든 문서** (`~/Documents/볼트/웹어셈블리/`)
+ *  - `README.md`: 목차
+ *  ```
+ *
+ *  맨 파일 이름은 이 디렉터리 기준으로만 링크된다. 문맥은 최상위 블록 하나와, 바로 뒤에 붙은
+ *  목록까지만 산다 — 한참 아래 문단의 `package.json`이 엉뚱한 디렉터리로 이어지지 않게. */
+interface LinkContext {
+  base: string | null;
+}
+
 /** 텍스트/인라인 코드 노드의 파일 경로를 link 노드로 감싸는 remark 플러그인.
  *  remarkGfm 뒤에 둘 것 — URL이 먼저 link가 되어야 그 안을 건드리지 않는다. */
 export function remarkFilePathLinks() {
   return (tree: unknown) => {
-    linkify(tree as MdNode);
+    const root = tree as MdNode;
+    const context: LinkContext = { base: null };
+    for (const block of root.children ?? []) {
+      if (block.type !== "list") context.base = null;
+      linkify(block, context);
+    }
   };
 }
 
-function linkify(node: MdNode): void {
+function linkify(node: MdNode, context: LinkContext): void {
   const children = node.children;
   if (!children) return;
   // 링크 안에서 링크를 만들 수는 없다. 이미 사람이(또는 gfm이) 링크로 만든 것은 그대로 둔다.
@@ -88,18 +132,31 @@ function linkify(node: MdNode): void {
         continue;
       }
     } else if (child.type === "inlineCode" && typeof child.value === "string") {
-      if (isFilePathOnly(child.value)) {
-        next.push({ type: "link", url: child.value.trim(), children: [child] });
+      const url = inlineCodeUrl(child.value, context);
+      if (url) {
+        next.push({ type: "link", url, children: [child] });
         changed = true;
         continue;
       }
     } else {
-      linkify(child);
+      linkify(child, context);
     }
     next.push(child);
   }
 
   if (changed) node.children = next;
+}
+
+/** 인라인 코드가 가리키는 링크 대상. 디렉터리면 문맥만 바꾸고 링크는 만들지 않는다. */
+function inlineCodeUrl(value: string, context: LinkContext): string | null {
+  if (isFilePathOnly(value)) return value.trim();
+  const directory = directoryOnly(value);
+  if (directory) {
+    context.base = directory;
+    return null;
+  }
+  const name = value.trim();
+  return context.base && WHOLE_BARE_NAME.test(name) ? context.base + name : null;
 }
 
 /** 경로를 찾았을 때만 노드 배열을 돌려준다(못 찾으면 null → 원본 노드 유지). */

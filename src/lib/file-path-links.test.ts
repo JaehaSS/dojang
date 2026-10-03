@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findFilePathSpans, isFilePathOnly } from "./file-path-links";
+import { directoryOnly, findFilePathSpans, isFilePathOnly } from "./file-path-links";
 
 const found = (value: string) => findFilePathSpans(value).map((span) => span.text);
 
@@ -86,5 +86,28 @@ describe("isFilePathOnly", () => {
     expect(isFilePathOnly("npm run docs:project")).toBe(false);
     expect(isFilePathOnly("cat docs/memory.md")).toBe(false);
     expect(isFilePathOnly("grep -a 리터럴 src/lib.rs")).toBe(false);
+  });
+
+  it("accepts spaces in directory names of rooted paths only", () => {
+    expect(isFilePathOnly("~/Documents/째하 지식창고/개인/README.md")).toBe(true);
+    expect(isFilePathOnly("/Users/me/My Notes/a.md:3")).toBe(true);
+    expect(isFilePathOnly("git add src/a.ts")).toBe(false);
+    expect(isFilePathOnly("/usr/bin/env python3.11")).toBe(false);
+    expect(isFilePathOnly("~/Documents/째하  지식창고/a.md")).toBe(false);
+  });
+});
+
+describe("directoryOnly", () => {
+  it("accepts inline code that is nothing but a directory", () => {
+    expect(directoryOnly("docs/plans/")).toBe("docs/plans/");
+    expect(directoryOnly(" ~/Documents/째하 지식창고/웹어셈블리/ ")).toBe(
+      "~/Documents/째하 지식창고/웹어셈블리/",
+    );
+  });
+
+  it("rejects files, bare slashes and commands", () => {
+    expect(directoryOnly("docs/plans")).toBeNull();
+    expect(directoryOnly("/")).toBeNull();
+    expect(directoryOnly("ls docs/")).toBeNull();
   });
 });

@@ -17,7 +17,12 @@ for i, a in enumerate(argv):
         config = argv[i + 1]
     elif a == "-p" and i + 1 < len(argv):
         prompt = argv[i + 1]
-# 질문 턴에는 지시문이 프롬프트 앞에 붙는다. 케이스는 언제나 맨 끝 줄이다.
+# The user message is not polluted by the clarification contract on each resume.
+assert "# Praxis clarification contract" not in prompt
+assert argv.count("--append-system-prompt") == 1
+system_prompt = argv[argv.index("--append-system-prompt") + 1]
+assert "# Praxis synchronous turn contract" in system_prompt
+# The case remains the last user line.
 case = prompt.strip().splitlines()[-1].strip() if prompt.strip() else ""
 
 

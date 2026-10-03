@@ -279,7 +279,9 @@ pub struct LspClient {
 impl LspClient {
     /// 서버를 띄우고 initialize 핸드셰이크까지 마친다.
     async fn spawn(spec: ServerSpec, root: &Path) -> Result<Self, String> {
-        let mut command = Command::new(spec.command);
+        // Windows에서 npm으로 깐 언어 서버는 `.cmd` shim이라 맨 이름으로는 실행되지 않는다.
+        let program = crate::reviewer::which(spec.command).unwrap_or_else(|| spec.command.to_string());
+        let mut command = Command::new(program);
         command
             .args(spec.args)
             .current_dir(root)

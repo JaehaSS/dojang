@@ -16,7 +16,7 @@ vi.mock("@tauri-apps/api/event", () => ({ emit: mocks.emit }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
 vi.mock("../../lib/project-editor-ipc", () => ({ projectEditorInfo: mocks.info, projectEditorTree: vi.fn(), projectEditorRead: vi.fn(), projectEditorWrite: vi.fn(), projectEditorResolvePath: vi.fn(), projectEditorOpenPath: vi.fn() }));
 vi.mock("../../lib/ipc", () => ({ fontSettingsGet: vi.fn(async () => ({ ui_family: "system", code_family: "mono", ui_size: 13, code_size: 13 })), editorSettingsGet: vi.fn(async () => ({ tree_font_size: 13, minimap: true, word_wrap: false, tab_size: 2 })) }));
-vi.mock("./useWorkspaceFiles", () => ({ useWorkspaceFiles: () => ({ tree: [], openFiles: [], activeKey: null, activeFile: null, refreshTree: mocks.refreshTree, openFile: vi.fn(), pinTab: vi.fn(), setActiveKey: vi.fn(), closeTab: vi.fn(), changeFile: vi.fn(), saveFile: vi.fn(), reloadFile: vi.fn(), reloadIfClean: vi.fn(), flushDirty: mocks.flushDirty }) }));
+vi.mock("./useWorkspaceFiles", () => ({ useWorkspaceFiles: () => ({ tree: [], openFiles: [], activeKey: null, activeFile: null, refreshTree: mocks.refreshTree, openFile: vi.fn(), pinTab: vi.fn(), setActiveKey: vi.fn(), closeTab: vi.fn(), changeFile: vi.fn(), saveFile: vi.fn(), reloadFile: vi.fn(), flushDirty: mocks.flushDirty }) }));
 vi.mock("./EditorSplitView", () => ({ EditorSplitView: () => <div data-editor-split /> }));
 vi.mock("./FileTree", () => ({ FileTree: () => <div data-file-tree /> }));
 vi.mock("./icons", () => ({ Icon: () => null }));

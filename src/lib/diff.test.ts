@@ -84,6 +84,7 @@ describe("diff summaries", () => {
 
   it("describes non-text patches instead of rendering an empty pane", () => {
     expect(describePatch("Binary files a/logo.png and b/logo.png differ")).toContain("바이너리");
+    expect(describePatch("Praxis diff omitted: file exceeds 1 MiB")).toContain("1 MiB");
     expect(describePatch("similarity index 100%\nrename from old.ts\nrename to new.ts")).toContain(
       "old.ts → new.ts",
     );

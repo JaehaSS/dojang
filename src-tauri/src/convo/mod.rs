@@ -9,13 +9,19 @@
 //! 보안: 격리 worktree cwd에서 실행. 자율 편집 위해 벤더별 권한 스킵 플래그(ensemble headless와 동일 전제).
 
 mod agy_process;
+mod claude_stream;
 pub mod app_server;
+pub mod cli_runtime;
 pub mod interaction;
+pub mod native_interaction;
+mod tool_output;
 pub mod interaction_commands;
 pub mod question_local;
 pub mod canvas;
 pub mod debate;
 mod child_reaper;
+mod event_frame;
+pub mod prompt_metrics;
 mod context_observation;
 mod model_observation;
 mod process_cleanup;
@@ -76,13 +82,16 @@ pub struct PlanItem {
     pub status: String,
 }
 
-/// 토론에서 발화한 면. 좌측의 원천은 `tasks` 행이고 우측은 `convo_debate_sides` 행이다.
+/// 토론에서 발화한 자리. 좌측의 원천은 `tasks` 행이고 나머지는 `convo_debate_sides` 행이다.
+/// 저장 식별자는 **위치가 아니라 자리의 이름**이다 — 3자에서 `right`는 가운데 열이지만, 이미
+/// 저장된 `"speaker":"right"`를 다시 쓰지 않으려고 이름을 유지한다. 순서는 `index()`가 정한다.
 /// `None`은 "좌측"이 아니라 **미상**이다 — 토론 이전의 단일 세션 이력이 여기 해당한다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
     Left,
     Right,
+    Third,
 }
 
 impl Side {
@@ -90,6 +99,16 @@ impl Side {
         match self {
             Side::Left => "left",
             Side::Right => "right",
+            Side::Third => "third",
+        }
+    }
+
+    /// 턴 순서상의 자리 번호. 좌측이 0이다.
+    pub fn index(&self) -> usize {
+        match self {
+            Side::Left => 0,
+            Side::Right => 1,
+            Side::Third => 2,
         }
     }
 
@@ -97,15 +116,8 @@ impl Side {
         match s.trim() {
             "left" => Some(Side::Left),
             "right" => Some(Side::Right),
+            "third" => Some(Side::Third),
             _ => None,
-        }
-    }
-
-    /// 다음 턴의 면. 토론은 L→R 순차라 반대편이 곧 다음 발화자다.
-    pub fn opposite(&self) -> Side {
-        match self {
-            Side::Left => Side::Right,
-            Side::Right => Side::Left,
         }
     }
 }
@@ -135,6 +147,8 @@ pub enum ConvoEvent {
     Interaction { interaction_id: String },
     /// A replaceable message snapshot. Only complete snapshots enter history.
     TextUpdate { item_id: String, text: String, complete: bool },
+    /// Rich output from Code Mode, native tools, or MCP. Preserved in history.
+    ToolOutput { tool_use_id: String, contents: Vec<tool_output::Content> },
     /// 툴 사용 (파일 편집/명령 등) — 이름 + 요약.
     /// `tool_id`: 벤더가 주는 tool_use id(서브 에이전트 Task 상관관계용) — 이벤트 페이로드가
     /// task `id`와 flatten되므로 `id`라는 이름을 피한다. `parent_id`: 이 호출이
@@ -672,6 +686,7 @@ fn vendor_command(
 
 /// `session_name`: claude 세션 레지스트리에 등록될 표시 이름(`agent::headless_args_with_effort`와
 /// 같은 근거 — cwd 파생 이름은 같은 worktree의 task끼리 충돌한다).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn vendor_command_with_effort(
     bin: &str,
@@ -684,6 +699,23 @@ fn vendor_command_with_effort(
     session_name: Option<&str>,
     mcp: Option<&crate::preview_bridge::mcp::McpInjection>,
 ) -> std::process::Command {
+    vendor_command_with_contract(bin, vendor, message, resume, model, reasoning_effort,
+        image_paths, session_name, mcp, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn vendor_command_with_contract(
+    bin: &str,
+    vendor: Vendor,
+    message: &str,
+    resume: Option<&str>,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    image_paths: &[String],
+    session_name: Option<&str>,
+    mcp: Option<&crate::preview_bridge::mcp::McpInjection>,
+    questions: bool,
+) -> std::process::Command {
     let mut c = std::process::Command::new(bin);
     let model = model.map(str::trim).filter(|m| !m.is_empty());
     let guarded_message = turn_guard::guarded_message(vendor, message);
@@ -695,11 +727,19 @@ fn vendor_command_with_effort(
                 "--output-format",
                 "stream-json",
                 "--verbose",
-                "--dangerously-skip-permissions",
             ]);
-            if let Some(prompt) = turn_guard::completion_system_prompt(vendor) {
-                c.args(["--append-system-prompt", prompt]);
+            // 승인이 켜진 턴은 CLI 기본 권한 모드로 돌고, 물어야 할 호출은 주입된
+            // `--permission-prompt-tool`(우리 MCP 툴)로 간다.
+            if !mcp.is_some_and(|m| m.approvals) {
+                c.arg("--dangerously-skip-permissions");
             }
+            // 질문 세션은 CLI처럼 글자가 흐르게 한다. 다른 턴에 켜면 델타마다 이벤트가 적재 경로를
+            // 타므로(runner) 여기서만 켠다 — 스냅샷 변환은 `claude_stream`이 맡는다.
+            if questions {
+                c.arg("--include-partial-messages");
+            }
+            let instructions = prompt_metrics::runtime_instructions(vendor, questions);
+            c.args(["--append-system-prompt", &instructions]);
             // `-n`은 claude 전용 — codex/agy에는 대응 플래그가 없어 붙이면 즉사한다.
             if let Some(name) = session_name.map(str::trim).filter(|n| !n.is_empty()) {
                 c.args(["-n", name]);
@@ -881,12 +921,34 @@ pub fn run_turn_with_effort(
     session_name: Option<&str>,
     mcp: Option<&crate::preview_bridge::mcp::McpInjection>,
     on_spawn: impl FnOnce(u32),
+    on_event: impl FnMut(ConvoEvent),
+) -> Result<TurnOutcome, String> {
+    run_turn_with_contract(cwd, message, resume, idle_timeout_secs, vendor, bin, model,
+        reasoning_effort, service_tier, image_paths, session_name, mcp, false, on_spawn, on_event)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_turn_with_contract(
+    cwd: &str,
+    message: &str,
+    resume: Option<&str>,
+    idle_timeout_secs: u64,
+    vendor: Vendor,
+    bin: &str,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    service_tier: Option<&str>,
+    image_paths: &[String],
+    session_name: Option<&str>,
+    mcp: Option<&crate::preview_bridge::mcp::McpInjection>,
+    questions: bool,
+    on_spawn: impl FnOnce(u32),
     mut on_event: impl FnMut(ConvoEvent),
 ) -> Result<TurnOutcome, String> {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
-    let mut c = vendor_command_with_effort(
+    let mut c = vendor_command_with_contract(
         bin,
         vendor,
         message,
@@ -896,6 +958,7 @@ pub fn run_turn_with_effort(
         image_paths,
         session_name,
         mcp,
+        questions,
     );
     if vendor == Vendor::Codex {
         crate::agent::service_tier::apply(&mut c, service_tier)?;
@@ -1067,8 +1130,27 @@ pub fn run_turn_with_effort(
     // 스트림에서 실제 모델을 확보했는지 — 못 했을 때만 트랜스크립트 폴백을 탄다.
     let mut stream_model_seen = false;
     let mut subagent_guard = turn_guard::SubagentTurnGuard::default();
-    for line in BufReader::new(stdout).lines() {
-        let Ok(line) = line else { break };
+    // 마지막 Result를 붙들어 둔다. claude는 백그라운드 작업이 살아 있으면 `result` 뒤에도
+    // 프로세스를 끝내지 않고, 알림이 오면 모델을 다시 불러 `result`를 또 낸다 — 턴의 답은
+    // 그중 마지막이고, 회수 판정은 프로세스가 끝난 뒤에야 의미가 있다. 본문은 이미 text
+    // 이벤트로 흘렀으므로 앞선 Result를 버려도 대화에서 사라지는 것은 없다.
+    let mut held_result: Option<ConvoEvent> = None;
+    // 마지막 `result` 줄 시점의 생존자 스냅샷. EOF에서만 보면 놓친다 — 탈출한 자식이 vendor의
+    // stdout을 물려받고 있으면 그 자식이 죽어야 EOF가 오고, 그때는 이미 잡을 것이 없다.
+    let mut survivors_at_result: Vec<process_cleanup::Survivor> = Vec::new();
+    let mut stdout = BufReader::new(stdout);
+    let mut stream_error = None;
+    let mut text_stream = claude_stream::TextStream::default();
+    loop {
+        let line = match event_frame::read_line(&mut stdout) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(error) => {
+                stream_error = Some(format!("{} 출력 읽기 실패: {error}", vendor.bin()));
+                crate::verify::kill_group(pid);
+                break;
+            }
+        };
         let _ = beat_tx.send(Beat::Line);
         if let Some(event) = subagent_guard.observe_raw_line(&line) {
             on_event(event);
@@ -1076,20 +1158,18 @@ pub fn run_turn_with_effort(
         // claude 한 줄에는 병렬 블록이 여러 개 실릴 수 있어 전부 방출. codex는 줄당 1이벤트.
         let evs = match vendor {
             Vendor::Codex => parse_codex_events(&line),
+            Vendor::Claude => match text_stream.observe_line(&line) {
+                Some(updates) => updates,
+                None => parse_events(&line)
+                    .into_iter()
+                    .filter_map(|ev| text_stream.settle(ev))
+                    .collect(),
+            },
             _ => parse_events(&line),
         };
         for mut ev in evs {
             subagent_guard.observe_event(&ev);
             ev = subagent_guard.sanitize_event(ev);
-            // 생존자 조회는 전체 프로세스를 훑는다(macOS는 pid마다 sysctl). 턴당 한 번인
-            // Result에서만 값을 치르고, 나머지 이벤트는 기존 경로로 흘린다.
-            ev = match &ev {
-                ConvoEvent::Result {
-                    is_error: false, ..
-                } => subagent_guard
-                    .enforce_result_with_survivors(ev, &process_scope.survivors(vendor_pgid, vendor)),
-                _ => subagent_guard.enforce_result(ev),
-            };
             match &ev {
                 ConvoEvent::SessionInit { session_id } => last_session = session_id.clone(),
                 ConvoEvent::Result { session_id, .. } if !session_id.is_empty() => {
@@ -1100,11 +1180,36 @@ pub fn run_turn_with_effort(
                 } => stream_model_seen = true,
                 _ => {}
             }
+            if let ConvoEvent::Result { is_error, .. } = &ev {
+                // 생존자 조회는 전체 프로세스를 훑는다(macOS는 pid마다 sysctl). 성공 Result
+                // 시점과 EOF, 두 번만 치른다. 실패 Result는 판정 대상이 아니라 조회도 없다.
+                if !is_error {
+                    survivors_at_result = process_scope.survivors(vendor_pgid, vendor);
+                }
+                held_result = Some(ev);
+                continue;
+            }
             on_event(ev);
         }
     }
     let _ = beat_tx.send(Beat::Done);
     let (exit_desc, stderr_tail) = finalize(&mut child, stderr_handle);
+    if let Some(error) = stream_error {
+        return Err(error);
+    }
+    if let Some(result) = held_result.take() {
+        // 프로세스가 끝난 뒤의 판정 — 이 시점에 남은 pending은 진짜 미회수다. 생존자는
+        // 마지막 Result 시점 스냅샷과 EOF 시점 조회를 합친다. 실패 Result는 그대로 지나간다.
+        let mut survivors = survivors_at_result;
+        if matches!(result, ConvoEvent::Result { is_error: false, .. }) {
+            for survivor in process_scope.survivors(vendor_pgid, vendor) {
+                if !survivors.iter().any(|seen| seen.group == survivor.group) {
+                    survivors.push(survivor);
+                }
+            }
+        }
+        on_event(subagent_guard.enforce_result_with_survivors(result, &survivors));
+    }
     if vendor == Vendor::Codex {
         // codex는 스트림에 모델을 싣지 않아 트랜스크립트가 유일한 관측원이다.
         if let Some(resolved) = model_observation::codex_model(&last_session) {
@@ -1159,6 +1264,22 @@ mod tests {
         std::fs::write(&script, body).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         script
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn oversized_claude_event_fails_even_with_resume_and_reaps_provider() {
+        let dir = crate::testtmp::dir().join(format!("praxis-turn-large-{}", std::process::id()));
+        let script = write_stub(&dir, "#!/usr/bin/python3\nimport sys,time\nsys.stdout.write('a' * (17 * 1024 * 1024))\nsys.stdout.flush()\ntime.sleep(30)\n");
+        let mut pid = 0;
+        let result = run_turn(
+            dir.to_str().unwrap(), "hi", Some("resume-token"), 10,
+            Vendor::Claude, script.to_str().unwrap(), None,
+            |id| pid = id, |_| {},
+        );
+        assert!(result.unwrap_err().contains("이벤트 크기 제한 초과 (16 MiB)"));
+        assert_ne!(unsafe { nix::libc::kill(-(pid as i32), 0) }, 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1959,6 +2080,7 @@ mod tests {
         crate::preview_bridge::mcp::McpInjection {
             args: vec!["-c".to_string(), "mcp_servers.praxis_preview.url=\"u\"".to_string()],
             env: vec![("PRAXIS_PREVIEW_TOKEN".to_string(), "tok".to_string())],
+            approvals: false,
         }
     }
 
@@ -1988,6 +2110,7 @@ mod tests {
         let mcp = crate::preview_bridge::mcp::McpInjection {
             args: vec!["--mcp-config".to_string(), "/tmp/a.json".to_string()],
             env: vec![("PRAXIS_PREVIEW_TOKEN".to_string(), "tok".to_string())],
+            approvals: false,
         };
         let args = cmd_args(&vendor_command_with_effort(
             "claude",
@@ -2003,6 +2126,32 @@ mod tests {
         assert_eq!(&args[args.len() - 2..], &["--mcp-config", "/tmp/a.json"]);
         assert!(args.iter().position(|a| a == "--model").unwrap() < args.len() - 2);
         assert!(!args.iter().any(|a| a.contains("tok")));
+    }
+
+    /// 승인이 켜진 주입은 자동 승인을 빼고 우리 툴을 permission prompt로 건다. 꺼지면 예전 그대로다.
+    #[test]
+    fn vendor_command_claude_approvals_drop_skip_permissions() {
+        let mut mcp = crate::preview_bridge::mcp::McpInjection {
+            args: vec![
+                "--permission-prompt-tool".to_string(),
+                "mcp__praxis-preview__approve".to_string(),
+            ],
+            env: Vec::new(),
+            approvals: true,
+        };
+        let build = |mcp: &crate::preview_bridge::mcp::McpInjection, questions| {
+            cmd_args(&vendor_command_with_contract(
+                "claude", Vendor::Claude, "hi", None, None, None, &[], None, Some(mcp), questions,
+            ))
+        };
+        let args = build(&mcp, true);
+        assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
+        assert!(args.iter().any(|a| a == "--permission-prompt-tool"));
+        assert!(args.iter().any(|a| a == "--include-partial-messages"));
+        mcp.approvals = false;
+        let args = build(&mcp, false);
+        assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
+        assert!(!args.iter().any(|a| a == "--include-partial-messages"));
     }
 
     /// 주입이 없으면 argv는 예전 그대로다 — 서버가 안 떴을 때의 회귀 0 계약.

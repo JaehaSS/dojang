@@ -41,7 +41,7 @@ fn fast_models(value: &Value) -> Vec<String> {
 pub fn supported_models() -> Vec<String> {
     let home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")));
+        .or_else(|| crate::usage::home_dir().map(|home| home.join(".codex")));
     let Some(path) = home.map(|home| home.join("models_cache.json")) else {
         return Vec::new();
     };

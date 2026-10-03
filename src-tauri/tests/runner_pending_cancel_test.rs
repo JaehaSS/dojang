@@ -40,6 +40,7 @@ async fn pending_cancel_uses_the_shared_worktree_lock_and_discards_once() {
             mode: "terminal".to_string(),
             goal_contract: None,
             resume_session: None,
+            resume_vendor: None,
         },
         2_000_000_000,
     )
@@ -54,13 +55,6 @@ async fn pending_cancel_uses_the_shared_worktree_lock_and_discards_once() {
         db::state::DISCARDED
     );
     // 파일형 투영(설계 2026-09-13)은 원장을 남기지 않는다 — 폐기가 워크트리를 지우면 블록도 함께 사라진다.
-    let journals: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM memory_projection_journal WHERE task_id = ?")
-            .bind(task.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(journals, 0);
     assert!(!std::path::Path::new(&task.worktree_path).exists());
     let _ = std::fs::remove_dir_all(repo);
     let _ = std::fs::remove_file(db_path);

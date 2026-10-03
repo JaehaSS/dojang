@@ -445,7 +445,7 @@ async fn existing_process_schema_upgrades_and_rejects_wrong_phase() {
 }
 
 #[tokio::test]
-async fn adoption_requires_exact_successful_checks_and_no_live_projection() {
+async fn adoption_requires_exact_successful_checks() {
     let f = Fixture::new().await;
     let verified = f.ready(f.prepare().await).await;
     for mode in ["missing", "failed", "different"] {
@@ -463,22 +463,6 @@ async fn adoption_requires_exact_successful_checks_and_no_live_projection() {
             "{mode}"
         );
     }
-    f.save(&verified).await;
-    praxis_lib::memory::migrate(&f.pool).await.unwrap();
-    sqlx::query("INSERT INTO memory_projection_journal(task_id,state,worktree_path,target_paths_json,target_hash,renderer_version,ordered_memories_json,created_at,updated_at) VALUES(?,'applied',?,'[]','unused',1,'[]',1,1)")
-        .bind(f.task.id).bind(&f.task.worktree_path).execute(&f.pool).await.unwrap();
-    assert!(
-        repair::prepare(&f.pool, &f.task, f.source.clone(), &f.claims)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("메모리")
-    );
-    assert!(repair::accept(&f.pool, &f.task, &f.claims, &verified.id)
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("메모리"));
     f.close().await;
 }
 

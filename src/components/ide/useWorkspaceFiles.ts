@@ -68,8 +68,6 @@ export interface WorkspaceFiles {
   changeFile: (path: string, content: string) => void;
   saveFile: (path: string, content: string) => Promise<void>;
   reloadFile: (path: string) => Promise<void>;
-  /** 저장하지 않은 버퍼를 보존하면서 현재 작업의 디스크 내용만 다시 읽는다. */
-  reloadIfClean: (path: string) => Promise<void>;
   closeTab: (key: TabKey) => void;
   /** 그 경로의 탭을 **모두** 닫는다 — 파일 탭과 diff 탭이 함께 사라진다.
    *  이름 변경·휴지통처럼 파일 자체가 없어지는 경로가 부른다(설계 0061 F-11). */
@@ -405,34 +403,6 @@ export function useWorkspaceFiles({
     [sourceKey],
   );
 
-  const reloadIfClean = useCallback(
-    async (path: string) => {
-      const before = openFilesRef.current.find((file) => file.key === fileTabKey(path));
-      const current = sourceRef.current;
-      if (current == null || !before || before.dirty) return;
-      const generation = taskScopeRef.current.generation;
-      const epoch = fileEpochsRef.current.get(path);
-      const revision = revisionsRef.current.get(path) ?? 0;
-      try {
-        const fc = await current.read(path);
-        if (taskScopeRef.current.generation !== generation || sourceRef.current !== current || fileEpochsRef.current.get(path) !== epoch) return;
-        if ((revisionsRef.current.get(path) ?? 0) !== revision) return;
-        if (openFilesRef.current.find((file) => file.key === before.key) !== before) return;
-        setOpenFiles((files) =>
-          files.map((file) =>
-            file === before && !file.dirty && taskScopeRef.current.generation === generation
-              ? { ...file, kind: fc.kind, content: fc.content, baseContent: fc.content, mtime: fc.mtime }
-              : file,
-          ),
-        );
-        onSourceChangeRef.current?.(path);
-      } catch (e) {
-        if (taskScopeRef.current.generation === generation && fileEpochsRef.current.get(path) === epoch) onErrorRef.current(String(e));
-      }
-    },
-    [sourceKey],
-  );
-
   /**
    * dirty 파일을 모두 디스크에 쓴다. 충돌·실패가 하나라도 있으면 거기서 멈춘다.
    *
@@ -524,7 +494,6 @@ export function useWorkspaceFiles({
     changeFile,
     saveFile,
     reloadFile,
-    reloadIfClean,
     closeTab,
     closeTabsForPath,
     flushDirty,

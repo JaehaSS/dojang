@@ -258,6 +258,17 @@ pub(crate) async fn record_result_tx(
     Ok(())
 }
 
+/// 구조화 질문이 열릴 때 부른다. 질문은 상태 전이가 없어 결과 알림 경로
+/// (`finish_running_task_with_notification`)를 타지 않는다 — 같은 원천(`notification_results`)에
+/// 실어야 인박스와 OS 알림이 같은 수집기로 전달된다. 취소 의도가 먼저 남았으면 결과 알림과 같은
+/// 규칙으로 싣지 않는다.
+pub async fn record_question(pool: &SqlitePool, task_id: i64, ts: i64) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    record_result_tx(&mut tx, task_id, ts, "question").await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub(crate) async fn cancel_intent(pool: &SqlitePool, task_id: i64) -> anyhow::Result<bool> {
     let result = sqlx::query("INSERT INTO notification_cancels(task_id) SELECT id FROM tasks WHERE id = ? AND state IN ('Created', 'Running') ON CONFLICT(task_id) DO NOTHING")
         .bind(task_id).execute(pool).await?;
@@ -369,10 +380,13 @@ async fn ingest_page(
     host: &str,
     page: &SourcePage,
 ) -> anyhow::Result<Vec<ResultNotice>> {
+    // 앱 안 알림 목록("확인" 버튼)은 2026-09-26 제거됐다. 읽음 표시를 전진시킬 손이 없으므로
+    // 수집 시점에 읽음(read_sequence = sequence)으로 넣는다 — 새로 들어온 항목은 `inserted`로
+    // 돌려보내 OS 푸시는 그대로 나가고, 미확인 목록(snapshot)은 비어 있게 된다.
     let mut inserted = Vec::new();
     for item in &page.results {
-        let changed = sqlx::query("INSERT INTO notification_inbox(host, source_id, task_id, sequence, read_sequence, ts, kind, title, repo) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?) ON CONFLICT(host, source_id, task_id) DO UPDATE SET sequence=excluded.sequence,ts=excluded.ts,kind=excluded.kind,title=excluded.title,repo=excluded.repo WHERE excluded.sequence > notification_inbox.sequence")
-            .bind(host).bind(&page.source_id).bind(item.task_id).bind(item.sequence).bind(item.ts).bind(&item.kind).bind(&item.title).bind(&item.repo).execute(&mut **tx).await?;
+        let changed = sqlx::query("INSERT INTO notification_inbox(host, source_id, task_id, sequence, read_sequence, ts, kind, title, repo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(host, source_id, task_id) DO UPDATE SET sequence=excluded.sequence,read_sequence=excluded.sequence,ts=excluded.ts,kind=excluded.kind,title=excluded.title,repo=excluded.repo WHERE excluded.sequence > notification_inbox.sequence")
+            .bind(host).bind(&page.source_id).bind(item.task_id).bind(item.sequence).bind(item.sequence).bind(item.ts).bind(&item.kind).bind(&item.title).bind(&item.repo).execute(&mut **tx).await?;
         if changed.rows_affected() > 0 {
             inserted.push(item.clone());
         }

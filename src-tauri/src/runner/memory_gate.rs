@@ -1,4 +1,7 @@
-//! Runner approval-time projection revalidation.
+//! Runner-surface (원격/모바일) 승인 대기 task의 승인·취소.
+//!
+//! 이름은 옛 P2 투영 재검증에서 왔지만, 그 재검증은 제거됐다(설계 2026-09-13 §P2 제거) —
+//! 남은 것은 잠금·상태 전이·워크트리 정리뿐이다.
 
 use sqlx::SqlitePool;
 
@@ -22,18 +25,7 @@ pub async fn approve_pending_task(
     let _guard = worktree_locks
         .acquire(std::path::Path::new(&task.worktree_path))
         .await;
-    if let Err(error) = crate::memory::verify_task_projection(pool, task_id, now).await {
-        db::append_runner_event(
-            pool,
-            task_id,
-            now,
-            "memory_projection_start_blocked",
-            Some(&error.to_string()),
-        )
-        .await
-        .map_err(|audit_error| audit_error.to_string())?;
-        return Err(error.to_string());
-    }
+    // 옛 DB 투영(P2) 재검증은 제거됐다(설계 2026-09-13 §P2 제거) — 항상 통과였던 게이트다.
     if !db::queue_pending_task(pool, task_id, now)
         .await
         .map_err(|error| error.to_string())?
@@ -78,9 +70,6 @@ pub async fn cancel_pending_task(
         std::path::Path::new(&current.worktree_path),
     )
     .map_err(|_| "허용되지 않는 repository 경로입니다".to_string())?;
-    crate::memory::retire_task_projection_if_present(pool, task_id, now)
-        .await
-        .map_err(|error| error.to_string())?;
     crate::worktree::Worktree {
         repo,
         path,
@@ -96,7 +85,5 @@ pub async fn cancel_pending_task(
     {
         return Err("pending task changed state during locked cleanup".to_string());
     }
-    crate::memory::record_review_outcome(pool, task_id, "discarded")
-        .await
-        .map_err(|error| error.to_string())
+    Ok(())
 }

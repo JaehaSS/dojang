@@ -38,7 +38,7 @@ export function PendingApprovalSection({ tasks, onRefresh }: Props) {
       <div className="border border-border-strong rounded-md overflow-hidden mb-6">
         {pending.map((task) => (
           <div
-            key={task.id}
+            key={`${task.host}:${task.id}`}
             className="flex items-center gap-2.5 px-3 py-2.5 border-b border-border last:border-b-0 bg-raised"
           >
             <span className="w-2 h-2 rounded-full shrink-0" style={{ background: "var(--c-awaiting)" }} />

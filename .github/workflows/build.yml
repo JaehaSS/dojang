@@ -1,0 +1,71 @@
+name: build
+
+# 태그(v*)를 밀면 macOS·Windows 설치 파일을 빌드해 해당 태그의 초안 릴리스에 올린다.
+# 수동 실행(workflow_dispatch)은 빌드만 하고 아티팩트로 남긴다.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifacts: |
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifacts: |
+              src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+    runs-on: ${{ matrix.os }}
+    env:
+      # 저장소 루트 기준 target/ — 로컬의 shared-target 설정은 CI에 없다.
+      CARGO_TARGET_DIR: src-tauri/target
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
+
+      - run: npm ci
+
+      - name: Build bundle
+        run: npx tauri build --target ${{ matrix.target }} --ci
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dojang-${{ matrix.target }}
+          path: ${{ matrix.artifacts }}
+          if-no-files-found: error
+
+      - name: Attach to draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          files=( $(echo "${{ matrix.artifacts }}") )
+          # 두 매트릭스 작업이 동시에 만들 수 있으므로 create 실패(이미 있음)는 무시한다.
+          gh release create "$GITHUB_REF_NAME" --draft --title "Dojang ${GITHUB_REF_NAME#v}" --notes "" || true
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber

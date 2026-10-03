@@ -23,13 +23,12 @@ impl Relation {
     }
 }
 
+/// 쓰는 쪽의 종류만 둔다. 1.0 이전 기록의 `task_start_receipt`·`memory_version`·`evidence_check`
+/// 링크는 스키마 CHECK가 여전히 허용하고, 읽는 쪽(`why_trace`)은 문자열 그대로 순회한다.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ArtifactKind {
     Task,
     InstructionDigest,
-    TaskStartReceipt,
-    MemoryVersion,
-    EvidenceCheck,
     VerificationRun,
     GitCommit,
     Actor,
@@ -40,9 +39,6 @@ impl ArtifactKind {
         match self {
             Self::Task => "task",
             Self::InstructionDigest => "instruction_digest",
-            Self::TaskStartReceipt => "task_start_receipt",
-            Self::MemoryVersion => "memory_version",
-            Self::EvidenceCheck => "evidence_check",
             Self::VerificationRun => "verification_run",
             Self::GitCommit => "git_commit",
             Self::Actor => "actor",
@@ -61,9 +57,6 @@ pub struct ArtifactLink {
 pub struct ApprovalProvenance {
     pub task_id: i64,
     pub instruction_digest: String,
-    pub start_receipts: Vec<i64>,
-    pub memory_versions: Vec<(i64, i64)>,
-    pub evidence_checks: Vec<i64>,
     pub verification_run: Option<String>,
     pub commit_sha: String,
 }

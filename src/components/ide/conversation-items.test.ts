@@ -38,6 +38,22 @@ describe("eventToItems — 턴 가드 에러의 응답 전문 중복 제거", ()
   });
 });
 
+describe("eventToItems — 저장 이력과 라이브 스트림의 도구 출력", () => {
+  it("tool_output은 결과나 assistant 답변으로 바꾸지 않고 구조화된 한 항목으로 보존한다", () => {
+    const event = {
+      kind: "tool_output",
+      tool_use_id: "tool-1",
+      contents: [{ type: "text" as const, text: "connector output" }],
+    };
+    expect(eventToItems(event)).toEqual([{ role: "tool_output", toolUseId: "tool-1", contents: event.contents, parentId: undefined }]);
+    expect(eventToItems(JSON.parse(JSON.stringify(event)))).toEqual(eventToItems(event));
+  });
+
+  it("unknown content blocks are ignored before they reach the transcript renderer", () => {
+    expect(eventToItems({ kind: "tool_output", tool_use_id: "tool-1", contents: [{ type: "image", url: 3 }] as never })).toEqual([]);
+  });
+});
+
 describe("eventToItems — 서브 에이전트 실행 모델", () => {
   it("subagent_model은 부모 id와 모델을 실은 아이템 하나가 된다", () => {
     expect(

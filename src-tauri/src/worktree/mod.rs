@@ -19,6 +19,8 @@ mod conflict;
 mod direct_checkout_lock;
 mod diff;
 mod diff_stats;
+mod diff_limits;
+mod review;
 mod recovery_identity;
 
 pub use conflict::{ConflictFile, Resolution};
@@ -53,6 +55,16 @@ pub struct FileDiff {
 pub struct TaskDiffResult {
     pub files: Vec<FileDiff>,
     pub baseline: BaselineStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    pub hunks: Vec<crate::diffmodel::DiffHunk>,
+    pub annotations: Vec<crate::annotations::RematchedAnnotation>,
 }
 
 /// diff를 어디부터 뜰 것인가.
@@ -356,7 +368,7 @@ pub fn checkout_local_branch(repo: &Path, branch: &str) -> anyhow::Result<()> {
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )?;
     if !status.is_empty() {
-        let message = format!("Praxis: '{branch}' 전환 전 자동 보관");
+        let message = format!("Dojang: '{branch}' 전환 전 자동 보관");
         run_git(
             repo,
             &["stash", "push", "--include-untracked", "-m", &message],
@@ -546,10 +558,10 @@ pub fn init_repository(dir: &Path) -> anyhow::Result<()> {
     }
     run_git(dir, &["add", "-A"])?;
     // 사용자 전역 user.name/email이 없을 수 있으므로 그때만 이 커밋에 신원을 지정한다.
-    // 이미 설정돼 있으면 건드리지 않는다 — 사용자 저장소의 첫 커밋 author를 Praxis로 덮어쓰지 않기 위해서다.
+    // 이미 설정돼 있으면 건드리지 않는다 — 사용자 저장소의 첫 커밋 author를 Dojang으로 덮어쓰지 않기 위해서다.
     let mut args: Vec<&str> = Vec::new();
     if !has_commit_identity(dir) {
-        args.extend(["-c", "user.name=Praxis", "-c", "user.email=praxis@local"]);
+        args.extend(["-c", "user.name=Dojang", "-c", "user.email=dojang@local"]);
     }
     args.extend(["commit", "-m", "Initial commit", "--allow-empty"]);
     run_git(dir, &args)?;
@@ -751,7 +763,7 @@ impl Worktree {
             if self.has_staged_changes()? {
                 run_git(
                     &self.path,
-                    &["commit", "-m", &format!("praxis: {}", self.branch)],
+                    &["commit", "-m", &format!("dojang: {}", self.branch)],
                 )?;
                 committed = true;
             }
@@ -2140,7 +2152,7 @@ mod init_tests {
 
         init_repository(&dir).unwrap();
 
-        // 사용자 저장소의 첫 커밋 author를 Praxis로 덮어쓰지 않는다.
+        // 사용자 저장소의 첫 커밋 author를 Dojang으로 덮어쓰지 않는다.
         let author = run_git(&dir, &["log", "-1", "--format=%ae"]).unwrap();
         assert_eq!(author.trim(), "someone@example.com");
 

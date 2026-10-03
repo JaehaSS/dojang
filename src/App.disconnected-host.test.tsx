@@ -72,7 +72,7 @@ vi.mock("@monaco-editor/react", async () => {
   return { default: () => React.createElement("div", { "data-testid": "monaco" }) };
 });
 vi.mock("@xterm/xterm", () => ({
-  Terminal: class { cols = 80; rows = 24; options = {}; loadAddon() {} open() {} write() {} writeln() {} dispose() {} onData() { return { dispose() {} }; } onResize() { return { dispose() {} }; } },
+  Terminal: class { cols = 80; rows = 24; options = {}; loadAddon() {} open() {} write() {} writeln() {} dispose() {} onData() { return { dispose() {} }; } focus() {} onResize() { return { dispose() {} }; } },
 }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} dispose() {} } }));
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class { dispose() {} } }));

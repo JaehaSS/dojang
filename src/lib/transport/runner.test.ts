@@ -58,6 +58,38 @@ describe("RunnerTransport host tagging", () => {
 });
 
 describe("RunnerTransport", () => {
+  it("normalizes session vendors and preview capability from the sessions response", async () => {
+    const entry = { session_id: "same", cwd: "/repo", last_cwd: null, git_branch: null, title: null, first_message: null, last_active: 0, messages: 1, vendor_version: null };
+    const request = vi.fn(async () => json({ sessions: [{ ...entry }, { ...entry, vendor: "codex" }, { ...entry, vendor: "unknown-provider" }], capabilities: { vendors: ["claude", "codex"], preview: true } }));
+    const transport = new RunnerTransport({ endpoint: "http://127.0.0.1:49123", pairingToken: token, profileName: "mini1" }, request);
+
+    await expect(transport.sessionHomeIndex("/repo", false)).resolves.toMatchObject([
+      { host: "mini1", vendor: "claude", preview_supported: true },
+      { host: "mini1", vendor: "codex", preview_supported: true },
+    ]);
+  });
+
+  it("treats a legacy Runner sessions response as Claude-only with no preview", async () => {
+    const request = vi.fn(async () => json({ sessions: [] }));
+    const transport = new RunnerTransport({ endpoint: "http://127.0.0.1:49123", pairingToken: token, profileName: "mini1" }, request);
+
+    await transport.sessionHomeIndex("/repo", false);
+    await expect(transport.sessionHomePreview("/repo", "claude", "old")).rejects.toThrow("미리보기");
+  });
+
+  it("loads Runner capabilities before submitting a Codex resume and sends resume_vendor", async () => {
+    const request = vi.fn(async (url: RequestInfo | URL, _init?: RequestInit) =>
+      String(url).includes("/v1/sessions?")
+        ? json({ sessions: [], capabilities: { vendors: ["claude", "codex"], preview: true } })
+        : json({ id: 4, mode: "conversation" }),
+    );
+    const transport = new RunnerTransport({ endpoint: "http://127.0.0.1:49123", pairingToken: token, profileName: "mini1" }, request);
+    await transport.taskCreate({ host: "mini1", repo: "/repo", instruction: "x", agent: "codex", role: "implementer", model: "", headless: false, ensemble: "", mode: "conversation", cmd: "", args: [], cols: 80, rows: 24, resumeSession: "thread", resumeVendor: "codex" });
+
+    expect(request.mock.calls).toHaveLength(2);
+    expect(JSON.parse(String(request.mock.calls[1][1]?.body))).toMatchObject({ resume_session: "thread", resume_vendor: "codex" });
+  });
+
   it("scopes repair requests to the remote task and session", async () => {
     const request = vi.fn(async (_input: unknown, _init?: RequestInit) => json(null));
     const transport = new RunnerTransport({ endpoint: "http://127.0.0.1:49123", pairingToken: token, profileName: "mini1" }, request as never);
@@ -120,6 +152,18 @@ describe("RunnerTransport", () => {
       files: [],
       baseline: { kind: "pinned" },
     });
+  });
+
+  it("requests an atomic review snapshot with the selected range", async () => {
+    const request = vi.fn(async (_input: RequestInfo | URL) => json({ files: [], baseline: { kind: "pinned" } }));
+    const transport = new RunnerTransport({ endpoint: "http://127.0.0.1:49123", pairingToken: token }, request);
+
+    await transport.taskDiff(7, "uncommitted", true);
+
+    const url = new URL(String(request.mock.calls[0][0]));
+    expect(url.pathname).toBe("/v1/tasks/7/diff");
+    expect(url.searchParams.get("range")).toBe("uncommitted");
+    expect(url.searchParams.get("include_review")).toBe("true");
   });
 
   it("adds a bearer token to HTTP calls and maps task-backed file reads", async () => {
@@ -389,95 +433,18 @@ describe("RunnerTransport", () => {
     });
   });
 
-  it("routes memory and context operations to Runner and preserves error details", async () => {
-    const request = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
-      const body = init?.body ? JSON.parse(String(init.body)) : null;
-      if (String(url).endsWith("/v1/memories") && body?.repository === "/forbidden") {
-        return new Response("scope denied", { status: 400 });
-      }
-      return json([]);
-    });
+  it("routes quickopen search to Runner", async () => {
+    const request = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => json([]));
     const transport = new RunnerTransport(
       { endpoint: "http://127.0.0.1:49123", pairingToken: token },
       request,
     );
 
-    await transport.memoryList();
-    await transport.memoryAdd("/repo", "decision", "remember");
-    await transport.memoryUpdate(3, "updated", "claim");
-    await transport.memoryConfirm(3, 99);
-    await transport.memoryConfirmAndApprove(3, 2);
-    await transport.memoryAddCodeEvidence(3, {
-      relative_path: "src/lib.rs",
-      line_start: 2,
-      line_end: 4,
-    });
-    await transport.memoryAddLocalDocumentEvidence(3, {
-      relative_path: "docs/guide.md",
-      expires_at: 101,
-    });
-    await transport.memoryAddExternalDocumentEvidence(3, {
-      url: "https://example.test/guide",
-      expires_at: 102,
-    });
-    await transport.memoryEvidence(3);
-    await transport.memoryRevalidate(3);
-    await transport.knowledgeSubmitReview(3);
-    await transport.knowledgeApprove(3);
-    await transport.memoryUsages(3);
-    await transport.memoryPreview("/repo", "ship");
-    await transport.contextReport(7);
-    await transport.contextFileRead(7, "/repo/CLAUDE.md");
     await transport.quickopenSearch("deploy", ["task", "session"]);
-    await transport.memoryVersions(3);
-    await transport.memoryRestoreVersion(3, 1, 2, "candidate");
-    await transport.memorySetApplicationPolicy(3, "must_apply", 2, "relevance");
 
     expect(request.mock.calls.map(([url]) => String(url))).toEqual([
-      "http://127.0.0.1:49123/v1/memories",
-      "http://127.0.0.1:49123/v1/memories",
-      "http://127.0.0.1:49123/v1/memories/3",
-      "http://127.0.0.1:49123/v1/memories/3/confirmations",
-      "http://127.0.0.1:49123/v1/memories/3/confirm-and-approve",
-      "http://127.0.0.1:49123/v1/memories/3/evidence/code-locations",
-      "http://127.0.0.1:49123/v1/memories/3/evidence/documents/local",
-      "http://127.0.0.1:49123/v1/memories/3/evidence/documents/external",
-      "http://127.0.0.1:49123/v1/memories/3/evidence",
-      "http://127.0.0.1:49123/v1/memories/3/revalidate",
-      "http://127.0.0.1:49123/v1/memories/3/review",
-      "http://127.0.0.1:49123/v1/memories/3/approve",
-      "http://127.0.0.1:49123/v1/memories/3/usages",
-      "http://127.0.0.1:49123/v1/memories/preview",
-      "http://127.0.0.1:49123/v1/tasks/7/context",
-      "http://127.0.0.1:49123/v1/tasks/7/context/file?path=%2Frepo%2FCLAUDE.md",
       "http://127.0.0.1:49123/v1/quickopen?query=deploy&scopes=task%2Csession",
-      "http://127.0.0.1:49123/v1/memories/3/versions",
-      "http://127.0.0.1:49123/v1/memories/3/versions/1/restore",
-      "http://127.0.0.1:49123/v1/memories/3/application-policy",
     ]);
-    expect(JSON.parse(String(request.mock.calls[3][1]?.body))).toEqual({ expires_at: 99 });
-    expect(JSON.parse(String(request.mock.calls[4][1]?.body))).toEqual({
-      expected_version: 2,
-    });
-    expect(JSON.parse(String(request.mock.calls[5][1]?.body))).toEqual({
-      relative_path: "src/lib.rs",
-      line_start: 2,
-      line_end: 4,
-    });
-    expect(JSON.parse(String(request.mock.calls[18][1]?.body))).toEqual({
-      expected_current_version: 2,
-      expected_status: "candidate",
-    });
-    // 정책 CAS는 snake_case 본문으로 나가야 한다 — Runner가 그 이름으로만 읽는다.
-    expect(request.mock.calls[19][1]?.method).toBe("PUT");
-    expect(JSON.parse(String(request.mock.calls[19][1]?.body))).toEqual({
-      policy: "must_apply",
-      expected_version: 2,
-      expected_policy: "relevance",
-    });
-    await expect(transport.memoryAdd("/forbidden", "decision", "x")).rejects.toThrow(
-      "scope denied",
-    );
   });
 
   it("routes diff hunks and annotation operations to Runner with snake_case bodies", async () => {

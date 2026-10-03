@@ -31,6 +31,8 @@ interface Props {
     scopeLabel: string;
     contentAvailable: boolean;
   };
+  /** 열 때 고를 에디터 검색 범위. ⌥F처럼 "파일을 찾겠다"가 분명한 진입로는 `file`로 연다. */
+  initialEditorTab?: EditorSearchTab;
   /** 현재 워크트리 파일 경로 목록(flattenFiles 결과) — 미선택이면 빈 배열. */
   files: string[];
   /** 스킬 조회 대상 레포 — 빈 문자열이면 스킬 소스 생략. */
@@ -42,7 +44,7 @@ interface Props {
 }
 
 const DEBOUNCE_MS = 200;
-type EditorSearchTab = "all" | "file" | "code";
+export type EditorSearchTab = "all" | "file" | "code";
 
 const SCOPE_ORDER: QuickOpenScope[] = ["task", "file", "code", "session", "skill", "command"];
 const SCOPE_LABEL: Record<QuickOpenScope, string> = {
@@ -82,7 +84,7 @@ function groupByScope(items: RankedQuickOpenItem[]): [QuickOpenScope, RankedQuic
 const NO_ITEMS: QuickOpenItem[] = [];
 const NO_RANKED: RankedQuickOpenItem[] = [];
 
-export function QuickOpen({ open, scopes, editorSearch, files, repo, taskId, onClose, onSelect }: Props) {
+export function QuickOpen({ open, scopes, editorSearch, initialEditorTab = "all", files, repo, taskId, onClose, onSelect }: Props) {
   const [editorTab, setEditorTab] = useState<EditorSearchTab>("all");
   const effectiveEditorTab = editorSearch && !editorSearch.contentAvailable && editorTab === "code"
     ? "all"
@@ -121,9 +123,10 @@ export function QuickOpen({ open, scopes, editorSearch, files, repo, taskId, onC
     priorFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setQuery("");
     setDebounced({ value: "", revision: 0 });
-    setEditorTab("all");
+    setEditorTab(initialEditorTab);
     setSel(0);
     requestAnimationFrame(() => inputRef.current?.focus());
+    // 시작 범위는 여는 순간에만 읽는다 — 열린 뒤 바뀐다고 입력을 지우지 않는다.
   }, [open]);
 
   useEffect(() => {

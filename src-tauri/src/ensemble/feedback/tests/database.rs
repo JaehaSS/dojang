@@ -5,7 +5,7 @@ use super::super::*;
 static DATABASE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[tokio::test]
-async fn loads_selected_candidate_model_and_approved_memory_association() {
+async fn loads_selected_candidate_model() {
     let pool = test_pool().await;
     let claude = insert_candidate(&pool, "claude", "ens-selected", 10).await;
     let codex = insert_candidate(&pool, "codex", "ens-selected", 11).await;
@@ -13,15 +13,10 @@ async fn loads_selected_candidate_model_and_approved_memory_association() {
     set_state(&pool, codex, "Discarded", 21).await;
     append_model(&pool, claude, Some("opus"), None).await;
     append_model(&pool, claude, None, Some("claude-opus-4-8")).await;
-    record_memory(&pool, claude, 1, Some("approved")).await;
-    record_memory(&pool, claude, 2, Some("approved")).await;
-    record_memory(&pool, codex, 3, Some("discarded")).await;
 
     let history = feedback_history_with_limit(&pool, 20).await.unwrap();
 
     assert_eq!(history.selected_count, 1);
-    assert_eq!(history.selected_with_memory, 1);
-    assert_eq!(history.selected_without_memory, 0);
     assert_eq!(history.entries.len(), 1);
     let entry = &history.entries[0];
     assert_eq!(entry.selection_status, EnsembleSelectionStatus::Selected);
@@ -29,8 +24,6 @@ async fn loads_selected_candidate_model_and_approved_memory_association() {
     assert_eq!(entry.selected_agent.as_deref(), Some("claude"));
     assert_eq!(entry.requested_model.as_deref(), Some("opus"));
     assert_eq!(entry.resolved_model.as_deref(), Some("claude-opus-4-8"));
-    assert_eq!(entry.selected_memory_count, 2);
-    assert_eq!(entry.selected_approved_memory_count, 2);
 }
 
 #[tokio::test]
@@ -108,19 +101,3 @@ async fn append_model(
         .unwrap();
 }
 
-async fn record_memory(
-    pool: &sqlx::SqlitePool,
-    task_id: i64,
-    memory_id: i64,
-    outcome: Option<&str>,
-) {
-    sqlx::query(
-        "INSERT INTO memory_usages (memory_id, task_id, injected_at, outcome) VALUES (?, ?, 1, ?)",
-    )
-    .bind(memory_id)
-    .bind(task_id)
-    .bind(outcome)
-    .execute(pool)
-    .await
-    .unwrap();
-}

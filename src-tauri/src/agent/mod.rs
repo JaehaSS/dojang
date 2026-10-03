@@ -98,6 +98,10 @@ pub fn agent_args_with_effort(
             }
         }
         if seed && !instr.is_empty() {
+            // `-`로 시작하는 지시문이 옵션으로 읽히지 않게 옵션을 끝낸다. agy `-i`는 값을 받는 플래그라 제외.
+            if matches!(agent, "claude" | "codex") {
+                args.push("--".to_string());
+            }
             args.push(instr.to_string());
         }
         return Some((bin.to_string(), args));
@@ -244,11 +248,11 @@ mod tests {
     fn presets_seed_instruction_as_trailing_positional() {
         assert_eq!(
             agent_args("claude", "do x", None),
-            Some(("claude".into(), vec!["do x".into()]))
+            Some(("claude".into(), vec!["--".into(), "do x".into()]))
         );
         assert_eq!(
-            agent_args("codex", "do x", None),
-            Some(("codex".into(), vec!["do x".into()]))
+            agent_args("codex", "-x do", None),
+            Some(("codex".into(), vec!["--".into(), "-x do".into()]))
         );
     }
 
@@ -392,7 +396,7 @@ mod tests {
             agent_args("claude", "do x", Some("opus")),
             Some((
                 "claude".into(),
-                vec!["--model".into(), "opus".into(), "do x".into()]
+                vec!["--model".into(), "opus".into(), "--".into(), "do x".into()]
             ))
         );
     }
@@ -443,6 +447,7 @@ mod tests {
                     "gpt-5.6-sol".into(),
                     "-c".into(),
                     "model_reasoning_effort=\"high\"".into(),
+                    "--".into(),
                     "do x".into(),
                 ]
             ))
@@ -480,6 +485,7 @@ mod tests {
                     "opus".into(),
                     "--effort".into(),
                     "high".into(),
+                    "--".into(),
                     "do x".into(),
                 ]
             ))

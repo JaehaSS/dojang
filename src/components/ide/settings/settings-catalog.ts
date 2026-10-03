@@ -16,6 +16,7 @@ export type SettingsTab =
   | "mcp"
   | "skills"
   | "knowledge"
+  | "memory"
   | "mobile"
   | "schedules";
 
@@ -26,6 +27,8 @@ export interface SettingsTabSpec {
   key: SettingsTab;
   label: string;
   group: SettingsTabGroup;
+  /** 탭 옆에 다는 짧은 배지 — "베타"처럼 상태를 알리되 라벨 자체를 바꾸지 않는다. */
+  badge?: string;
 }
 
 export const SETTINGS_TABS: SettingsTabSpec[] = [
@@ -36,8 +39,9 @@ export const SETTINGS_TABS: SettingsTabSpec[] = [
   { key: "notifications", label: "알림·음성", group: "settings" },
   { key: "mcp", label: "MCP 서버", group: "manage" },
   { key: "skills", label: "스킬", group: "manage" },
-  { key: "knowledge", label: "지식 그래프", group: "manage" },
-  { key: "mobile", label: "모바일", group: "manage" },
+  { key: "knowledge", label: "지식", group: "manage" },
+  { key: "memory", label: "메모리", group: "manage" },
+  { key: "mobile", label: "모바일", group: "manage", badge: "베타" },
   { key: "schedules", label: "스케줄", group: "manage" },
 ];
 
@@ -147,6 +151,13 @@ export const SETTINGS_CATALOG: SettingEntry[] = [
     keywords: ["환경", "environment", "프로세스"],
   },
   {
+    id: "session-style",
+    label: "세션 방식",
+    tab: "run",
+    hint: "새 작업을 대화로 할지 터미널(CLI 그대로)로 할지",
+    keywords: ["terminal", "터미널", "대화", "conversation", "cli", "컴포저", "session"],
+  },
+  {
     id: "use-worktree",
     label: "워크트리 격리 (기본값)",
     tab: "run",
@@ -191,6 +202,14 @@ export const SETTINGS_CATALOG: SettingEntry[] = [
     keywords: ["capture", "reflect", "회고", "추출", "effort", "lean"],
     risk: "cost",
   },
+  {
+    id: "english-assist",
+    label: "영어로 일하기 보조",
+    tab: "run",
+    hint: "입력창 ⌘J 영어 프롬프트, 답변 번역 ⌥⌘J, 표현 짚기, 번역 모델",
+    keywords: ["translate", "번역", "영어", "english", "프롬프트", "⌘J", "표현", "단어장", "vocab"],
+    risk: "cost",
+  },
 
   // ── 연결 ────────────────────────────────────────────────
   {
@@ -217,22 +236,22 @@ export const SETTINGS_CATALOG: SettingEntry[] = [
     keywords: ["voice", "stt", "받아쓰기", "핫키", "hotkey", "ohr", "전사"],
   },
 
-  // ── 지식 그래프(관리) ───────────────────────────────────
-  {
-    id: "insight",
-    label: "대기 인사이트",
-    tab: "knowledge",
-    hint: "응답을 기다리는 동안 개인 지식창고의 고른 폴더 문서를 카드로 보여준다",
-    keywords: ["insight", "덱", "deck", "카드", "위키", "wiki", "지식창고", "리마인드", "폴더", "범위"],
-  },
-
   // ── 모바일(관리) ────────────────────────────────────────
   {
     id: "mobile-pairing",
     label: "기기 페어링",
     tab: "mobile",
-    hint: "폰을 이 Mac 또는 Runner에 연결한다",
+    hint: "폰을 이 Mac에 연결한다",
     keywords: ["mobile", "폰", "qr", "pairing", "페어링", "pwa"],
+  },
+
+  // ── 고급 ────────────────────────────────────────────────
+  {
+    id: "advanced-features",
+    label: "고급·실험 기능 표시",
+    tab: "appearance",
+    hint: "캐시 관측치·앙상블 실험 지표·Design Mode 같은 개발자용·실험 기능을 노출한다",
+    keywords: ["experimental", "실험", "고급", "developer", "개발자", "advanced"],
   },
 ];
 

@@ -39,12 +39,16 @@ try:
                 assert tool['name']=='praxis_ui' and tool['tools'][0]['name']=='ask_user'
             else:
                 assert p['threadId']==thread and 'dynamicTools' not in p
+                assert p.get('excludeTurns') is True, 'resume must omit image-heavy historical turns'
             response(frame, {'thread':{'id':thread},'model':'fixture-model'})
         elif method == 'mcpServerStatus/list':
             response(frame, {'data':[], 'nextCursor':None})
         elif method == 'turn/start':
             assert p.get('serviceTier') == speed
             case=p['input'][0]['text']
+            if case in ['large-event', 'oversized-event']:
+                size = 5 if case == 'large-event' else 17
+                event('fixture/image', image='a' * (size * 1024 * 1024))
             response(frame, {'turn':{'id':turn}})
             request={'id':9007199254740993,'method':'item/tool/call','params':{'threadId':thread,'turnId':turn,'callId':'call-one','namespace':'praxis_ui','tool':'ask_user','arguments':args}}
             if case == 'secret':

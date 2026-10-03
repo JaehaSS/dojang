@@ -76,6 +76,7 @@ async fn insert_task(
     id
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn direct_mode_alias_is_rejected_before_claim() {
     let fixture = fixture("direct-alias").await;

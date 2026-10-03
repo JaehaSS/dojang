@@ -18,6 +18,8 @@ export interface RecentSessionsProps {
   onOpenMenu?: (menu: TaskNavigationMenuState) => void;
   /** 창을 판정할 기준 시각(초). 주면 내부 tick을 쓰지 않는다 — 테스트가 시계를 고정하는 통로다. */
   nowSec?: number;
+  /** 답을 기다리는 구조화 질문이 열린 작업의 좌표 — 트리 카드와 같은 점·라벨을 그린다. */
+  questionTasks?: ReadonlySet<string>;
 }
 
 /** 창 밖으로 나간 세션을 떨어뜨리는 주기(ms). */
@@ -53,6 +55,7 @@ export function RecentSessions({
   onOpenTask,
   onOpenMenu,
   nowSec,
+  questionTasks,
 }: RecentSessionsProps) {
   const now = useNowSec(nowSec);
   const recent = recentSessions(tasks, now);
@@ -73,6 +76,7 @@ export function RecentSessions({
       </div>
       {recent.map((task) => {
         const selected = taskKey(task) === selectedKey;
+        const pendingQuestion = questionTasks?.has(taskKey(task)) ?? false;
         return (
           <div
             key={taskKey(task)}
@@ -87,10 +91,10 @@ export function RecentSessions({
           >
             <span
               className="w-2 h-2 rounded-full shrink-0"
-              style={{ background: taskDotColor(task) }}
+              style={{ background: taskDotColor(task, pendingQuestion) }}
               role="img"
-              aria-label={`작업 상태: ${taskStatusLabel(task)}`}
-              title={taskStatusLabel(task)}
+              aria-label={`작업 상태: ${taskStatusLabel(task, pendingQuestion)}`}
+              title={taskStatusLabel(task, pendingQuestion)}
             />
             {/* 프로젝트명이 먼저다 — 찾고 있는 것이 "어느 프로젝트의 세션인가"이므로, 제목보다
                 프로젝트가 앞에 와야 눈이 한 열만 훑고 끝난다. */}

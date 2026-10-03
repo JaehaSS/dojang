@@ -3,17 +3,6 @@ use super::provenance::{validate_hex, ApprovalProvenance, ArtifactKind, Artifact
 pub(super) fn links(provenance: &ApprovalProvenance) -> anyhow::Result<Vec<ArtifactLink>> {
     provenance.decision_key_hash()?;
     let mut links = fixed_links(provenance);
-    append_numeric(
-        &mut links,
-        &provenance.start_receipts,
-        ArtifactKind::TaskStartReceipt,
-    )?;
-    append_memory_versions(&mut links, &provenance.memory_versions)?;
-    append_numeric(
-        &mut links,
-        &provenance.evidence_checks,
-        ArtifactKind::EvidenceCheck,
-    )?;
     append_verification(&mut links, provenance.verification_run.as_deref())?;
     sort_and_deduplicate(&mut links);
     Ok(links)
@@ -42,37 +31,6 @@ fn fixed_links(provenance: &ApprovalProvenance) -> Vec<ArtifactLink> {
             provenance.commit_sha.clone(),
         ),
     ]
-}
-
-fn append_numeric(
-    links: &mut Vec<ArtifactLink>,
-    values: &[i64],
-    kind: ArtifactKind,
-) -> anyhow::Result<()> {
-    for value in values {
-        if *value <= 0 {
-            anyhow::bail!("artifact identity must be positive");
-        }
-        links.push(link(Relation::Used, kind, value.to_string()));
-    }
-    Ok(())
-}
-
-fn append_memory_versions(
-    links: &mut Vec<ArtifactLink>,
-    versions: &[(i64, i64)],
-) -> anyhow::Result<()> {
-    for (memory_id, version) in versions {
-        if *memory_id <= 0 || *version <= 0 {
-            anyhow::bail!("memory version identity must be positive");
-        }
-        links.push(link(
-            Relation::Used,
-            ArtifactKind::MemoryVersion,
-            format!("{memory_id}:{version}"),
-        ));
-    }
-    Ok(())
 }
 
 fn append_verification(

@@ -12,6 +12,7 @@ fn request(agent: &str, model: &str, reasoning_effort: &str) -> QueuedTaskReques
         mode: "terminal".to_string(),
         goal_contract: None,
         resume_session: None,
+        resume_vendor: None,
     }
 }
 
@@ -73,4 +74,18 @@ fn resume_session_rejects_agy() {
     agy_resume.mode = "conversation".to_string();
     agy_resume.resume_session = Some("11111111-1111-1111-1111-111111111111".to_string());
     assert!(validate_request(&agy_resume).unwrap_err().contains("agy"));
+}
+
+#[test]
+fn external_resume_requires_matching_explicit_vendor_for_codex() {
+    let mut req = request("codex", "", "");
+    req.mode = "conversation".into();
+    req.resume_session = Some("11111111-1111-4111-8111-111111111111".into());
+    assert!(validate_request(&req).is_err());
+    req.resume_vendor = Some("codex".into());
+    assert!(validate_request(&req).is_ok());
+    req.resume_vendor = Some("claude".into());
+    assert!(validate_request(&req).is_err());
+    req.resume_session = None;
+    assert!(validate_request(&req).is_err());
 }

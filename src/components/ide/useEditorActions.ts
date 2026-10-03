@@ -1,12 +1,7 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { HostId } from "../../lib/transport";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
-  codegraphCancel,
-  codegraphImpactAt,
-  codegraphNeighborhoodAt,
-  codegraphIndex,
-  codegraphStatus,
   lspGoto,
   lspStatus,
   openLocalFile,
@@ -14,12 +9,8 @@ import {
   type LspGotoKind,
   type LspStatusInfo,
   type LspTarget,
-  type ImpactedSymbol,
-  type CodeGraphNeighborhoodNode,
 } from "../../lib/ipc";
-import { codewikiGenerate, codewikiStatus } from "../../lib/code-wiki-ipc";
-import { getTransport, LOCAL_HOST } from "../../lib/transport";
-import type { EditorCodeGraphActions } from "./useCodeGraphPanel";
+import { getTransport } from "../../lib/transport";
 
 /** ⌘B 착지 지점 — EditorPane이 대상 탭을 띄운 뒤 소비하고 null로 되돌린다. */
 export interface RevealTarget {
@@ -64,7 +55,6 @@ export interface EditorActions {
   }) => Promise<LspTarget[]>;
   askLspStatus: (path: string) => Promise<LspStatusInfo>;
   openLspTarget: (target: LspTarget) => Promise<OpenTargetOutcome>;
-  codeGraph: EditorCodeGraphActions;
 }
 
 /**
@@ -181,68 +171,6 @@ export function useEditorActions({ taskId, host, onError, openFile }: Options): 
     return "opened";
   }, []);
 
-  const codeGraph = useMemo<EditorCodeGraphActions>(
-    () => ({
-      scope: taskId,
-      wiki: host === LOCAL_HOST ? {
-        status: async () => {
-          const id = taskIdRef.current;
-          if (id == null) throw new Error("코드 Wiki를 조회할 작업이 없습니다");
-          return codewikiStatus(id);
-        },
-        generate: async (sourcePath) => {
-          const id = taskIdRef.current;
-          if (id == null) throw new Error("코드 Wiki를 생성할 작업이 없습니다");
-          return codewikiGenerate(id, sourcePath);
-        },
-        openPath: async (path) => {
-          await openFileRef.current(path);
-        },
-      } : undefined,
-      status: async () => {
-        const id = taskIdRef.current;
-        if (id == null) throw new Error("코드 그래프를 조회할 작업이 없습니다");
-        return codegraphStatus(id);
-      },
-      index: async () => {
-        const id = taskIdRef.current;
-        if (id == null) throw new Error("코드 그래프를 만들 작업이 없습니다");
-        return codegraphIndex(id);
-      },
-      cancel: async () => {
-        const id = taskIdRef.current;
-        if (id == null) throw new Error("취소할 코드 그래프 작업이 없습니다");
-        return codegraphCancel(id);
-      },
-      impactAt: async ({ path, line, column, depth }) => {
-        const id = taskIdRef.current;
-        if (id == null) throw new Error("영향 범위를 조회할 작업이 없습니다");
-        return codegraphImpactAt(id, path, line, column, depth);
-      },
-      neighborhoodAt: async ({ path, line, column, direction, depth }) => {
-        const id = taskIdRef.current;
-        if (id == null) throw new Error("참조 그래프를 조회할 작업이 없습니다");
-        return codegraphNeighborhoodAt(
-          id,
-          path,
-          line,
-          column,
-          direction,
-          depth,
-        );
-      },
-      openItem: async (item: ImpactedSymbol) => {
-        if (!(await openFileRef.current(item.relPath))) return;
-        revealAt(item.relPath, item.line + 1, item.character + 1);
-      },
-      openNode: async (node: CodeGraphNeighborhoodNode) => {
-        if (!(await openFileRef.current(node.relPath))) return;
-        revealAt(node.relPath, node.line + 1, node.character + 1);
-      },
-    }),
-    [host, revealAt, taskId],
-  );
-
   return {
     revealTarget,
     setRevealTarget,
@@ -253,6 +181,5 @@ export function useEditorActions({ taskId, host, onError, openFile }: Options): 
     gotoSymbol,
     askLspStatus,
     openLspTarget,
-    codeGraph,
   };
 }

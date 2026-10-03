@@ -90,11 +90,8 @@ async fn complete(
 }
 
 async fn retire_projection(pool: &SqlitePool, task_id: i64, now: i64) -> anyhow::Result<()> {
-    if let Err(error) = crate::memory::retire_task_projection_if_present(pool, task_id, now).await {
-        record_failure(pool, task_id, FailureCode::ProjectionRetirementFailed, now).await;
-        return Err(error);
-    }
-    // 파일형 투영 블록도 여기서 걷는다 — 승인 커밋에 메모리 사본을 남기지 않는다.
+    // 옛 DB 투영(P2)의 retire는 제거됐다(설계 2026-09-13 §P2 제거) — 파일형 투영 블록만 걷는다.
+    // 승인 커밋에 메모리 사본을 남기지 않는다.
     if let Err(error) = crate::memory::file::retire_task(pool, task_id).await {
         record_failure(pool, task_id, FailureCode::ProjectionRetirementFailed, now).await;
         return Err(error);

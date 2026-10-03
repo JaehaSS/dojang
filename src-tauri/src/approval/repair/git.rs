@@ -158,7 +158,7 @@ pub fn snapshot(
             "-p",
             &source,
             "-m",
-            "praxis: preserved input for automatic repair",
+            "dojang: preserved input for automatic repair",
         ])
     })();
     let _ = std::fs::remove_file(&index);

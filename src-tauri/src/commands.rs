@@ -16,7 +16,6 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::annotations;
 use crate::capsule;
-use crate::codegraph;
 use crate::db::{self, state as tstate, Task};
 use crate::decision;
 use crate::diffmodel;
@@ -166,29 +165,6 @@ pub const DEFAULT_MAX_CONCURRENT: usize = 8;
 pub const MAX_CONCURRENT_MIN: usize = 1;
 pub const MAX_CONCURRENT_MAX: usize = 64;
 
-/// 캡처(추출)와 회고의 스위치 한 쌍.
-///
-/// 둘을 함께 넘기는 이유는 파급이다 — 스폰 경로가 이 값을 스레드로 들고 들어가므로,
-/// 인자를 하나씩 늘리면 `too_many_arguments`가 붙은 시그니처가 또 길어진다.
-#[derive(Clone)]
-pub struct CaptureGates {
-    pub capture: Arc<AtomicBool>,
-    pub reflect: Arc<AtomicBool>,
-}
-
-impl CaptureGates {
-    pub fn capture_on(&self) -> bool {
-        self.capture.load(Ordering::Relaxed)
-    }
-    pub fn reflect_on(&self) -> bool {
-        self.reflect.load(Ordering::Relaxed)
-    }
-    /// 둘 중 하나라도 켜져 있는지 — 공통 준비(worktree 경로·repo 조회)를 건너뛸지 판단한다.
-    pub fn any_on(&self) -> bool {
-        self.capture_on() || self.reflect_on()
-    }
-}
-
 /// 앱 전역 상태 — 다중 활성 작업 + DB 풀 + 동시 실행 상한.
 pub struct AppState {
     pub pool: Mutex<Option<SqlitePool>>,
@@ -203,12 +179,6 @@ pub struct AppState {
     /// 직접 실행의 브랜치 전환과 Task 행 생성을 canonical repo 단위로 직렬화한다.
     /// Unix에서는 Git common dir 파일 락으로 다른 Praxis 프로세스와도 조율한다.
     pub direct_repo_locks: worktree::DirectCheckoutLocks,
-    /// 메모리 캡처(추출) opt-in. 기본 OFF(비용 통제, PRD: reflection opt-in).
-    pub capture_enabled: Arc<AtomicBool>,
-    /// 회고(L1 반성) opt-in — 캡처와 **독립**이다. 하나의 스위치가 값어치가 다른 두 기능을
-    /// 함께 끄던 탓에, 회고 비용을 피하려면 더 값어치 있는 메모리 추출까지 꺼야 했다.
-    /// 기동 시 미설정이면 `capture_enabled` 값을 승계해 기존 동작을 보존한다(설계 0055 AD-5).
-    pub reflect_enabled: Arc<AtomicBool>,
     /// Verify/Challenge와 Approve/Discard/Delete의 task별 수명주기 점유.
     pub review_claims: ReviewClaims,
     /// 진행 중인 대화 턴 — 키 존재=in-flight(중복 전송 방지·busy 복원), 값은 관측 메타데이터.
@@ -250,8 +220,6 @@ pub struct AppState {
     /// 에디터 "정의로 이동"용 언어 서버 풀 (작업 × 언어). 로컬 전용 — 서버가 워크트리
     /// 파일시스템을 직접 읽으므로 원격 워크트리에는 붙일 수 없다.
     pub lsp: Arc<crate::lspclient::LspPool>,
-    /// 작업별 코드 그래프 인덱싱 슬롯과 취소 토큰.
-    pub codegraph_jobs: codegraph::jobs::BuildJobs,
     /// 에이전트가 프리뷰를 몰 때 쓰는 Bearer 토큰 맵 — task 종결 시 폐기된다.
     pub control_tokens: crate::preview_bridge::mcp::ControlTokens,
     /// 앱 인스턴스마다 새로 뽑는 MCP 경로 조각(`/mcp/<instance>`). 난수를 못 얻으면 None —
@@ -263,16 +231,6 @@ pub struct AppState {
     pub control_last: Mutex<HashMap<i64, std::time::Instant>>,
 }
 
-impl AppState {
-    /// 스폰 경로로 넘길 스위치 한 쌍.
-    pub fn capture_gates(&self) -> CaptureGates {
-        CaptureGates {
-            capture: self.capture_enabled.clone(),
-            reflect: self.reflect_enabled.clone(),
-        }
-    }
-}
-
 impl Default for AppState {
     fn default() -> Self {
         Self {
@@ -281,8 +239,6 @@ impl Default for AppState {
             max_concurrent: AtomicUsize::new(DEFAULT_MAX_CONCURRENT),
             reserved: Mutex::new(0),
             direct_repo_locks: worktree::DirectCheckoutLocks::default(),
-            capture_enabled: Arc::new(AtomicBool::new(false)),
-            reflect_enabled: Arc::new(AtomicBool::new(false)),
             review_claims: ReviewClaims::default(),
             convo_active: Arc::new(Mutex::new(HashMap::new())),
             side_question_active: Arc::new(Mutex::new(HashSet::new())),
@@ -298,7 +254,6 @@ impl Default for AppState {
             preview_bridge: crate::preview_bridge::PreviewBridge::new(),
             preview_workbench: crate::preview_workbench::PreviewWorkbench::new(),
             lsp: Arc::new(crate::lspclient::LspPool::default()),
-            codegraph_jobs: codegraph::jobs::BuildJobs::default(),
             control_tokens: crate::preview_bridge::mcp::ControlTokens::default(),
             mcp_instance: crate::preview_bridge::random_hex_id().ok(),
             mcp_port: Mutex::new(None),
@@ -316,6 +271,13 @@ fn now() -> i64 {
 
 pub mod service_tier;
 mod side_question_slots;
+mod task_results;
+mod project_plan;
+pub use project_plan::*;
+pub(crate) mod pipeline_driver;
+mod pipeline;
+pub use pipeline::*;
+pub use task_results::*;
 
 mod quiz;
 pub use quiz::*;
@@ -323,12 +285,14 @@ mod ensemble;
 pub use ensemble::*;
 mod voice;
 pub use voice::*;
+mod translate;
+pub use translate::*;
+mod vocab;
+pub use vocab::*;
 mod shell;
 pub use shell::*;
 mod repl;
 pub use repl::*;
-mod knowledge;
-pub use knowledge::*;
 mod wiki_workspace;
 pub use wiki_workspace::*;
 mod knowledge_vault;
@@ -343,12 +307,8 @@ mod knowledge_vault_usage;
 pub use knowledge_vault_usage::*;
 mod knowledge_vault_recovery;
 pub use knowledge_vault_recovery::*;
-mod knowledge_vault_policy;
-pub use knowledge_vault_policy::*;
 mod local_file;
 pub use local_file::*;
-mod goal;
-pub use goal::*;
 mod mcp;
 pub use mcp::*;
 mod schedule;
@@ -497,8 +457,6 @@ fn spawn_agent(
     id: i64,
     repo: String,
     cwd: String,
-    // P1: 호출 끊음, P2에서 제거 — 종료 훅의 캡처·회고가 사라져 이 게이트를 읽는 곳이 없다.
-    _gates: CaptureGates,
     cmd: &str,
     args: &[String],
     cols: u16,
@@ -633,6 +591,12 @@ fn cap_reached_error(max_concurrent: usize) -> String {
     format!("동시 실행 한도({max_concurrent})에 도달 — 진행 중 작업을 승인하거나 버린 후 다시 시도하세요")
 }
 
+/// `cap_reached_error`가 만든 오류인가. 파이프라인 드라이버가 "자리가 날 때까지 대기"와
+/// 진짜 실패를 가르는 데 쓴다.
+pub(crate) fn is_cap_reached_error(error: &str) -> bool {
+    error.starts_with("동시 실행 한도(")
+}
+
 /// 예약 카운터 핵심 로직(순수 함수, 유닛테스트 대상) — "활성 + 예약중" 합이 상한 미만이면
 /// `reserved`를 1 증가시키고 Ok, 아니면 건드리지 않고 Err. 호출자가 `active_count`를 실제
 /// 상한 체크와 같은 임계구역에서 넘겨야 TOCTOU가 없다(`reserve_slot` 참고).
@@ -752,6 +716,33 @@ async fn prepare_direct_worktree(
     Ok((worktree, claim))
 }
 
+/// 작업 생성과 별개로 메인 체크아웃만 전환한다. 직접 실행 생성·승인 머지와 같은 레포 락을
+/// 쥐고, 끝나지 않은 직접 실행 작업이 그 체크아웃을 쓰고 있으면 거절한다.
+async fn checkout_main_branch(
+    pool: &SqlitePool,
+    locks: &worktree::DirectCheckoutLocks,
+    repo: &Path,
+    branch: &str,
+) -> Result<BranchList, String> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("전환할 브랜치를 고르세요".to_string());
+    }
+    let _claim = locks.acquire(repo).await.map_err(|error| error.to_string())?;
+    let current = worktree::current_branch(repo).map_err(|error| error.to_string())?;
+    if current != branch {
+        ensure_no_open_direct_task(pool, repo).await?;
+    }
+    let repo = repo.to_path_buf();
+    let branch = branch.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        worktree::checkout_local_branch(&repo, &branch).map_err(|error| error.to_string())?;
+        branch_list(&repo)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// 파일형 메모리를 worktree의 컨텍스트 파일에 투영한다(설계 2026-09-13 R1–R3).
 /// 실패하면 작업을 시작하지 않는다 — 블록이 없는 채로 도는 세션은 규칙도 못 받는다.
 async fn project_memory_or_fail(
@@ -773,25 +764,33 @@ async fn project_memory_or_fail(
         now(),
     )
     .await;
-    if let Err(error) = result {
-        let reason = error.to_string();
-        let _ = db::update_state(pool, task_id, tstate::FAILED, now()).await;
-        let _ = db::append_event(
-            pool,
-            task_id,
-            "memory_projection_failed",
-            Some(&reason),
-            now(),
-        )
-        .await;
-        if !direct_mode {
-            let _ = worktree.discard();
+    let had_content = match result {
+        Ok(had_content) => had_content,
+        Err(error) => {
+            let reason = error.to_string();
+            let _ = db::update_state(pool, task_id, tstate::FAILED, now()).await;
+            let _ = db::append_event(
+                pool,
+                task_id,
+                "memory_projection_failed",
+                Some(&reason),
+                now(),
+            )
+            .await;
+            if !direct_mode {
+                let _ = worktree.discard();
+            }
+            return Err(format!(
+                "메모리 파일 투영에 실패해 작업을 시작하지 않았습니다: {reason}"
+            ));
         }
-        return Err(format!(
-            "메모리 파일 투영에 실패해 작업을 시작하지 않았습니다: {reason}"
-        ));
-    }
+    };
     let _ = db::append_event(pool, task_id, "memory_projection_applied", None, now()).await;
+    // 실제 내용이 실렸을 때만 "메모리 안내 후 재설명 없음" 인사이트의 마커를 남긴다 —
+    // 규칙만 실린 블록은 안내한 것이 없으니 재설명 여부를 셀 자격이 없다.
+    if had_content {
+        let _ = followup_observation::insert_observation_start(pool, task_id, now()).await;
+    }
     Ok(())
 }
 
@@ -950,6 +949,38 @@ mod task_base_tests {
             .await
             .unwrap();
         assert_eq!(implicit.0.branch, current);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn manual_checkout_switches_and_returns_the_new_current_branch() {
+        let pool = task_base_pool().await;
+        let dir = direct_git_repo("manual-checkout");
+        create_local_branch(&dir, "dev");
+        let locks = worktree::DirectCheckoutLocks::default();
+
+        let list = checkout_main_branch(&pool, &locks, &dir, "dev").await.unwrap();
+        assert_eq!(list.current, "dev");
+        assert_eq!(worktree::current_branch(&dir).unwrap(), "dev");
+        assert!(list.branches.contains(&"dev".to_string()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn manual_checkout_refuses_while_a_direct_task_uses_the_checkout() {
+        let pool = task_base_pool().await;
+        let dir = direct_git_repo("manual-checkout-busy");
+        let current = worktree::current_branch(&dir).unwrap();
+        create_local_branch(&dir, "dev");
+        let id = insert_direct_task(&pool, &dir, &current, "sha").await;
+        let locks = worktree::DirectCheckoutLocks::default();
+
+        let error = checkout_main_branch(&pool, &locks, &dir, "dev").await.unwrap_err();
+        assert!(error.contains(&format!("#{id}")));
+        assert_eq!(worktree::current_branch(&dir).unwrap(), current);
+        // 이미 체크아웃된 브랜치를 고르면 전환이 없으므로 막지 않는다.
+        let list = checkout_main_branch(&pool, &locks, &dir, &current).await.unwrap();
+        assert_eq!(list.current, current);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1161,7 +1192,7 @@ fn prepared_metric_detail(
     refresh: Option<&worktree::refresh::RefreshOutcome>,
 ) -> String {
     let mut detail = serde_json::json!({
-        "origin": if origin == TaskOrigin::Ui { "ui" } else { "external" },
+        "origin": origin.label(),
         "direct": direct,
         "refresh_enabled": refresh_enabled,
         "worktree_ms": clock.worktree_ms,
@@ -1252,6 +1283,28 @@ mod prepared_metric_tests {
         assert!(!direct.contains_key("refresh_ms"));
         assert!(!direct.contains_key("bootstrap_ms"));
         assert_eq!(direct["origin"], "external", "TaskOrigin은 여기에만 남는다");
+
+        let pipeline = fields(&prepared_metric_detail(
+            TaskOrigin::Pipeline,
+            false,
+            false,
+            &clock,
+            5,
+            1,
+            false,
+            None,
+            None,
+        ));
+        assert_eq!(pipeline["origin"], "pipeline");
+    }
+
+    /// Pipeline은 UI가 아니므로 최신화·직접 모드·질문 응답에서 External과 같이 빠지지만,
+    /// 승인 대기에는 들어가지 않는다(분기가 External 한정이다).
+    #[test]
+    fn pipeline_origin_is_not_ui_and_not_external() {
+        assert_ne!(TaskOrigin::Pipeline, TaskOrigin::Ui);
+        assert_ne!(TaskOrigin::Pipeline, TaskOrigin::External);
+        assert_eq!(TaskOrigin::Pipeline.label(), "pipeline");
     }
 
     /// 상한에 걸린 fetch와 느린 성공은 `refresh_ms`가 같은 모양이라 가려지지 않는다.
@@ -1425,6 +1478,7 @@ fn resume_external_event(session_id: &str, meta: &sessionhome::SessionMeta) -> s
         "kind": "resume_external",
         "session_id": short_id,
         "cwd": meta.cwd.clone(),
+        "vendor": meta.vendor,
         "last_active": meta.last_active,
         "messages": meta.messages,
     })
@@ -1458,6 +1512,8 @@ mod resume_session_dispatch_tests {
     fn sample_meta(session_id: &str) -> sessionhome::SessionMeta {
         sessionhome::SessionMeta {
             session_id: session_id.to_string(),
+            vendor: "claude".into(),
+            recent_user_message: None,
             cwd: Some("/repo".to_string()),
             last_cwd: None,
             git_branch: None,
@@ -1499,6 +1555,13 @@ mod resume_session_dispatch_tests {
     }
 }
 
+async fn ensure_managed_codex(app: &AppHandle, version: String) -> Result<String, String> {
+    let root = app.path().app_data_dir().map_err(|e| e.to_string())?
+        .join("cli-runtimes").join("codex");
+    tauri::async_runtime::spawn_blocking(move || crate::convo::cli_runtime::ensure(&root, &version))
+        .await.map_err(|e| e.to_string())?
+}
+
 pub(crate) async fn create_task_internal(
     app: &AppHandle,
     state: &AppState,
@@ -1526,15 +1589,36 @@ pub(crate) async fn create_task_internal(
         client_ref,
         resume_from,
         resume_session,
+        resume_vendor,
+        purpose_selection,
+        approvals,
     } = p;
     // 두 이어받기 입력은 배타다 — 작업 id와 세션 id가 함께 오면 어느 쪽을 따를지 정할 근거가
     // 없다(설계 2026-09-17 결정 2). 승계 분기 자체가 갈리므로 여기서 바로 거절한다.
     resume_targets_exclusive(resume_from, resume_session.as_deref())?;
+    if resume_session.is_some() {
+        let vendor = resume_vendor.as_deref().unwrap_or("claude");
+        if !matches!(vendor, "claude" | "codex") || agent.trim() != vendor
+            || mode != "conversation" || !ensemble.trim().is_empty() {
+            return Err("세션 공급자와 단일 대화 에이전트가 일치해야 합니다".into());
+        }
+    } else if resume_vendor.is_some() {
+        return Err("세션 없이 공급자를 지정할 수 없습니다".into());
+    }
     let creation_generation=crate::convo::interaction_commands::generation();
     let questions = mode == crate::convo::interaction::CREATE_MODE;
     // 버전 게이트는 `prep_ms`의 시계(`t0`)가 시작되기 **전에** 돈다. 따로 재지 않으면 이
     // 구간은 어느 계측에도 잡히지 않는데, 창이 열릴 때까지의 대기에는 그대로 포함된다.
     let mut check_version_ms: Option<u64> = None;
+    // 승인 통로(`--permission-prompt-tool`)는 Claude 질문 세션에만 있다. 조용히 무시하면 승인을
+    // 요청한 세션이 자동 승인으로 돈다.
+    if approvals
+        && (!questions
+            || crate::convo::interaction::runtime_for_agent(&agent)
+                != Some(crate::convo::interaction::RUNTIME_LOCAL))
+    {
+        return Err("실행 전 승인은 로컬 Claude 질문 세션에서 지원합니다".into());
+    }
     let question_runtime = if questions {
         let runtime = crate::convo::interaction::runtime_for_agent(&agent);
         let Some(runtime) = runtime else {
@@ -1544,12 +1628,13 @@ pub(crate) async fn create_task_internal(
         if origin != TaskOrigin::Ui || headless || !ensemble.trim().is_empty() || resume_from.is_some() || resume_session.is_some() {
             return Err("질문 응답은 새 로컬 Codex·Claude 일반 대화에서 지원합니다".into());
         }
-        let bin = crate::reviewer::which(&agent).ok_or("에이전트 실행 파일을 찾을 수 없습니다")?;
         // Codex만 app-server 프로토콜에 묶여 있다. MCP 런타임은 문서화된 표면만 써서 고정하지 않는다.
         if runtime == crate::convo::interaction::RUNTIME {
             let checked = Instant::now();
-            tauri::async_runtime::spawn_blocking(move || crate::convo::app_server::check_version(&bin)).await.map_err(|e| e.to_string())??;
+            ensure_managed_codex(app, crate::convo::cli_runtime::DEFAULT_VERSION.into()).await?;
             check_version_ms = Some(checked.elapsed().as_millis() as u64);
+        } else {
+            crate::reviewer::which(&agent).ok_or("에이전트 실행 파일을 찾을 수 없습니다")?;
         }
         Some(runtime)
     } else {
@@ -1591,6 +1676,7 @@ pub(crate) async fn create_task_internal(
             state.max_concurrent.load(Ordering::Relaxed),
         )?
     };
+    // Pipeline은 사용자가 계획 승인 단계에서 이미 허락한 repo라 화이트리스트를 다시 묻지 않는다.
     if origin == TaskOrigin::External {
         check_repo_allowed(&pool, &repo).await?;
     }
@@ -1639,7 +1725,7 @@ pub(crate) async fn create_task_internal(
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let branch = format!("praxis/{}-{}", worktree::slugify(&instruction), suffix);
+        let branch = format!("dojang/{}-{}", worktree::slugify(&instruction), suffix);
         // git 서브프로세스 동기 대기 — async 워커 점유 방지를 위해 blocking 풀로 분리.
         let repo_owned = repo_path.to_path_buf();
         let base = base_branch.clone();
@@ -1692,6 +1778,16 @@ pub(crate) async fn create_task_internal(
         )
         .await?;
     let id = task.id;
+    let purpose_binding = if let Some(selection) = purpose_selection.as_ref() {
+        crate::project_plan::bind_initial(&pool, id, selection, now()).await
+    } else if let Some(parent) = resume_from {
+        crate::project_plan::inherit_task(&pool, parent, id, now()).await
+    } else { Ok(()) };
+    if let Err(error) = purpose_binding {
+        let _ = db::update_state(&pool, id, tstate::FAILED, now()).await;
+        if !direct_mode { let _ = wt.discard(); }
+        return Err(format!("목적 선택이 변경되어 작업을 시작하지 않았습니다: {error}"));
+    }
     if let Some(tier) = service_tier.as_deref() {
         let saved = db::set_task_service_tier(&pool, &task, tier).await;
         if !matches!(saved, Ok(true)) {
@@ -1701,7 +1797,11 @@ pub(crate) async fn create_task_internal(
         }
     }
     if let Some(runtime) = question_runtime {
-        if let Err(error) = crate::convo::interaction::bind_runtime(&pool, id, runtime).await {
+        let bound = match crate::convo::interaction::bind_runtime(&pool, id, runtime).await {
+            Ok(()) if approvals => crate::convo::interaction::set_approvals(&pool, id, true).await,
+            other => other,
+        };
+        if let Err(error) = bound {
             let _ = db::update_state(&pool, id, tstate::FAILED, now()).await;
             if !direct_mode { let _ = wt.discard(); }
             return Err(error);
@@ -1789,8 +1889,10 @@ pub(crate) async fn create_task_internal(
         // 해석(디렉터리 순회)과 출처 메타 추출(선두/말미 샘플링)은 동기 파일시스템 IO다 —
         // `describe`가 둘을 한 번에 하고, blocking 풀로 내보내 UI 스레드를 막지 않는다.
         let lookup = session_id.clone();
+        let vendor = resume_vendor.as_deref().unwrap_or("claude").to_string();
+        let lookup_vendor = vendor.clone();
         let described = match tauri::async_runtime::spawn_blocking(move || {
-            sessionhome::describe(&lookup)
+            sessionhome::describe_vendor(&lookup_vendor, &lookup)
         })
         .await
         {
@@ -1798,7 +1900,7 @@ pub(crate) async fn create_task_internal(
             Err(join) => Err(join.to_string()),
         };
         let adopted = match described {
-            Ok(meta) => db::adopt_external_session(&pool, id, &session_id, now())
+            Ok(meta) => db::adopt_external_session_vendor(&pool, id, &vendor, &session_id, now())
                 .await
                 .map(|()| meta)
                 .map_err(|e| e.to_string()),
@@ -1984,7 +2086,12 @@ async fn spawn_task_agent_inner(
     // 여기가 모든 작업 spawn 의 초크포인트다. 호출부마다 거는 대신 여기서 한 번 막는다 —
     // 승인 경로(`spawn_task_agent`)와 텔레그램 `/approve` 는 사람이 보지 않는 시점에도
     // 들어오므로, 호출부에 거는 방식은 새 경로가 생길 때마다 조용히 빠진다.
-    refuse_while_updating(state)?;
+    let managed_codex = mode == "conversation" && agent == "codex"
+        && crate::convo::interaction::runtime_of(pool, id).await?.as_deref()
+            == Some(crate::convo::interaction::RUNTIME);
+    if !managed_codex {
+        refuse_while_updating(state)?;
+    }
     let attempt = if mode == "conversation" || !cfg!(target_os = "macos") {
         None
     } else {
@@ -2025,7 +2132,6 @@ async fn spawn_task_agent_inner(
             app.clone(),
             pool.clone(),
             state.convo_active.clone(),
-            state.capture_gates(),
             id,
             repo.to_string(),
             cwd.to_string(),
@@ -2055,13 +2161,21 @@ async fn spawn_task_agent_inner(
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "작업을 찾을 수 없습니다".to_string())?;
-        let instruction = vault_delivery(pool, id, repo, instruction, client_ref, attempt.as_deref())
+        let instruction = vault_delivery(pool, id, repo, instruction, client_ref, attempt.as_ref())
             .await
             .map_err(|error| error.to_string())?
             .map(|item| crate::knowledge::vault::retrieval::delivery_payload(instruction, &item.preview))
             .unwrap_or_else(|| instruction.to_string());
         let prompt =
             crate::goal_contract::execution_prompt(&instruction, task.goal_contract.as_deref());
+        let round = crate::preview_bridge::random_hex_id()?;
+        let purpose = crate::project_plan::prepare_purpose(pool, id, &round, now()).await.map_err(|e|e.to_string())?;
+        let prompt = if let Some(candidate) = purpose.as_ref() {
+            let mut tx=pool.begin().await.map_err(|e|e.to_string())?;
+            crate::project_plan::persist_purpose_tx(&mut tx,candidate).await.map_err(|e|e.to_string())?;
+            tx.commit().await.map_err(|e|e.to_string())?;
+            crate::project_plan::render_purpose(candidate,&prompt)
+        } else { prompt };
         let resolved = if headless {
             crate::agent::headless_args_with_effort(
                 agent,
@@ -2108,7 +2222,6 @@ async fn spawn_task_agent_inner(
             id,
             repo.to_string(),
             cwd.to_string(),
-            state.capture_gates(),
             &run_cmd,
             &run_args,
             fallback.cols,
@@ -2170,17 +2283,37 @@ async fn begin_vault_attempt(
     repo: &str,
     input: &str,
     client_ref: Option<&str>,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<VaultAttempt>> {
+    let explicit_snapshot = match client_ref {
+        Some(client_ref) => crate::knowledge::vault::selected_attachments::has_explicit_snapshot(pool, client_ref).await?,
+        None => false,
+    };
     let Some(vault_id) = crate::knowledge::vault::provenance::active_writable_vault(pool).await?
     else {
+        if explicit_snapshot {
+            anyhow::bail!("selected attachments cannot be delivered because the vault is not active")
+        }
         return Ok(None);
     };
     let Some(binding) = crate::knowledge::vault::resolve_project(pool, Path::new(repo)).await?
     else {
+        if explicit_snapshot {
+            anyhow::bail!("selected attachments cannot be delivered because the repository binding changed")
+        }
         return Ok(None);
     };
     let profile = crate::capture::invoke::profile(pool).await;
     let provider = crate::capture::invoke::provider_identity(&profile);
+    let selected_policy = match client_ref {
+        Some(client_ref) => crate::knowledge::vault::selected_attachments::pending_policy(
+            pool, &binding, input, client_ref,
+        ).await?,
+        None => None,
+    };
+    if explicit_snapshot && selected_policy.is_none() {
+        anyhow::bail!("selected attachments no longer belong to this repository binding; prepare them again")
+    }
+    let selected_preview_id = selected_policy.as_ref().map(|item| item.preview_id.clone());
     let restrictive_policy_seen = match client_ref {
         Some(client_ref) => crate::knowledge::vault::provenance::restrictive_draft_policy_seen(
             pool, &binding, client_ref,
@@ -2188,7 +2321,9 @@ async fn begin_vault_attempt(
         .await?,
         None => false,
     };
-    let policy = match client_ref {
+    let policy = if selected_policy.is_some() {
+        None
+    } else { match client_ref {
         Some(client_ref) => {
             crate::knowledge::vault::provenance::consume_draft_policy(
                 pool, &binding, client_ref, input, task_id,
@@ -2196,7 +2331,7 @@ async fn begin_vault_attempt(
             .await?
         }
         None => None,
-    };
+    }};
     let attempt = crate::knowledge::vault::provenance::start_attempt(
         pool,
         task_id,
@@ -2213,7 +2348,7 @@ async fn begin_vault_attempt(
         }
         None => false,
     };
-    match policy.filter(|_| policy_is_current) {
+    match selected_policy.map(|item| item.policy).or_else(|| policy.filter(|_| policy_is_current)) {
         Some(policy)
             if policy.input_mode == "task_only" || policy.input_mode == "private_attachment" =>
         {
@@ -2251,7 +2386,24 @@ async fn begin_vault_attempt(
             .await?
         }
     }
-    Ok(Some(attempt))
+    Ok(Some(VaultAttempt {
+        id: attempt,
+        selected_preview_id,
+    }))
+}
+
+#[derive(Clone)]
+struct VaultAttempt {
+    id: String,
+    selected_preview_id: Option<String>,
+}
+
+impl std::ops::Deref for VaultAttempt {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.id
+    }
 }
 
 struct VaultDelivery {
@@ -2264,15 +2416,37 @@ async fn vault_delivery(
     repo: &str,
     query: &str,
     client_ref: Option<&str>,
-    attempt: Option<&str>,
+    attempt: Option<&VaultAttempt>,
 ) -> anyhow::Result<Option<VaultDelivery>> {
     let (Some(client_ref), Some(attempt)) = (client_ref, attempt) else {
         return Ok(None);
     };
+    let expected_selected_snapshot = attempt.selected_preview_id.as_deref();
     let Some(binding) = crate::knowledge::vault::resolve_project(pool, Path::new(repo)).await?
     else {
+        if expected_selected_snapshot.is_some() {
+            anyhow::bail!("selected attachments cannot be delivered because the repository binding changed")
+        }
         return Ok(None);
     };
+    if let Some(expected_preview_id) = expected_selected_snapshot {
+        let preview = crate::knowledge::vault::selected_attachments::consume_expected(
+            pool, &binding, query, client_ref, expected_preview_id, task_id,
+        ).await?;
+        for reference in &preview.references {
+            let document_id: String = sqlx::query_scalar("SELECT document_id FROM vault_revisions WHERE id = ?")
+                .bind(&reference.revision_id).fetch_one(pool).await?;
+            if matches!(crate::knowledge::vault::scope_for_sources(pool, std::slice::from_ref(&reference.revision_id)).await?, Some(crate::knowledge::vault::Scope::PrivateData)) {
+                continue;
+            }
+            crate::knowledge::vault::provenance::record_revision_input(pool, &attempt.id, &document_id, &reference.revision_id, &reference.revision_hash, now()).await?;
+        }
+        crate::knowledge::vault::usage::record_pending(pool, task_id, &attempt.id, &preview, now()).await?;
+        return Ok(Some(VaultDelivery { preview }));
+    }
+    if crate::knowledge::vault::selected_attachments::has_explicit_snapshot(pool, client_ref).await? {
+        anyhow::bail!("selected attachments changed after delivery preflight; prepare them again")
+    }
     let preview = crate::knowledge::vault::retrieval::consume_preview(
         pool, &binding, query, client_ref, task_id,
     )
@@ -2319,7 +2493,7 @@ async fn vault_delivery(
         }
         crate::knowledge::vault::provenance::record_revision_input(
             pool,
-            attempt,
+            &attempt.id,
             &document_id,
             &reference.revision_id,
             &reference.revision_hash,
@@ -2372,6 +2546,15 @@ pub(crate) async fn spawn_task_agent(
 /// `client_ref` 허용 길이 — UUID(36자)면 충분하다.
 const CLIENT_REF_MAX: usize = 64;
 
+fn valid_vault_followup_client_ref(id: i64, client_ref: &str) -> bool {
+    let legacy = format!("vault-followup:{id}");
+    client_ref == legacy
+        || (client_ref.len() <= CLIENT_REF_MAX
+            && client_ref
+                .strip_prefix(&(legacy + ":"))
+                .is_some_and(|nonce| !nonce.is_empty()))
+}
+
 /// 새 Task 생성 IPC 래퍼 — 본 로직은 `create_task_internal`(크론/봇과 공용).
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -2412,6 +2595,10 @@ pub async fn task_create(
     // 대신 채워 줄 곳이 없다 — 그래서 `task_resume`처럼 별도 얇은 커맨드를 두지 않고, 이미
     // 전체 생성 파라미터를 받는 이 커맨드에 선택 필드로 얹는다(설계 2026-09-17 결정 2).
     resume_session: Option<String>,
+    resume_vendor: Option<String>,
+    purpose_selection: Option<crate::project_plan::PurposeSelection>,
+    // Claude 질문 세션의 실행 전 승인. 미전달이면 끈다(종전 동작).
+    approvals: Option<bool>,
 ) -> Result<Task, String> {
     create_task_internal(
         &app,
@@ -2439,6 +2626,9 @@ pub async fn task_create(
             // 작업 id 이어받기는 `task_resume`만 통한다.
             resume_from: None,
             resume_session,
+            resume_vendor,
+            purpose_selection,
+            approvals: approvals.unwrap_or(false),
         },
     )
     .await
@@ -2499,7 +2689,7 @@ pub async fn task_resume(
     // 같은 세션을 두 작업이 동시에 resume하면 벤더 쪽 세션 파일을 둘이 번갈아 덮어쓴다.
     // 이어받기가 느릴 때 한 번 더 누르는 것만으로 걸리는 자리라 가드가 필요하다.
     if !session.is_empty() {
-        if let Some(live) = db::live_task_with_session(&pool, session)
+        if let Some(live) = db::live_task_with_session_vendor(&pool, source.agent.as_deref().unwrap_or("claude"), session)
             .await
             .map_err(|error| error.to_string())?
         {
@@ -2556,6 +2746,9 @@ pub async fn task_resume(
             client_ref: client_ref.filter(|r| r.len() <= CLIENT_REF_MAX),
             resume_from: Some(id),
             resume_session: None,
+            resume_vendor: None,
+            purpose_selection: None,
+            approvals: false,
         },
     )
     .await?;
@@ -2606,6 +2799,19 @@ pub async fn session_home_index(
     tauri::async_runtime::spawn_blocking(move || sessionhome::scan(&filter, LIMIT))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// 공급자와 세션 ID만으로 조회한다. 클라이언트 파일 경로는 받지 않는다.
+#[tauri::command]
+pub async fn session_home_preview(
+    repo: String, vendor: String, session_id: String,
+) -> Result<sessionhome::SessionPreview, String> {
+    // 로컬은 목록과 동일하게 다른 저장소 선택을 허용한다. repo는 선택 맥락이며 인가가 아니다.
+    let _ = repo;
+    tauri::async_runtime::spawn_blocking(move || {
+        sessionhome::preview_vendor(&vendor, &session_id)
+            .map_err(|_| "찾을 수 없거나 접근 권한이 없습니다".to_string())
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// 작업의 worktree 핸들 스냅샷 — `tasks` 락을 git 서브프로세스 실행 전에 즉시 반납하기 위한
@@ -2667,20 +2873,59 @@ pub async fn task_diff(
     state: State<'_, AppState>,
     id: i64,
     range: Option<worktree::DiffRange>,
+    include_review: Option<bool>,
 ) -> Result<worktree::TaskDiffResult, String> {
     let wt = task_worktree_snapshot(&state, id)?;
     let range = range.unwrap_or_default();
+    let review_inputs = if include_review.unwrap_or(false) {
+        let pool = pool_of(&state)?;
+        let task = db::get_task(&pool, id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("작업을 찾을 수 없습니다")?;
+        let (stored, warning) = match annotations::list_by_task(&pool, id).await {
+            Ok(stored) => (stored, None),
+            Err(_) => (
+                Vec::new(),
+                Some("주석을 불러오지 못했지만 diff는 최신 상태입니다.".to_string()),
+            ),
+        };
+        let patterns = task
+            .goal_contract
+            .as_deref()
+            .map(|contract| contract.protected_paths.clone())
+            .unwrap_or_default();
+        Some((patterns, stored, warning))
+    } else {
+        None
+    };
     tauri::async_runtime::spawn_blocking(move || {
         if !worktree::is_git_repository(&wt.path) {
             return Ok(worktree::TaskDiffResult {
                 files: Vec::new(),
                 baseline: worktree::BaselineStatus::Legacy,
+                review: review_inputs.map(|(_, stored, warning)| worktree::ReviewSnapshot {
+                    hunks: Vec::new(),
+                    annotations: annotations::rematch(&stored, &[]),
+                    warning,
+                }),
             });
         }
         let files = wt.diff_detailed_range(range).map_err(|e| e.to_string())?;
+        let review = review_inputs
+            .map(|(patterns, stored, warning)| {
+                wt.review_snapshot(&files, range, &patterns, &stored)
+                    .map(|mut review| {
+                        review.warning = warning;
+                        review
+                    })
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()?;
         Ok(worktree::TaskDiffResult {
             files,
             baseline: wt.baseline_status(),
+            review,
         })
     })
     .await
@@ -2783,6 +3028,8 @@ pub async fn partial_apply(
     if task.state != tstate::AWAITING_REVIEW {
         return Err("검토 대기 중인 작업만 부분 적용할 수 있습니다".into());
     }
+    let _review_claim = state.review_claims.claim_finalization(id)?;
+    crate::task_review::guard_apply(&pool, id).await?;
     let hunks = task_hunks(&task)?;
     let worktree = worktree_from_task(&task);
     let result = crate::partial::apply(&worktree, &hunks, &hunk_ids);
@@ -2864,6 +3111,7 @@ pub async fn annotations_list(
     let stored = annotations::list_by_task(&pool, task_id)
         .await
         .map_err(|e| e.to_string())?;
+    if stored.is_empty() { return Ok(Vec::new()); }
     // 화면이 보고 있는 것과 같은 범위로 재매칭해야 hunk_id가 맞는다. 범위가 어긋나면
     // 라인 범위가 달라 id가 전부 갈리고, 붙여둔 주석이 한꺼번에 고아로 떨어진다.
     let hunks = task_hunks_range(&task, range.unwrap_or_default())?;
@@ -2957,8 +3205,12 @@ async fn persist_convo_admission(
     user_event: &str,
     expanded_event: Option<&str>,
     ts: i64,
+    purpose: Option<&crate::project_plan::PreparedPurpose>,
 ) -> Result<bool, String> {
     let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    if let Some(candidate) = purpose {
+        crate::project_plan::persist_purpose_tx(&mut tx, candidate).await.map_err(|e|e.to_string())?;
+    }
     if !input_origin.is_initial() {
         sqlx::query("INSERT INTO task_events (task_id, ts, kind, detail) VALUES (?, ?, 'user_followup_input_observed', NULL) ON CONFLICT(task_id, kind) WHERE kind IN ('followup_observation_started', 'user_followup_input_observed') DO NOTHING")
             .bind(task.id).bind(ts).execute(&mut *tx).await.map_err(|error| error.to_string())?;
@@ -3007,8 +3259,9 @@ async fn admit_convo_turn(
     receipt_reservation: Option<crate::preview_workbench::ReceiptReservation>,
     action: ConvoAdmissionAction,
     ts: i64,
+    purpose: Option<&crate::project_plan::PreparedPurpose>,
 ) -> Result<(ConvoReservation, bool), String> {
-    persist_convo_admission(pool, task, input_origin, user_event, expanded_event, ts).await?;
+    persist_convo_admission(pool, task, input_origin, user_event, expanded_event, ts, purpose).await?;
     if let Some(receipt) = receipt_reservation {
         receipt.commit();
     }
@@ -3035,39 +3288,91 @@ fn reserve_preview_receipt(
 /// 라운드 상한 설정 키. 값은 문자열 정수이고 범위는 `debate::ROUND_CAP_RANGE`다.
 const DEBATE_ROUND_CAP_KEY: &str = "debate_round_cap";
 
-/// 라운드 루프가 도는 동안만 사는 우측 면의 상태. 좌측은 `tasks` 행이 원천이므로 여기 없다.
+/// 좌측이 아닌 자리 하나의 상태. 원천은 `convo_debate_sides` 행이다.
+struct DebateSeat {
+    side: crate::convo::Side,
+    agent: String,
+    model: Option<String>,
+    session: Option<String>,
+}
+
+/// 라운드 루프가 도는 동안만 사는 토론 상태. 좌측은 `tasks` 행이 원천이므로 자리 목록에 없다.
 struct DebateRuntime {
     state: crate::convo::debate::DebateState,
-    right_agent: String,
-    right_model: Option<String>,
-    right_session: Option<String>,
-    /// 이번 라운드 시퀀스를 연 사용자 발화. 둘에게 같은 문자열로 간다.
+    /// 비좌측 자리들, 자리 순서.
+    seats: Vec<DebateSeat>,
+    /// 이번 라운드 시퀀스를 연 사용자 발화. 모두에게 같은 문자열로 간다.
     user_message: String,
-    /// 상대의 **직전** 발화 하나. 전체 로그를 중계하면 라운드마다 컨텍스트가 선형으로 분다.
-    opponent_last: Option<String>,
+    /// 자리별(`Side::index()`) **가장 최근** 발화 하나. 전체 로그를 중계하면 라운드마다
+    /// 컨텍스트가 선형으로 분다(설계 2026-09-23 D2).
+    last: [Option<String>; 3],
 }
 
 impl DebateRuntime {
+    fn new(cap: u32, rows: Vec<db::DebateSideRow>, user_message: String) -> Self {
+        let seats = rows
+            .into_iter()
+            .filter_map(|row| {
+                // `db::debate_sides`가 이미 검증했다 — 여기서 떨어지는 행은 없다.
+                crate::convo::Side::parse(&row.side).map(|side| DebateSeat {
+                    side,
+                    agent: row.agent,
+                    model: row.model,
+                    session: row.vendor_session_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        let order = std::iter::once(crate::convo::Side::Left)
+            .chain(seats.iter().map(|seat| seat.side))
+            .collect();
+        Self {
+            state: crate::convo::debate::DebateState::with_seats(cap, order),
+            seats,
+            user_message,
+            last: Default::default(),
+        }
+    }
+
+    fn seat(&self, side: crate::convo::Side) -> Option<&DebateSeat> {
+        self.seats.iter().find(|seat| seat.side == side)
+    }
+
+    fn seat_mut(&mut self, side: crate::convo::Side) -> Option<&mut DebateSeat> {
+        self.seats.iter_mut().find(|seat| seat.side == side)
+    }
+
     fn round_context<'a>(
         &'a self,
         side: crate::convo::Side,
         left_agent: &'a str,
     ) -> crate::convo::debate::RoundContext<'a> {
+        let peers = self
+            .state
+            .seats()
+            .iter()
+            .filter(|peer| **peer != side)
+            .map(|peer| crate::convo::debate::Peer {
+                agent: match peer {
+                    crate::convo::Side::Left => left_agent,
+                    crate::convo::Side::Right | crate::convo::Side::Third => {
+                        self.seat(*peer).map(|seat| seat.agent.as_str()).unwrap_or_default()
+                    }
+                },
+                last: self.last[peer.index()].as_deref(),
+            })
+            .collect();
         crate::convo::debate::RoundContext {
             round: self.state.round(),
             cap: self.state.cap(),
-            opponent_agent: match side {
-                crate::convo::Side::Left => &self.right_agent,
-                crate::convo::Side::Right => left_agent,
-            },
             user_message: &self.user_message,
-            opponent_last: self.opponent_last.as_deref(),
+            peers,
         }
     }
 }
 
-/// 이번 턴이 확립한 벤더 세션 id를 그 면의 원천에 적는다. 우측은 `set_convo_session`을 지나지
-/// 않는다 — 그 함수가 좌측이 받아야 할 `pending_capsule`을 함께 지운다(ADR 0170).
+/// 이번 턴이 확립한 벤더 세션 id를 그 자리의 원천에 적는다. 비좌측은 `set_convo_session`을
+/// 지나지 않는다 — 그 함수가 좌측이 받아야 할 `pending_capsule`을 함께 지운다(ADR 0170).
+/// 와일드카드를 쓰지 않는다: 셋째가 좌측 경로로 떨어지면 좌측 세션을 덮는다(설계 2026-09-23 D4).
 async fn persist_turn_session(
     pool: &SqlitePool,
     id: i64,
@@ -3075,13 +3380,13 @@ async fn persist_turn_session(
     session_id: &str,
 ) -> anyhow::Result<()> {
     match side {
-        // 빈 id는 적지 않는다 — resume 인자가 빈 문자열이 되면 다음 우측 턴이 인계 조립 대신
+        None | Some(crate::convo::Side::Left) => db::set_convo_session(pool, id, session_id).await,
+        // 빈 id는 적지 않는다 — resume 인자가 빈 문자열이 되면 그 자리의 다음 턴이 인계 조립 대신
         // `--resume ""`으로 죽는다. 좌측은 오늘의 계약을 그대로 둔다.
-        Some(crate::convo::Side::Right) if session_id.is_empty() => Ok(()),
-        Some(crate::convo::Side::Right) => {
-            db::set_debate_side_session(pool, id, crate::convo::Side::Right, session_id).await
+        Some(crate::convo::Side::Right | crate::convo::Side::Third) if session_id.is_empty() => Ok(()),
+        Some(side @ (crate::convo::Side::Right | crate::convo::Side::Third)) => {
+            db::set_debate_side_session(pool, id, side, session_id).await
         }
-        _ => db::set_convo_session(pool, id, session_id).await,
     }
 }
 
@@ -3132,19 +3437,44 @@ pub async fn debate_round_cap_set(state: State<'_, AppState>, cap: u32) -> Resul
     set_debate_round_cap(&pool, cap).await
 }
 
+/// 토론 상대 한 명 — 프론트가 넘기는 형태.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DebateOpponent {
+    pub agent: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// 비좌측 자리 순서. 상대는 이 순서로 자리를 받는다.
+const DEBATE_OPPONENT_SEATS: [crate::convo::Side; 2] =
+    [crate::convo::Side::Right, crate::convo::Side::Third];
+
 pub(crate) async fn debate_start_checked(
     pool: &SqlitePool,
     active: ActiveConvos,
     id: i64,
-    opponent_agent: &str,
-    model: &str,
+    opponents: &[DebateOpponent],
 ) -> Result<(), String> {
-    let opponent_agent = opponent_agent.trim();
-    if !supports_convo_agent_switch(opponent_agent) {
-        return Err(format!("토론 상대로 쓸 수 없는 에이전트입니다: {opponent_agent}"));
+    if opponents.is_empty() || opponents.len() > DEBATE_OPPONENT_SEATS.len() {
+        return Err(format!(
+            "토론 상대는 1~{}명이어야 합니다",
+            DEBATE_OPPONENT_SEATS.len()
+        ));
+    }
+    let mut agents: Vec<&str> = Vec::with_capacity(opponents.len());
+    for opponent in opponents {
+        let agent = opponent.agent.trim();
+        if !supports_convo_agent_switch(agent) {
+            return Err(format!("토론 상대로 쓸 수 없는 에이전트입니다: {agent}"));
+        }
+        if agents.contains(&agent) {
+            return Err(format!("같은 에이전트를 두 번 상대로 고를 수 없습니다: {agent}"));
+        }
+        agents.push(agent);
     }
     let _reservation = reserve_convo_switch(active, id)?;
-    if crate::convo::interaction::is_bound(pool,id).await? {return Err("질문 세션에서는 토론·공급자 전환을 지원하지 않습니다".into());}
+    crate::convo::interaction::runtime_of(pool, id).await?;
+    crate::convo::interaction::ensure_idle(pool, id).await?;
 
     let task = db::get_task(pool, id)
         .await
@@ -3153,71 +3483,72 @@ pub(crate) async fn debate_start_checked(
     if task.mode != "conversation" || task.state != tstate::AWAITING_REVIEW {
         return Err("검토 대기 중인 대화 작업만 토론을 시작할 수 있습니다".into());
     }
-    if task.agent.as_deref().unwrap_or_default().trim() == opponent_agent {
+    let current = task.agent.as_deref().unwrap_or_default().trim();
+    if agents.contains(&current) {
         return Err("토론 상대는 현재 에이전트와 달라야 합니다".into());
     }
-    if db::debate_side(pool, id)
+    if !db::debate_sides(pool, id)
         .await
         .map_err(|error| error.to_string())?
-        .is_some()
+        .is_empty()
     {
         return Err("이미 토론 중입니다 — 먼저 토론을 끝내세요".into());
     }
-    let model = model.trim();
-    db::insert_debate_side(
-        pool,
-        id,
-        crate::convo::Side::Right,
-        opponent_agent,
-        (!model.is_empty()).then_some(model),
-    )
-    .await
-    .map_err(|error| error.to_string())
+    let rows = DEBATE_OPPONENT_SEATS
+        .iter()
+        .zip(opponents.iter().zip(agents))
+        .map(|(side, (opponent, agent))| {
+            let model = opponent.model.as_deref().map(str::trim).filter(|model| !model.is_empty());
+            (*side, agent, model)
+        })
+        .collect::<Vec<_>>();
+    db::insert_debate_sides(pool, id, &rows)
+        .await
+        .map_err(|error| error.to_string())
 }
 
-/// 프론트가 "토론 중"을 판정하는 유일한 신호 — 우측 행이 있으면 그 작업은 토론 중이다.
+/// 프론트가 "토론 중"을 판정하는 유일한 신호 — 사이드 행이 있으면 그 작업은 토론 중이다.
 #[derive(Debug, Serialize)]
 pub struct DebateSideView {
+    pub side: &'static str,
     pub agent: String,
     pub model: Option<String>,
 }
 
-/// 우측 자리 조회. `None`이면 토론이 아니다. 앱 재시작 뒤에도 저장된 행에서 읽는다.
+/// 비좌측 자리 조회, 자리 순서. 빈 배열이면 토론이 아니다. 앱 재시작 뒤에도 저장된 행에서 읽는다.
 #[tauri::command]
-pub async fn debate_side(
+pub async fn debate_sides(
     state: State<'_, AppState>,
     task_id: i64,
-) -> Result<Option<DebateSideView>, String> {
+) -> Result<Vec<DebateSideView>, String> {
     let pool = pool_of(&state)?;
-    let row = db::debate_side(&pool, task_id)
+    let rows = db::debate_sides(&pool, task_id)
         .await
         .map_err(|error| error.to_string())?;
-    Ok(row.map(|row| DebateSideView {
-        agent: row.agent,
-        model: row.model,
-    }))
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            crate::convo::Side::parse(&row.side).map(|side| DebateSideView {
+                side: side.as_str(),
+                agent: row.agent,
+                model: row.model,
+            })
+        })
+        .collect())
 }
 
-/// 토론을 연다 — 우측 행 하나를 만드는 것이 전부다. 벤더 세션은 첫 우측 턴이 판다.
+/// 토론을 연다 — 상대마다 사이드 행 하나를 만드는 것이 전부다. 벤더 세션은 그 자리의 첫 턴이 판다.
 #[tauri::command]
 pub async fn debate_start(
     state: State<'_, AppState>,
     task_id: i64,
-    opponent_agent: String,
-    model: Option<String>,
+    opponents: Vec<DebateOpponent>,
 ) -> Result<(), String> {
     let pool = pool_of(&state)?;
-    debate_start_checked(
-        &pool,
-        state.convo_active.clone(),
-        task_id,
-        &opponent_agent,
-        model.as_deref().unwrap_or_default(),
-    )
-    .await
+    debate_start_checked(&pool, state.convo_active.clone(), task_id, &opponents).await
 }
 
-/// 우측 행을 지우고 종료 경계를 원장에 남긴다. 사용자가 손으로 끝냈으므로 사유는 중단이다.
+/// 사이드 행 전부를 지우고 종료 경계를 원장에 남긴다. 사용자가 손으로 끝냈으므로 사유는 중단이다.
 /// 적재 실패는 삼키지 않는다 — 경계가 없으면 재진입 때 토론이 끝난 적 없는 것처럼 보인다
 /// (`ContextCleared` 적재와 같은 계약).
 pub(crate) async fn debate_end_checked(
@@ -3226,9 +3557,10 @@ pub(crate) async fn debate_end_checked(
     id: i64,
 ) -> Result<crate::convo::ConvoEvent, String> {
     // 시작과 같은 점유를 잡는다 — 라운드 시퀀스가 도는 중에 행을 지우면 진행 중인 턴이
-    // 근거 없는 우측 세션으로 계속 돌고 종료 경계가 두 번 남는다.
+    // 근거 없는 사이드 세션으로 계속 돌고 종료 경계가 두 번 남는다.
     let _reservation = reserve_convo_switch(active, id)?;
-    db::delete_debate_side(pool, id, crate::convo::Side::Right)
+    crate::convo::interaction::ensure_idle(pool, id).await?;
+    db::delete_debate_sides(pool, id)
         .await
         .map_err(|error| error.to_string())?;
     let event = crate::convo::ConvoEvent::DebateEnded {
@@ -3262,12 +3594,55 @@ pub async fn debate_end(
     Ok(())
 }
 
+/// 한 발화의 질문 실행. 토론의 점유는 유지하되 질문 실행은 매 차례 새로 만든다.
+/// 이전 프로세스와 질문이 정리되지 않았으면 컨트롤을 교체하지 않는다.
+async fn next_question_turn(
+    pool: &SqlitePool,
+    id: i64,
+    agent: &str,
+    side: Option<crate::convo::Side>,
+    generation: u64,
+    changed: Arc<dyn Fn() + Send + Sync>,
+) -> Result<Option<crate::convo::app_server::Context>, String> {
+    use crate::convo::{app_server, interaction, interaction_commands};
+    interaction_commands::ensure_generation(generation)?;
+    interaction::ensure_idle(pool, id).await?;
+    if app_server::cleanup_failed(id) {
+        return Err("이전 질문 실행의 정리를 확인하세요".into());
+    }
+    app_server::unregister(id);
+    let Some(runtime) = interaction::runtime_for_agent(agent) else { return Ok(None) };
+    let execution = interaction::begin(pool, id, now()).await?;
+    let control = interaction_commands::ensure_generation(generation).and_then(|()| {
+        app_server::register_turn(id, execution.clone(), runtime == interaction::RUNTIME_LOCAL, side)
+    });
+    let control = match control {
+        Ok(control) => control,
+        Err(error) => {
+            interaction::finish(pool, &execution, "failed", Some(&error)).await?;
+            return Err(error);
+        }
+    };
+    Ok(Some(app_server::Context { pool: pool.clone(), task_id: id, control, changed }))
+}
+
+/// CLI 누락이나 중단으로 spawn 전에 끝난 실행도 정리한다.
+async fn finish_unstarted_question(ctx: &crate::convo::app_server::Context) -> Result<(), String> {
+    let starting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM convo_executions WHERE id=? AND state='starting')")
+        .bind(&ctx.control.execution).fetch_one(&ctx.pool).await.map_err(|error| error.to_string())?;
+    if starting {
+        let state = if ctx.control.cancelled.load(Ordering::SeqCst) { "cancelled" } else { "failed" };
+        crate::convo::interaction::finish(&ctx.pool, &ctx.control.execution, state, Some("turn_not_started")).await?;
+        ctx.changed();
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn start_convo_turn(
     app: AppHandle,
     pool: SqlitePool,
     active: ActiveConvos,
-    gates: CaptureGates,
     id: i64,
     repo: String,
     cwd: String,
@@ -3283,8 +3658,14 @@ async fn start_convo_turn(
 ) -> Result<(), String> {
     let admission_generation=crate::convo::interaction_commands::generation();
     // 대화 턴의 초크포인트. `convo_send`뿐 아니라 주석 재전송·원격 리뷰 재시도도 여기를 지난다.
-    refuse_if_updating(&updating)?;
-    let reservation = side_question_slots::reserve_turn(&app.state::<AppState>(), active.clone(), id, input_origin.is_initial()).await?;
+    let bound_runtime = crate::convo::interaction::runtime_of(&pool, id).await?;
+    if bound_runtime.as_deref() != Some(crate::convo::interaction::RUNTIME) {
+        refuse_if_updating(&updating)?;
+    }
+    let reservation = side_question_slots::reserve_turn(
+        &app.state::<AppState>(), active.clone(), id, input_origin.is_initial(),
+        bound_runtime.as_deref() != Some(crate::convo::interaction::RUNTIME),
+    ).await?;
     if crate::side_question::blocks_main_execution(&pool, id).await? {
         return Err("별도 질의의 프로세스 소유권 확인이 필요합니다".into());
     }
@@ -3297,22 +3678,39 @@ async fn start_convo_turn(
     if task.state != tstate::AWAITING_REVIEW && task.state != tstate::RUNNING {
         return Err("검토 대기 또는 실행 중인 대화 작업만 계속할 수 있습니다".into());
     }
-    let bound_runtime = crate::convo::interaction::runtime_of(&pool, id).await?;
     let structured = bound_runtime.is_some();
     if structured && crate::convo::interaction_commands::shutting_down() {
         return Err("앱 종료를 위해 질문 세션을 정리하고 있습니다".into());
     }
-    // 바인딩은 작업 생성 때 박힌다. 그 뒤 에이전트가 달라졌다면 툴 표면이 어긋난 것이다.
+    // 공급자 전환은 작업과 바인딩을 함께 바꾼다. 불일치는 손상된 계약이다.
     if structured
         && (task
             .agent
             .as_deref()
             .and_then(crate::convo::interaction::runtime_for_agent)
-            != bound_runtime.as_deref()
-            || crate::convo::interaction::blocked(&pool, id).await?)
+            != bound_runtime.as_deref())
     {
         return Err("질문 실행 계약 또는 정리 상태를 확인하세요".into());
     }
+    if structured {
+        crate::convo::interaction::ensure_idle(&pool, id).await?;
+    }
+    let debate_rows = db::debate_sides(&pool, id).await.map_err(|error| error.to_string())?;
+    // 상대가 전역 CLI를 쓰면 업데이트와 경합할 수 있다. Codex 좌측만 보고 우회하지 않는다.
+    if !debate_rows.is_empty() {
+        refuse_if_updating(&updating)?;
+    }
+    // Claude가 좌측이어도 Codex 상대의 고정 런타임을 입력 접수 전에 준비한다.
+    let needs_codex = structured && (task.agent.as_deref() == Some("codex")
+        || debate_rows.iter().any(|row| row.agent == "codex"));
+    let mut codex_runtime_version = None;
+    let managed_codex_bin = if needs_codex {
+        let version = crate::convo::interaction::ensure_codex_version(&pool, id).await?;
+        codex_runtime_version = Some(version.clone());
+        Some(ensure_managed_codex(&app, version).await?)
+    } else {
+        None
+    };
     let preview_client_ref = preview_client_ref.unwrap_or_else(|| format!("vault-followup:{id}"));
     let attempt = if cfg!(target_os = "macos") {
         match begin_vault_attempt(&pool, id, &repo, &message, Some(&preview_client_ref)).await {
@@ -3370,7 +3768,7 @@ async fn start_convo_turn(
         &repo,
         &message,
         Some(&preview_client_ref),
-        attempt.as_deref(),
+        attempt.as_ref(),
     )
     .await
     {
@@ -3386,8 +3784,21 @@ async fn start_convo_turn(
     // 실전송문(user_expanded) 기록은 Goal Contract 합성까지 끝난 뒤 한 번만 한다 —
     // 매퍼는 user 직후의 user_expanded 하나만 흡수하므로 단계별로 나눠 적으면 뒤 것이 유실된다.
     let vendor = crate::convo::Vendor::from_agent(task.agent.as_deref().unwrap_or_default());
+    let mut prompt_metrics = crate::convo::prompt_metrics::PromptMetrics::new(
+        vendor, structured, resume.is_some(), &message,
+    );
+    if vendor == crate::convo::Vendor::Codex && structured {
+        prompt_metrics.set_instructions(&crate::convo::app_server::instructions(
+            codex_runtime_version.as_deref() == Some(crate::convo::cli_runtime::DEFAULT_VERSION),
+        ));
+    }
     let sent =
         crate::skills::resolve_message(&repo, vendor, &message).unwrap_or_else(|| message.clone());
+    prompt_metrics.skill_added_bytes = crate::convo::prompt_metrics::added_bytes(&message, &sent);
+    let execution_round_id = crate::preview_bridge::random_hex_id()?;
+    let purpose = crate::project_plan::prepare_purpose(&pool, id, &execution_round_id, now()).await.map_err(|e|e.to_string())?;
+    let sent = purpose.as_ref().map(|p| crate::project_plan::render_purpose(p, &sent)).unwrap_or(sent);
+    let before_goal_bytes = sent.len();
 
     // Goal Contract는 첫 턴에만 합성한다. 후속 resume 턴은 사용자의 새 메시지만 전달한다.
     let sent = if input_origin.is_initial() {
@@ -3395,30 +3806,24 @@ async fn start_convo_turn(
     } else {
         sent
     };
-    // 토론 중인가 — 우측 행의 **존재**가 유일한 판정이다(설계 §4-1). 조회 실패를 삼키고
-    // 단일 턴으로 내려가면 우측이 빠진 라운드가 조용히 남는다. 상대에게 중계할 사용자 발화는
+    prompt_metrics.goal_added_bytes = sent.len().saturating_sub(before_goal_bytes) as u64;
+    // 토론 중인가 — 사이드 행의 **존재**가 유일한 판정이다(설계 §4-1). 조회 실패를 삼키고
+    // 단일 턴으로 내려가면 상대가 빠진 라운드가 조용히 남는다. 상대에게 중계할 사용자 발화는
     // **확장이 끝난 뒤**의 문장이다 — 원문을 쥐면 슬래시 스킬·Goal Contract가 풀리기 전 요청을
     // 두고 토론하게 된다. 캡슐은 좌측 세션의 맥락이므로 붙기 전에 찍는다.
-    let debate = match db::debate_side(&pool, id).await {
-        Ok(Some(row)) => Some(DebateRuntime {
-            state: crate::convo::debate::DebateState::new(debate_round_cap(&pool).await),
-            right_agent: row.agent,
-            right_model: row.model,
-            right_session: row.vendor_session_id,
-            user_message: sent.clone(),
-            opponent_last: None,
-        }),
-        Ok(None) => None,
-        Err(error) => return Err(error.to_string()),
+    let debate = if debate_rows.is_empty() { None } else {
+        Some(DebateRuntime::new(debate_round_cap(&pool).await, debate_rows, sent.clone()))
     };
     // 절단이 남긴 캡슐을 **맨 앞에** 붙인다(ADR 0170). 캡슐은 맥락이고 나머지는 이번 턴의
     // 요청이므로 순서가 이렇다. guard 뒤에 읽은 task 행을 쓴다 — 별도 조회 실패를 무시한 채
     // 새 세션을 만들면 `set_convo_session`이 아직 전달하지 못한 핸드오프를 지워 버린다.
     // 지우는 것은 새 세션이 확립될 때(`set_convo_session`)뿐이다.
+    let before_capsule_bytes = sent.len();
     let sent = match task.pending_capsule.as_deref() {
         Some(capsule) => format!("{capsule}\n{sent}"),
         None => sent,
     };
+    prompt_metrics.capsule_added_bytes = sent.len().saturating_sub(before_capsule_bytes) as u64;
     if sent != message {
         if let Some(attempt) = attempt.as_deref() {
             if let Err(error) =
@@ -3436,10 +3841,18 @@ async fn start_convo_turn(
         }
     }
 
-    let mut user_event = serde_json::json!({ "kind": "user", "text": &message });
+    let delivered_message = match delivery.as_ref() {
+        Some(item) => crate::knowledge::vault::retrieval::delivery_payload(&sent, &item.preview),
+        None => sent.clone(),
+    };
+    prompt_metrics.vault_added_bytes = crate::convo::prompt_metrics::added_bytes(&sent, &delivered_message);
+    prompt_metrics.finish(&delivered_message);
+    let mut user_event = serde_json::json!({ "kind": "user", "text": &message, "prompt_metrics": if debate.is_none() { Some(prompt_metrics) } else { None } });
     if let Some(request_id) = receipt_request_id {
         user_event["receipt_request_id"] = serde_json::Value::String(request_id.to_string());
     }
+    user_event["execution_round_id"] = serde_json::json!(execution_round_id);
+    if let Some(candidate) = purpose.as_ref() { user_event["purpose_snapshot"] = serde_json::to_value(candidate.snapshot()).map_err(|e|e.to_string())?; }
     let user_ev = user_event.to_string();
     let expanded_ev = expansion_event((sent != message).then_some(sent.as_str()));
     let (mut reservation, release_manual) = admit_convo_turn(
@@ -3452,6 +3865,7 @@ async fn start_convo_turn(
         receipt_reservation,
         admission_action,
         now(),
+        purpose.as_ref(),
     )
     .await?;
     if task.state == tstate::AWAITING_REVIEW {
@@ -3469,49 +3883,17 @@ async fn start_convo_turn(
         state.preview_bridge.release(id);
         crate::preview_control::emit_control_state(&app, &state, id, "release", true);
     }
-    let message = match delivery.as_ref() {
-        Some(item) => crate::knowledge::vault::retrieval::delivery_payload(&sent, &item.preview),
-        None => sent,
-    };
+    let message = delivered_message;
 
-    let structured_ctx = if structured {
-        let setup = async {
-            crate::convo::interaction_commands::ensure_generation(admission_generation)?;
-            let execution = crate::convo::interaction::begin(&pool, id, now()).await?;
-            if let Err(error)=crate::convo::interaction_commands::ensure_generation(admission_generation) {
-                crate::convo::interaction::finish(&pool,&execution,"failed",Some(&error)).await?;
-                return Err(error);
-            }
-            let local = bound_runtime.as_deref() == Some(crate::convo::interaction::RUNTIME_LOCAL);
-            let register = if local {
-                crate::convo::app_server::register_local
-            } else {
-                crate::convo::app_server::register
-            };
-            let control = match register(id, execution.clone()) {
-                Ok(control) => control,
-                Err(error) => {
-                    crate::convo::interaction::finish(&pool, &execution, "failed", Some(&error))
-                        .await?;
-                    return Err(error);
-                }
-            };
-            let notify = app.clone();
-            Ok::<_, String>(crate::convo::app_server::Context {
-                pool: pool.clone(),
-                task_id: id,
-                control,
-                changed: Arc::new(move || {
-                    let _ = notify.emit(
-                        "convo-interaction://changed",
-                        serde_json::json!({"taskId":id}),
-                    );
-                }),
-            })
-        }
-        .await;
+    let notify = app.clone();
+    let question_changed: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let _ = notify.emit("convo-interaction://changed", serde_json::json!({"taskId":id}));
+    });
+    let mut structured_ctx = if structured {
+        let setup = next_question_turn(&pool, id, &agent, debate.as_ref().map(|_| crate::convo::Side::Left),
+            admission_generation, question_changed.clone()).await;
         match setup {
-            Ok(ctx) => Some(ctx),
+            Ok(ctx) => ctx,
             Err(error) => {
                 db::mark_awaiting_review_with_notification(&pool, id, now(), None, "failure")
                     .await
@@ -3637,16 +4019,51 @@ async fn start_convo_turn(
                 debate_end = Some(crate::convo::DebateEndReason::Aborted);
                 break;
             }
-            // 이번 턴의 벤더·세션. 좌측의 원천은 `tasks`, 우측은 `convo_debate_sides`뿐이다.
+            // 이번 턴의 벤더·세션. 좌측의 원천은 `tasks`, 나머지는 `convo_debate_sides`뿐이다.
             if let (Some(rt), Some(side)) = (debate.as_ref(), turn_side) {
                 let (next_agent, next_resume) = match side {
                     crate::convo::Side::Left => (left_agent.clone(), left_resume.clone()),
-                    crate::convo::Side::Right => (rt.right_agent.clone(), rt.right_session.clone()),
+                    crate::convo::Side::Right | crate::convo::Side::Third => rt
+                        .seat(side)
+                        .map(|seat| (seat.agent.clone(), seat.session.clone()))
+                        .unwrap_or_default(),
                 };
                 agent = next_agent;
                 resume = next_resume;
             }
-            // 프롬프트: 좌측 첫 턴만 기존 조립(캡슐·스킬·Goal Contract)을 그대로 쓰고, 우측 첫 턴은
+            if structured && !first_turn {
+                match tauri::async_runtime::block_on(next_question_turn(
+                    &pool, id, &agent, turn_side, admission_generation, question_changed.clone(),
+                )) {
+                    Ok(ctx) => structured_ctx = ctx,
+                    Err(error) => {
+                        result_error = true;
+                        let ev = synthetic_error(format!("토론 질문 실행 준비 실패: {error}"));
+                        if let Ok(json) = crate::convo::stored_event_json(&ev, turn_side) {
+                            let _ = persist_tx.send(json);
+                        }
+                        let _ = app.emit("convo://event", ConvoPayload { id, speaker: turn_side, event: ev });
+                        debate_end = Some(crate::convo::DebateEndReason::Error);
+                        break;
+                    }
+                }
+            }
+            if structured && (convo_interrupted(&active, id)
+                || crate::convo::interaction_commands::ensure_generation(admission_generation).is_err())
+            {
+                result_error = true;
+                if let Some(ctx) = structured_ctx.as_ref() {
+                    ctx.control.cancelled.store(true, Ordering::SeqCst);
+                }
+                let ev = synthetic_error("턴 시작 전에 실행이 중단되었습니다".into());
+                if let Ok(json) = crate::convo::stored_event_json(&ev, turn_side) {
+                    let _ = persist_tx.send(json);
+                }
+                let _ = app.emit("convo://event", ConvoPayload { id, speaker: turn_side, event: ev });
+                debate_end = debate.as_ref().map(|_| crate::convo::DebateEndReason::Aborted);
+                break;
+            }
+            // 프롬프트: 좌측 첫 턴만 기존 조립(캡슐·스킬·Goal Contract)을 그대로 쓰고, 세션 없는 비좌측 턴은
             // 에이전트 전환의 인계 조립을 앞에 둔다. 나머지는 각 세션이 resume이므로 접미만 중계한다.
             let prompt = match debate.as_ref() {
                 None => message.clone(),
@@ -3655,8 +4072,10 @@ async fn start_convo_turn(
                     let ctx = rt.round_context(side, &left_agent);
                     if first_turn {
                         format!("{message}\n{}", crate::convo::debate::debate_suffix(&ctx))
-                    } else if side == crate::convo::Side::Right && rt.right_session.is_none() {
-                        // 인계 조립 실패를 기본값으로 덮으면 우측이 캡슐도 직전 대화도 없이
+                    } else if side != crate::convo::Side::Left
+                        && rt.seat(side).is_some_and(|seat| seat.session.is_none())
+                    {
+                        // 인계 조립 실패를 기본값으로 덮으면 그 자리가 캡슐도 직전 대화도 없이
                         // 시작한다 — 라운드를 열지 않고 오류로 끝낸다(계획 §4-T3).
                         match tauri::async_runtime::block_on(agent_switch_handoff(&pool, id)) {
                             Ok(handoff) => crate::convo::debate::first_right_prompt(&handoff, &ctx),
@@ -3682,11 +4101,16 @@ async fn start_convo_turn(
                     }
                 }
             };
-            // 이번 턴이 확립한 벤더 세션 id — 우측이면 다음 R 턴의 resume 근거가 된다.
+            // 이번 턴이 확립한 벤더 세션 id — 그 자리의 다음 턴의 resume 근거가 된다.
             let mut turn_session = None;
             let vendor = crate::convo::Vendor::from_agent(&agent);
             // 벤더 실행 파일 해석은 여기서(core convo는 PATH 탐색 비의존) — 없으면 에러 result 후 종료.
-            let bin = match crate::reviewer::which(vendor.bin()) {
+            let selected_bin = if structured_ctx.is_some() && vendor == crate::convo::Vendor::Codex {
+                managed_codex_bin.clone()
+            } else {
+                crate::reviewer::which(vendor.bin())
+            };
+            let bin = match selected_bin {
                 Some(b) => b,
                 None => {
                     let ev = synthetic_error(format!(
@@ -3704,39 +4128,10 @@ async fn start_convo_turn(
                             event: ev,
                         },
                     );
-                    // 토론이면 여기서 return할 수 없다 — 종료 경계(`DebateEnded`)를 건너뛰면
-                    // 우측 행이 남아 그 작업은 영원히 토론 중으로 보인다. 정상 종료 경로로 나간다.
-                    if debate.is_some() {
-                        debate_end = Some(crate::convo::DebateEndReason::Error);
-                        break;
-                    }
-                    drop(persist_tx);
-                    let _ = persist_handle.join();
-                    // 조기 종료도 정상 에필로그와 동일하게 검토 대기로 전이 — 가드가 이미 Running으로
-                    // 올렸으므로 여기서 안 내리면 폐기 불가한 유령 Running으로 고착된다.
-                    tauri::async_runtime::block_on(async {
-                        if let Some(attempt) = attempt.as_deref() {
-                            let _ = crate::knowledge::vault::usage::mark_delivery(
-                                &pool,
-                                id,
-                                attempt,
-                                crate::knowledge::vault::usage::DeliveryState::NotDelivered,
-                                now(),
-                            )
-                            .await;
-                        }
-                        let _ = db::set_convo_pgid(&pool, id, None).await;
-                        let _ = db::mark_awaiting_review_with_notification(
-                            &pool,
-                            id,
-                            now(),
-                            None,
-                            "failure",
-                        )
-                        .await;
-                    });
-                    emit_awaiting_review(&app, &pool, id, None);
-                    return; // _done 드롭이 inflight/pid 정리.
+                    // 시작 전 오류도 질문 실행 정리와 상태 전이를 거친다.
+                    result_error = true;
+                    debate_end = debate.as_ref().map(|_| crate::convo::DebateEndReason::Error);
+                    break;
                 }
             };
             if let Some(turn) = active
@@ -3750,14 +4145,21 @@ async fn start_convo_turn(
             // 세션 오버라이드(tasks.model)가 있으면 그것을, 없으면 설정의 벤더 기본을 사용.
             // Model, effort and speed share the admission snapshot.
             let service_tier = if debate.is_none() { settings_task.service_tier.as_deref() } else { None };
-            let model = match (debate.as_ref(), turn_side) {
-                // 우측 모델 미지정이면 설정의 벤더 기본(`model:<agent>`)까지 좌측과 같게 내려간다.
-                // `tasks.model`은 좌측 세션의 오버라이드라 우측에 물려주지 않는다.
-                (Some(rt), Some(crate::convo::Side::Right)) => rt
-                    .right_model
-                    .clone()
+            // 비좌측 자리의 모델. 와일드카드를 쓰지 않는다 — 셋째가 좌측 경로로 떨어지면 좌측의
+            // `tasks.model` 오버라이드가 다른 벤더에 넘어간다(설계 2026-09-23 D4).
+            let seat_model = match turn_side {
+                None | Some(crate::convo::Side::Left) => None,
+                Some(side @ (crate::convo::Side::Right | crate::convo::Side::Third)) => debate
+                    .as_ref()
+                    .and_then(|rt| rt.seat(side))
+                    .map(|seat| seat.model.clone()),
+            };
+            let model = match seat_model {
+                // 모델 미지정이면 설정의 벤더 기본(`model:<agent>`)까지 좌측과 같게 내려간다.
+                // `tasks.model`은 좌측 세션의 오버라이드라 다른 자리에 물려주지 않는다.
+                Some(model) => model
                     .or_else(|| tauri::async_runtime::block_on(agent_model_of(&pool, &agent))),
-                _ => settings_task.model.as_deref().map(str::trim).filter(|model| !model.is_empty()).map(str::to_string)
+                None => settings_task.model.as_deref().map(str::trim).filter(|model| !model.is_empty()).map(str::to_string)
                     .or_else(|| tauri::async_runtime::block_on(agent_model_of(&pool, &agent))),
             };
             let reasoning_effort = crate::agent::reasoning_effort_override(&agent, settings_task.reasoning_effort.as_deref()).ok().flatten();
@@ -3766,7 +4168,18 @@ async fn start_convo_turn(
                 let state = app.state::<AppState>();
                 issue_preview_mcp(&app, &state, id, vendor, structured_ctx.is_some())
             };
-            let res = crate::convo::app_server::run_selected(
+            // 실행 전 승인은 질문 세션의 Claude 차례에만 걸린다. 값을 못 읽으면 켠다 — 승인을
+            // 요청한 세션이 조용히 자동 승인으로 도는 쪽이, 한 번 더 묻는 쪽보다 되돌리기 어렵다.
+            let approvals = structured_ctx.is_some()
+                && vendor == crate::convo::Vendor::Claude
+                && tauri::async_runtime::block_on(crate::convo::interaction::approvals_of(&pool, id))
+                    .unwrap_or(true);
+            // 임대가 없으면 승인 도구를 줄 수 없고, 그대로 돌리면 권한 확인 없이 실행된다 — 턴을 막는다.
+            let approvals_unavailable = approvals && mcp_lease.is_none();
+            let mcp_lease = mcp_lease.map(|lease| if approvals { lease.with_approvals(vendor) } else { lease });
+            let res = if approvals_unavailable {
+                Err("실행 전 승인 도구를 준비하지 못해 이 차례를 실행하지 않았습니다".to_string())
+            } else { crate::convo::app_server::run_selected(
                 structured_ctx.as_ref(),
                 &cwd,
                 &prompt,
@@ -3795,6 +4208,14 @@ async fn start_convo_turn(
                     tauri::async_runtime::block_on(async move {
                         let _ = db::set_convo_pgid(&p, id, Some(pid as i64)).await;
                     });
+                    // 차례 사이의 중단과 spawn이 경합해도 새 프로세스를 계속 실행하지 않는다.
+                    if convo_interrupted(&active, id)
+                        || (structured && crate::convo::interaction_commands::ensure_generation(admission_generation).is_err())
+                    {
+                        if !crate::convo::app_server::cancel(id) {
+                            crate::verify::kill_group(pid);
+                        }
+                    }
                 },
                 |ev| {
                     match &ev {
@@ -3920,7 +4341,7 @@ async fn start_convo_turn(
                         },
                     );
                 },
-            );
+            ) };
             drop(mcp_lease); // 턴 종료 즉시 토큰 폐기 — 이후 호출은 401(AC-12).
                              // 끝난 턴의 pgid를 지운다 — 라운드 사이의 인터럽트가 이미 죽은(또는 OS가 재활용한)
                              // pgid를 죽이는 것을 막는다. 단일 턴 경로는 에필로그가 지우므로 토론에서만 한다.
@@ -4014,11 +4435,15 @@ async fn start_convo_turn(
             if let Some(session) = turn_session {
                 match side {
                     crate::convo::Side::Left => left_resume = Some(session),
-                    crate::convo::Side::Right => rt.right_session = Some(session),
+                    crate::convo::Side::Right | crate::convo::Side::Third => {
+                        if let Some(seat) = rt.seat_mut(side) {
+                            seat.session = Some(session);
+                        }
+                    }
                 }
             }
-            // 조건부로 두면 이번 턴이 말이 없을 때 **자기 직전 발화**가 상대 것으로 넘어간다.
-            rt.opponent_last = (!last_text.trim().is_empty()).then(|| last_text.clone());
+            // 조건부로 두면 이번 턴이 말이 없을 때 **자기 직전 발화**가 다음 차례에 다시 중계된다.
+            rt.last[side.index()] = (!last_text.trim().is_empty()).then(|| last_text.clone());
             let outcome = if convo_interrupted(&active, id) {
                 crate::convo::debate::TurnOutcome::Interrupted
             } else if !result_seen || result_error {
@@ -4083,6 +4508,11 @@ async fn start_convo_turn(
         drop(persist_tx);
         let _ = persist_handle.join();
 
+        if let Some(ctx) = structured_ctx.as_ref() {
+            if tauri::async_runtime::block_on(finish_unstarted_question(ctx)).is_err() {
+                crate::convo::app_server::mark_cleanup_failed(id);
+            }
+        }
         if structured && crate::convo::app_server::cleanup_failed(id) {
             return;
         }
@@ -4145,57 +4575,9 @@ async fn start_convo_turn(
                 serde_json::json!({"taskId":id}),
             );
         }
-        // 인용 관측(설계 0048) — 캡처 토글·변경 여부와 무관(변경 없는 턴도 메모리를 참조한다).
-        let ride = tauri::async_runtime::block_on(async {
-            let rows = crate::db::list_convo_events(&pool, id)
-                .await
-                .unwrap_or_default();
-            let text = crate::capture::convo_digest_text(&rows);
-            if text.is_empty() {
-                None
-            } else {
-                crate::memory::citation::observe(&pool, id, None, &text, now())
-                    .await
-                    .ok()
-                    .flatten()
-            }
-        });
-        // 캡처/반성 — 변경 있고 opt-in일 때만(순수 Q&A는 캡처할 산출물이 없다). best-effort.
-        // 둘은 각자 게이트를 갖는다(설계 0055 AD-5).
-        if changed && gates.any_on() {
-            if let Some(repo) = task_row.map(|t| t.repo) {
-                tauri::async_runtime::block_on(async {
-                    if gates.capture_on() {
-                        // 인용 LLM 판정은 캡처 호출에 합승한다 — 추가 shellout 없음.
-                        let (_, citation_section) = crate::capture::capture_convo_memories(
-                            &pool,
-                            &repo,
-                            id,
-                            now(),
-                            ride.as_ref().map(|r| r.fragment.as_str()),
-                        )
-                        .await
-                        .unwrap_or((0, None));
-                        if let (Some(r), Some(section)) = (ride.as_ref(), citation_section) {
-                            let _ = crate::memory::citation::record_llm(
-                                &pool,
-                                id,
-                                None,
-                                r,
-                                &section,
-                                now(),
-                            )
-                            .await;
-                        }
-                    }
-                    if gates.reflect_on() {
-                        let _ =
-                            crate::capture::auto_generate_convo_reflection(&pool, &repo, id, now())
-                                .await;
-                    }
-                });
-            }
-        }
+        // 자동 캡처·회고(P2)와 수동 회고(자기개선 제안)는 모두 제거됐다(설계 2026-09-13
+        // §P2 제거, 1.0 자기개선 제거) — 메모리 정본이 파일이 된 뒤로 자동 추출·관측할
+        // 대상이 없고, 도달 불가 상태였던 제안 검토 화면도 함께 없앴다.
     });
     Ok(())
 }
@@ -4211,7 +4593,7 @@ pub async fn convo_send(
     message: String,
     image_paths: Option<Vec<String>>,
 ) -> Result<(), String> {
-    convo_send_with_receipt(app, state, id, message, image_paths, None).await
+    convo_send_with_receipt(app, state, id, message, image_paths, None, None).await
 }
 
 async fn convo_send_with_receipt(
@@ -4221,6 +4603,7 @@ async fn convo_send_with_receipt(
     message: String,
     image_paths: Option<Vec<String>>,
     receipt_request_id: Option<&str>,
+    preview_client_ref: Option<&str>,
 ) -> Result<(), String> {
     let pool = pool_of(&state)?;
     let task = db::get_task(&pool, id)
@@ -4236,12 +4619,16 @@ async fn convo_send_with_receipt(
         id,
         &image_paths.unwrap_or_default(),
     )?;
+    let preview_client_ref = match preview_client_ref {
+        Some(client_ref) if valid_vault_followup_client_ref(id, client_ref) => Some(client_ref.to_owned()),
+        Some(_) => return Err("vault composer request is invalid".into()),
+        None => Some(format!("vault-followup:{id}")),
+    };
     // resume 근거는 DB(convo_session_id) — 앱 재시작 후에도 이전 세션으로 이어진다.
     start_convo_turn(
         app,
         pool,
         state.convo_active.clone(),
-        state.capture_gates(),
         id,
         task.repo.clone(),
         cwd,
@@ -4249,7 +4636,7 @@ async fn convo_send_with_receipt(
         image_paths,
         receipt_request_id,
         ConversationInputOrigin::UserMessage,
-        Some(format!("vault-followup:{id}")),
+        preview_client_ref,
         state.updating.clone(),
         None,
         ConvoAdmissionAction::ReleaseManualTakeover,
@@ -4315,7 +4702,7 @@ pub async fn side_question_reset(state: State<'_, AppState>, task_id: i64, gener
 #[tauri::command]
 pub async fn conversation_submit(
     app: AppHandle, state: State<'_, AppState>, task_id: i64, request_id: String,
-    message: String, image_paths: Option<Vec<String>>,
+    message: String, image_paths: Option<Vec<String>>, preview_client_ref: Option<String>,
 ) -> Result<crate::side_question::ConversationReceipt, String> {
     let pool = pool_of(&state)?;
     if db::get_task(&pool, task_id).await.map_err(|e| e.to_string())?.is_none() {
@@ -4330,7 +4717,7 @@ pub async fn conversation_submit(
     if crate::side_question::receipt_main_admitted(&pool, task_id, &request_id).await? {
         return crate::side_question::receipt_finish(&pool, task_id, &request_id, "accepted", None).await;
     }
-    match convo_send_with_receipt(app, state, task_id, message, Some(images), Some(&request_id)).await {
+    match convo_send_with_receipt(app, state, task_id, message, Some(images), Some(&request_id), preview_client_ref.as_deref()).await {
         Ok(()) => crate::side_question::receipt_finish(&pool, task_id, &request_id, "accepted", None).await,
         Err(error) => crate::side_question::receipt_finish(&pool, task_id, &request_id, "failed", Some(&error)).await,
     }
@@ -4382,7 +4769,6 @@ pub async fn annotations_resend(
         app,
         pool.clone(),
         state.convo_active.clone(),
-        state.capture_gates(),
         task_id,
         task.repo.clone(),
         cwd,
@@ -4452,7 +4838,12 @@ pub async fn convo_interrupt(state: State<'_, AppState>, id: i64) -> Result<(), 
 /// 실행 중인 로컬 작업을 종료하고 검토 대기 전이가 끝날 때까지 기다린다.
 #[tauri::command]
 pub async fn task_cancel(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    let pool = pool_of(&state)?;
+    cancel_task_inner(&state, id).await
+}
+
+/// `task_cancel`의 본체. 파이프라인 드라이버도 티켓 작업을 멈출 때 쓴다.
+pub(crate) async fn cancel_task_inner(state: &AppState, id: i64) -> Result<(), String> {
+    let pool = pool_of(state)?;
     let task = db::get_task(&pool, id)
         .await
         .map_err(|error| error.to_string())?
@@ -4473,7 +4864,7 @@ pub async fn task_cancel(state: State<'_, AppState>, id: i64) -> Result<(), Stri
         return Err("작업 상태가 동시에 변경되었습니다".to_string());
     }
     let signal = if task.mode == "conversation" {
-        interrupt_conversation(&state, id)
+        interrupt_conversation(state, id)
     } else {
         let tasks = state
             .tasks
@@ -4557,7 +4948,7 @@ pub async fn notification_ingest(
         use tauri_plugin_notification::NotificationExt;
         let mut delivery_failed = false;
         for item in delivered {
-            let title = format!("Praxis · 작업 #{}", item.task_id);
+            let title = format!("Dojang · 작업 #{}", item.task_id);
             let body = format!(
                 "{} · {} · {}",
                 notification_kind_label(&item.kind),
@@ -4652,7 +5043,7 @@ pub async fn notification_test(
     use tauri_plugin_notification::NotificationExt;
     app.notification()
         .builder()
-        .title("Praxis 알림 테스트")
+        .title("Dojang 알림 테스트")
         .body("알림이 정상적으로 전달됩니다")
         .show()
         .map_err(|error| error.to_string())?;
@@ -5216,11 +5607,26 @@ pub struct BranchList {
 /// 레포의 로컬 브랜치 목록 — 홈 컴포저의 base 브랜치 선택에 쓴다.
 #[tauri::command]
 pub fn git_branches_path(path: String) -> Result<BranchList, String> {
-    let repo = Path::new(&path);
+    branch_list(Path::new(&path))
+}
+
+fn branch_list(repo: &Path) -> Result<BranchList, String> {
     Ok(BranchList {
         current: worktree::current_branch(repo).map_err(|e| e.to_string())?,
         branches: worktree::list_local_branches(repo).map_err(|e| e.to_string())?,
     })
+}
+
+/// 브랜치 피커에서 고른 로컬 브랜치로 메인 체크아웃을 바로 전환하고, 갱신된 목록을 돌려준다.
+/// 변경 사항은 직접 실행의 전환과 같은 규칙으로 stash에 보관한다(`checkout_local_branch`).
+#[tauri::command]
+pub async fn git_checkout_branch_path(
+    state: State<'_, AppState>,
+    path: String,
+    branch: String,
+) -> Result<BranchList, String> {
+    let pool = pool_of(&state)?;
+    checkout_main_branch(&pool, &state.direct_repo_locks, Path::new(&path), &branch).await
 }
 
 /// 폴더를 git 저장소로 초기화한다(현재 내용을 초기 커밋으로). 이미 저장소면 멱등하게 통과.
@@ -5466,188 +5872,6 @@ pub async fn lsp_status(
     Ok(crate::lspclient::status_for(&root, &path))
 }
 
-/// IDE 에디터: 작업의 언어 서버를 내린다 (작업 종료/폐기 시 호출 — 서버는 유휴여도 메모리를 먹는다).
-#[tauri::command]
-pub async fn lsp_shutdown(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    let lsp = Arc::clone(&state.lsp);
-    lsp.shutdown_task(id).await;
-    Ok(())
-}
-
-/// 코드 그래프: 이 작업의 워크트리를 인덱싱한다 (계획 0037 Task 8).
-///
-/// 새 세대에 전체 Rust manifest를 만든 뒤 의미 분석까지 성공한 경우에만 활성화한다.
-#[tauri::command]
-pub async fn codegraph_index(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<codegraph::build::BuildReport, String> {
-    let pool = pool_of(&state)?;
-    let root = worktree_root(&pool, id).await?;
-    let lsp = Arc::clone(&state.lsp);
-    let job = state.codegraph_jobs.start(id)?;
-    codegraph::build::index_worktree(&pool, &lsp, id, &root, &job, now())
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// 코드 그래프: 활성 스냅샷 freshness와 최신 빌드 상태.
-#[tauri::command]
-pub async fn codegraph_status(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<codegraph::status::CodeGraphStatus, String> {
-    let pool = pool_of(&state)?;
-    let root = worktree_root(&pool, id).await?;
-    codegraph::status::load(&pool, &root)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-/// 코드 Wiki: 활성 그래프에서 파생한 Markdown 문서의 현재 상태.
-#[tauri::command]
-pub async fn codewiki_status(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<codegraph::wiki::Status, String> {
-    let pool = pool_of(&state)?;
-    let root = worktree_root(&pool, id).await?;
-    codegraph::wiki::status(&pool, &root)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-/// 코드 Wiki: 전체 또는 선택 Rust 소스의 구조 Markdown을 원자적으로 갱신한다.
-#[tauri::command]
-pub async fn codewiki_generate(
-    state: State<'_, AppState>,
-    id: i64,
-    source_path: Option<String>,
-) -> Result<codegraph::wiki::Status, String> {
-    let pool = pool_of(&state)?;
-    let root = worktree_root(&pool, id).await?;
-    codegraph::wiki::generate(&pool, &root, source_path.as_deref(), now())
-        .await
-        .map_err(|error| error.to_string())
-}
-
-/// 코드 그래프: 현재 인덱싱이 있으면 취소를 요청한다.
-#[tauri::command]
-pub async fn codegraph_cancel(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    if !state.codegraph_jobs.cancel(id) {
-        return Err("진행 중인 코드 그래프 인덱싱이 없거나 승격이 이미 시작되었습니다".to_string());
-    }
-    Ok(())
-}
-
-/// 코드 그래프: Monaco 커서(1-based)의 정확한 심볼 영향 범위.
-#[tauri::command]
-pub async fn codegraph_impact_at(
-    state: State<'_, AppState>,
-    id: i64,
-    path: String,
-    line: u32,
-    column: u32,
-    depth: Option<u32>,
-) -> Result<codegraph::query::GenerationImpact, String> {
-    let pool = pool_of(&state)?;
-    let root = worktree_root(&pool, id).await?;
-    let worktree_key = root.to_string_lossy().into_owned();
-    let freshness = codegraph::status::load(&pool, &root)
-        .await
-        .map_err(|error| error.to_string())?
-        .active_state;
-    let abs = fsapi::safe_join(&root, &path).map_err(|error| error.to_string())?;
-    let root = root.canonicalize().map_err(|error| error.to_string())?;
-    let rel_path = abs
-        .strip_prefix(&root)
-        .map_err(|_| "워크트리 밖 경로입니다".to_string())?
-        .to_string_lossy()
-        .into_owned();
-    codegraph::query::impact_at(
-        &pool,
-        &worktree_key,
-        &rel_path,
-        line.saturating_sub(1),
-        column.saturating_sub(1),
-        depth.unwrap_or(2),
-        &freshness,
-    )
-    .await
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "커서 위치에서 활성 코드 그래프 심볼을 찾지 못했습니다".to_string())
-}
-
-/// 코드 그래프: 활성 세대의 실제 참조 엣지를 커서 심볼 주변에서 읽는다.
-#[tauri::command]
-pub async fn codegraph_neighborhood_at(
-    state: State<'_, AppState>,
-    id: i64,
-    path: String,
-    line: u32,
-    column: u32,
-    direction: Option<codegraph::neighborhood::Direction>,
-    depth: Option<u32>,
-) -> Result<codegraph::neighborhood::Neighborhood, String> {
-    let pool = pool_of(&state)?;
-    let root = worktree_root(&pool, id).await?;
-    // IPC is Monaco 1-based; the neighborhood store is 0-based.
-    codegraph::neighborhood::at_path(
-        &pool,
-        &root,
-        &path,
-        line.saturating_sub(1),
-        column.saturating_sub(1),
-        direction.unwrap_or(codegraph::neighborhood::Direction::Incoming),
-        depth.unwrap_or(1),
-    )
-    .await
-    .map_err(|error| error.to_string())
-}
-
-/// 코드 그래프: 이 심볼을 고치면 무엇이 깨지나.
-///
-/// 이름은 여러 파일에 있을 수 있으므로 후보를 모두 찾아 각각의 영향 범위를 합친다 —
-/// 하나를 임의로 고르면 엉뚱한 심볼을 답하게 된다. 인덱싱된 적 없으면 후보가 없고,
-/// 그것은 "영향 없음"이 아니라 **아직 모른다**이므로 그렇게 알린다.
-#[tauri::command]
-pub async fn codegraph_impact_of(
-    state: State<'_, AppState>,
-    id: i64,
-    symbol: String,
-    depth: Option<u32>,
-) -> Result<codegraph::query::Impact, String> {
-    let pool = pool_of(&state)?;
-    let root = worktree_root(&pool, id).await?;
-    let worktree = root.to_string_lossy().into_owned();
-    let candidates = codegraph::query::find_nodes_by_name(&pool, &worktree, &symbol)
-        .await
-        .map_err(|e| e.to_string())?;
-    if candidates.is_empty() {
-        return Err(format!(
-            "'{symbol}'을(를) 코드 그래프에서 찾지 못했습니다 — 워크트리를 먼저 인덱싱하세요"
-        ));
-    }
-
-    let mut merged = codegraph::query::Impact {
-        items: Vec::new(),
-        truncated: false,
-    };
-    for candidate in candidates {
-        let impact = codegraph::query::impact_of(&pool, candidate.id, depth.unwrap_or(2))
-            .await
-            .map_err(|e| e.to_string())?;
-        merged.truncated |= impact.truncated;
-        merged.items.extend(impact.items);
-    }
-    // 후보가 여럿이면 같은 호출처가 여러 번 들어온다. 영향 범위는 집합이다.
-    merged.items.sort_by(|a, b| {
-        (a.depth, &a.rel_path, a.sel_line).cmp(&(b.depth, &b.rel_path, b.sel_line))
-    });
-    merged.items.dedup_by_key(|item| item.id);
-    Ok(merged)
-}
-
 /// IDE: worktree 하위 rel 경로를 절대경로 문자열로 해석 (opener로 기본앱/Finder 열기용).
 /// worktree 밖/심볼릭은 `safe_join`이 차단.
 #[tauri::command]
@@ -5685,15 +5909,6 @@ pub async fn task_verify(
     review_ops::verify::run(pool, state.review_claims.clone(), id, root, preview_token).await
 }
 
-/// 검증 게이트: 작업의 최신 저장 증거 (앱 로드 시 표시용).
-#[tauri::command]
-pub async fn evidence_get(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<Option<db::Evidence>, String> {
-    let pool = pool_of(&state)?;
-    db::get_evidence(&pool, id).await.map_err(|e| e.to_string())
-}
 
 /// Capsule 조립 (read-only; 종료 상태도 허용) — task_capsule/capsule_inject 공용.
 async fn assemble_capsule(pool: &SqlitePool, id: i64) -> Result<capsule::Capsule, String> {
@@ -5718,7 +5933,8 @@ async fn assemble_capsule(pool: &SqlitePool, id: i64) -> Result<capsule::Capsule
     let has_diff = !changed.is_empty();
 
     let ev = db::get_evidence(pool, id).await.ok().flatten();
-    let evidence_ready = ev.as_ref().map(|e| e.ready);
+    let current_ready = crate::task_results::refresh_evidence(pool, id).await?;
+    let evidence_ready = ev.as_ref().map(|e| e.ready && current_ready);
     let evidence_summary = ev.as_ref().map(|e| {
         format!(
             "{} passed / {} failed (ready={})",
@@ -6655,6 +6871,28 @@ async fn agent_switch_handoff(pool: &SqlitePool, id: i64) -> Result<String, Stri
         handoff.push_str(&dialogue);
         handoff.push('\n');
     }
+    // 질문 카드의 답변은 일반 user 이벤트가 아니다. 전환과 새 토론 상대에게도 전달한다.
+    let mut answers: Vec<(String, String)> = sqlx::query_as(
+        "SELECT i.questions,a.payload FROM convo_interactions i JOIN convo_executions e ON e.id=i.execution_id JOIN convo_interaction_answers a ON a.interaction_id=i.id WHERE e.task_id=? AND a.state='acknowledged' ORDER BY i.created_at DESC,i.rowid DESC LIMIT 8",
+    ).bind(id).fetch_all(pool).await.map_err(|error| error.to_string())?;
+    answers.reverse();
+    if !answers.is_empty() {
+        handoff.push_str("\n## Recent clarification answers\n");
+        for (questions, answers) in answers {
+            let questions: crate::convo::interaction::Questions = serde_json::from_str(&questions).map_err(|error| error.to_string())?;
+            let answers: Vec<crate::convo::interaction::Answer> = serde_json::from_str(&answers).map_err(|error| error.to_string())?;
+            for answer in answers {
+                if let Some(question) = questions.questions.iter().find(|question| question.id == answer.question_id) {
+                    let answer = answer.text.as_deref().or_else(|| {
+                        question.options.iter().find(|option| Some(&option.id) == answer.option_id.as_ref()).map(|option| option.label.as_str())
+                    }).unwrap_or_default();
+                    let question: String = question.question.chars().take(300).collect();
+                    let answer: String = answer.chars().take(500).collect();
+                    handoff.push_str(&format!("- {question}\n  Answer: {answer}\n"));
+                }
+            }
+        }
+    }
     Ok(handoff)
 }
 
@@ -6670,7 +6908,8 @@ pub(crate) async fn switch_task_agent_checked(
         return Err(format!("대화 에이전트로 전환할 수 없습니다: {agent}"));
     }
     let _reservation = reserve_convo_switch(active, id)?;
-    if crate::convo::interaction::is_bound(pool,id).await? {return Err("질문 세션은 같은 대화에서 계속하세요".into());}
+    crate::convo::interaction::runtime_of(pool, id).await?;
+    crate::convo::interaction::ensure_idle(pool, id).await?;
 
     let task = db::get_task(pool, id)
         .await
@@ -6681,10 +6920,10 @@ pub(crate) async fn switch_task_agent_checked(
     }
     // UI를 우회하는 원격·재시도 경로가 여기를 지난다. 전환은 세션을 버리므로(핸드오프 재조립)
     // 토론 중에 허용하면 좌측 세션만 사라진 반쪽 토론이 남는다.
-    if db::debate_side(pool, id)
+    if !db::debate_sides(pool, id)
         .await
         .map_err(|error| error.to_string())?
-        .is_some()
+        .is_empty()
     {
         return Err("토론 중에는 에이전트를 바꿀 수 없습니다 — 먼저 토론을 끝내세요".into());
     }
@@ -6813,10 +7052,8 @@ async fn claim_review_finalization(
 }
 
 async fn retire_projection_for_review(pool: &SqlitePool, id: i64) -> Result<(), String> {
-    memory::retire_task_projection_if_present(pool, id, now())
-        .await
-        .map_err(|error| error.to_string())?;
     // 파일형 투영은 원장이 없다 — 블록 자체를 걷어내야 승인 커밋에 섞이지 않는다.
+    // 옛 DB 투영(P2)의 retire는 제거됐다(설계 2026-09-13 §P2 제거).
     memory::file::retire_task(pool, id)
         .await
         .map_err(|error| error.to_string())
@@ -6920,11 +7157,21 @@ pub async fn approval_repair_accept(state: State<'_, AppState>, id: i64, session
     Ok(result)
 }
 
+/// 파이프라인이 관리하는 작업(진행 중 실행의 티켓, 최종 승인 대기 밖의 통합 작업)은 일반 승인·폐기·충돌 해소 경로로 건드리지 못하게 한다.
+pub(crate) async fn reject_if_pipeline_managed(pool: &SqlitePool, id: i64) -> Result<(), String> {
+    match crate::pipeline::db::pipeline_guard_for_task(pool, id).await {
+        Ok(None) => Ok(()),
+        Ok(Some(message)) => Err(message),
+        Err(error) => Err(format!("파이프라인 소속 여부를 확인하지 못했습니다: {error}")),
+    }
+}
+
 /// 승인 시도 이력은 복구 저널과 분리해 실패 후 성공도 보존한다.
 #[tauri::command]
 pub async fn task_approve(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    let _review_claim = state.review_claims.claim_finalization(id)?;
     let pool = pool_of(&state)?;
+    reject_if_pipeline_managed(&pool, id).await?;
+    let _review_claim = state.review_claims.claim_finalization(id)?;
     let task = db::get_task(&pool, id).await.map_err(|e| e.to_string())?
         .ok_or_else(|| "작업을 찾을 수 없습니다".to_string())?;
     let mut attempt = crate::approval::Attempt::start(&pool, &task).await.map_err(|e| e.to_string())?;
@@ -6935,6 +7182,8 @@ pub async fn task_approve(state: State<'_, AppState>, id: i64) -> Result<(), Str
 
 async fn approve_task_inner(state: &AppState, id: i64, attempt: &mut crate::approval::Attempt) -> Result<(), String> {
     let pool = pool_of(state)?;
+    crate::task_results::refresh_evidence(&pool, id).await?;
+    crate::task_review::guard_apply(&pool, id).await?;
     // opt-in 검증 게이트: 설정 ON이면 검증 통과(evidence.ready) 전 Approve 차단(작업 보존).
     let block_on = db::get_setting(&pool, "block_unverified")
         .await
@@ -7030,8 +7279,6 @@ async fn approve_task_inner(state: &AppState, id: i64, attempt: &mut crate::appr
         .await
         .map_err(|e| e.to_string())?;
     let _ = db::append_event(&pool, id, "approved", None, now()).await;
-    let _ = memory::record_review_outcome(&pool, id, memory::outcome::APPROVED).await;
-    purge_codegraph_of(&pool, &worktree).await;
     close_designmode_webview_of(state, id); // D-1: 종결 시 프리뷰 웹뷰·캡처 정리(non-direct는 worktree 제거로 이미 사라짐 — 직접 모드 대비 방어)
     crate::designmode::cleanup_captures(&worktree.path, id);
     state.preview_workbench.invalidate(id);
@@ -7052,7 +7299,7 @@ pub async fn checkpoint_create(
     let pool = pool_of(&state)?;
     let worktree = conflict_worktree(&pool, id).await?;
     let commit = worktree
-        .checkpoint_commit(&format!("praxis: checkpoint — {label}"))
+        .checkpoint_commit(&format!("dojang: checkpoint — {label}"))
         .map_err(|e| e.to_string())?;
     let max_event = db::max_convo_event_id(&pool, id)
         .await
@@ -7136,6 +7383,7 @@ pub async fn convo_rewind(
 
 /// 충돌 해소용 worktree 핸들. 종료된 작업은 worktree가 이미 사라졌을 수 있어 거부한다.
 async fn conflict_worktree(pool: &SqlitePool, id: i64) -> Result<Worktree, String> {
+    reject_if_pipeline_managed(pool, id).await?;
     let task = db::get_task(pool, id)
         .await
         .map_err(|e| e.to_string())?
@@ -7217,23 +7465,6 @@ fn is_direct_mode(wt: &Worktree) -> bool {
     wt.is_direct()
 }
 
-/// 워크트리가 사라졌으니 그 코드 그래프도 지운다 (계획 0037 Constraints).
-///
-/// 직접 모드는 건너뛴다 — 거기 워크트리는 메인 체크아웃 그 자체라 종결 후에도 남아 있고,
-/// 인덱싱은 다음 작업에서 그대로 쓸모가 있다(내용이 바뀌면 파일 해시가 알아서 무효화한다).
-///
-/// 실패는 삼킨다. 종결은 이미 끝났고, 남은 것은 다음 인덱싱에서 덮이는 데이터일 뿐이다 —
-/// 여기서 에러를 올리면 성공한 승인·폐기가 실패로 보고된다.
-async fn purge_codegraph_of(pool: &SqlitePool, worktree: &Worktree) {
-    if is_direct_mode(worktree) {
-        return;
-    }
-    let key = worktree.path.to_string_lossy();
-    if let Err(error) = codegraph::purge_worktree(pool, &key).await {
-        eprintln!("코드 그래프 정리 실패({key}) — 다음 인덱싱에서 덮인다: {error}");
-    }
-}
-
 /// DB 행에서 Worktree 핸들 재구성 (세션 없이 머지/제거만 수행할 때).
 pub(crate) fn worktree_from_task(task: &Task) -> Worktree {
     Worktree {
@@ -7285,6 +7516,7 @@ pub(crate) enum BranchDisposal {
 /// 사본이고, 워크트리를 지우면 커밋되지 않은 파일은 어디에도 남지 않는다(설계 0056).
 #[tauri::command]
 pub async fn task_discard(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    reject_if_pipeline_managed(&pool_of(&state)?, id).await?;
     discard_task(&state, id, BranchDisposal::CommitAndPreserve).await
 }
 
@@ -7348,8 +7580,6 @@ pub(crate) async fn discard_task(
     // 커밋은 브랜치만이 붙들고 있으므로, 이 한 줄이 나중에 되찾는 유일한 좌표다.
     let detail = preserved.map(|e| format!("preserved {}@{}", e.branch, e.commit));
     let _ = db::append_event(&pool, id, "discarded", detail.as_deref(), now()).await;
-    let _ = memory::record_review_outcome(&pool, id, memory::outcome::DISCARDED).await;
-    purge_codegraph_of(&pool, &worktree).await;
     close_designmode_webview_of(state, id); // D-1: 종결 시 프리뷰 웹뷰·캡처 정리
     crate::designmode::cleanup_captures(&worktree.path, id);
     state.preview_workbench.invalidate(id);
@@ -7381,6 +7611,8 @@ pub(crate) async fn remote_approval_gate(pool: &SqlitePool, task: &Task) -> Resu
     {
         return Err("Decision/Provenance Ledger P0는 데스크톱 로컬 승인만 지원합니다".into());
     }
+    crate::task_review::guard_apply(pool, task.id).await?;
+    crate::task_results::refresh_evidence(pool, task.id).await?;
     let evidence_ready = db::get_evidence(pool, task.id)
         .await
         .ok()
@@ -7501,7 +7733,6 @@ pub(crate) async fn remote_review_retry(
         app.clone(),
         pool,
         state.convo_active.clone(),
-        state.capture_gates(),
         id,
         task.repo.clone(),
         cwd,
@@ -7531,18 +7762,6 @@ pub(crate) async fn approve_pending_task(
         .ok_or("작업을 찾을 수 없습니다")?;
     if task.state != tstate::PENDING_APPROVAL {
         return Err("승인 대기 상태가 아닙니다".into());
-    }
-    if let Err(error) = memory::verify_task_projection(&pool, id, now()).await {
-        let payload = serde_json::json!({ "error": error.to_string() }).to_string();
-        let _ = db::append_event(
-            &pool,
-            id,
-            "memory_projection_start_blocked",
-            Some(&payload),
-            now(),
-        )
-        .await;
-        return Err(format!("메모리 투영 재검증 실패: {error}"));
     }
     spawn_task_agent(app, state, &task).await
 }
@@ -7745,7 +7964,7 @@ pub async fn knowledge_vault_local_composer_send(
     message: String,
     expected_client_ref: String,
 ) -> Result<(), String> {
-    if expected_client_ref != format!("vault-followup:{id}") || message.trim().is_empty() {
+    if !valid_vault_followup_client_ref(id, &expected_client_ref) || message.trim().is_empty() {
         return Err("vault composer request is invalid".into());
     }
     let pool = pool_of(&state)?;
@@ -7803,7 +8022,7 @@ pub async fn knowledge_vault_local_composer_send(
             &task.repo,
             &message,
             Some(&expected_client_ref),
-            attempt.as_deref(),
+            attempt.as_ref(),
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -8071,14 +8290,6 @@ pub async fn agent_action_resize(
     session.resize(cols, rows).map_err(|e| e.to_string())
 }
 
-/// 액션 PTY 종료(명시적 닫기).
-#[tauri::command]
-pub fn agent_action_close(state: State<AppState>, key: String) -> Result<(), String> {
-    if let Some(session) = state.action_shells.lock().unwrap().remove(&key) {
-        session.terminate();
-    }
-    Ok(())
-}
 
 /// 작업 종결(승인/폐기/삭제) 시 워크스페이스 셸 정리 — 워크트리가 사라지기 전에 죽인다.
 fn close_shell_of(state: &AppState, id: i64) {
@@ -8136,227 +8347,15 @@ fn destroy_preview(handle: &PreviewHandle) {
     }
 }
 
-/// 전체 메모리 조회 (MemoryView) — Desktop과 Runner가 같은 파생 필드를 반환한다.
-#[tauri::command]
-pub async fn memory_list(
-    state: State<'_, AppState>,
-) -> Result<Vec<memory::management::MemoryListItem>, String> {
-    let pool = pool_of(&state)?;
-    memory::management::list(&pool, now())
-        .await
-        .map_err(|error| error.to_string())
-}
 
-/// 메모리 보관. 물리 삭제가 아니라 `archived` 전이라 본문·근거·주입 이력이 모두 남는다.
-/// 본문까지 지우는 것은 `memory_purge`다.
-#[tauri::command]
-pub async fn memory_archive(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    let pool = pool_of(&state)?;
-    memory::archive(&pool, id, now())
-        .await
-        .map_err(|e| e.to_string())
-}
 
-/// 보관된 메모리의 영구 삭제. 되돌릴 수 없다 — 본문이 사라지고 감사 행만 남는다.
-#[tauri::command]
-pub async fn memory_purge(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    let pool = pool_of(&state)?;
-    memory::purge(&pool, id, now())
-        .await
-        .map_err(|e| e.to_string())
-}
 
-/// 메모리 수동 추가. 사람 작성도 candidate로 시작해 evidence 검토 전에는 주입되지 않는다.
-#[tauri::command]
-pub async fn memory_add(
-    state: State<'_, AppState>,
-    repo: String,
-    kind: String,
-    content: String,
-) -> Result<i64, String> {
-    let pool = pool_of(&state)?;
-    memory::management::create_manual(&pool, &repo, &kind, &content, now())
-        .await
-        .map_err(|e| e.to_string())
-}
 
-/// 메모리 내용/종류 수정은 새 candidate version을 만들고 기존 승인을 무효화한다.
-#[tauri::command]
-pub async fn memory_update(
-    state: State<'_, AppState>,
-    id: i64,
-    content: String,
-    kind: String,
-) -> Result<(), String> {
-    let pool = pool_of(&state)?;
-    memory::management::update_manual(&pool, id, &content, &kind, now())
-        .await
-        .map_err(|e| e.to_string())
-}
 
-/// 항상-적용 지정/해제. Runner의 `PUT /v1/memories/:id/application-policy`와 **같은
-/// 도메인 함수**를 부른다 — 판정을 두 곳에 두면 경로마다 결과가 갈린다.
-///
-/// 반환값은 "실제로 바뀌었는가". `false`는 이미 목표 상태였다는 뜻이다.
-#[tauri::command]
-pub async fn memory_set_application_policy(
-    state: State<'_, AppState>,
-    id: i64,
-    policy: String,
-    expected_version: i64,
-    expected_policy: String,
-) -> Result<bool, String> {
-    let pool = pool_of(&state)?;
-    memory::application_policy::set_policy(
-        &pool,
-        id,
-        &policy,
-        expected_version,
-        &expected_policy,
-        now(),
-    )
-    .await
-    .map_err(|failure| failure.to_string())
-}
 
-/// 특정 메모리의 주입(사용) 이력 — 어느 작업에 들어갔고 결과가 무엇인지.
-#[tauri::command]
-pub async fn memory_usages(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<Vec<memory::MemoryUsageRow>, String> {
-    let pool = pool_of(&state)?;
-    memory::usages_for_memory(&pool, id)
-        .await
-        .map_err(|e| e.to_string())
-}
 
-/// 주입 프리뷰(드라이런) — 주어진 지시문으로 실제 주입 시 선택될 메모리(하이브리드 랭킹).
-/// 무엇이 세션에 들어갈지 사전 확인/튜닝용.
-#[tauri::command]
-pub async fn memory_preview(
-    state: State<'_, AppState>,
-    repo: String,
-    instruction: String,
-) -> Result<Vec<memory::Memory>, String> {
-    let pool = pool_of(&state)?;
-    memory::management::preview(&pool, &repo, &instruction, now())
-        .await
-        .map_err(|e| e.to_string())
-}
 
-/// 작업 세션 주입 검증 리포트 — memory_usages 기록 + worktree CLAUDE.md(등)에 실재하는 블록.
-#[derive(Serialize)]
-pub struct InjectionReport {
-    pub task_id: i64,
-    pub injected: Vec<memory::InjectedMemory>,
-    /// 블록이 실재하는 컨텍스트 파일들 (AGENTS.md 등).
-    pub targets_present: Vec<String>,
-    /// AGENTS.md에서 추출한 실제 주입 블록 텍스트(마커 내부). 없으면 None.
-    pub block_text: Option<String>,
-}
 
-/// "메모리가 실제로 이 세션에 들어갔는가" 확인 — DB 기록 + 파일 실측을 함께 반환.
-#[tauri::command]
-pub async fn memory_injection_report(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<InjectionReport, String> {
-    let pool = pool_of(&state)?;
-    let injected = memory::injections_for_task(&pool, id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let task = db::get_task(&pool, id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("작업을 찾을 수 없습니다")?;
-    // 모든 후보 대상(CLAUDE/AGENTS/GEMINI)을 스캔 — 지금은 AGENTS.md만 쓰지만 옛 투영이 남긴
-    // 파일에도 블록이 있을 수 있으므로, 쓰기 집합 무관하게 실재하는 파일만 보고한다.
-    // scan_injected_targets: 파일당 크기 상한(거대/특수 파일 DoS 방지) + 블록 추출(도메인·테스트 가능).
-    let targets = crate::projector::all_targets();
-    let root = PathBuf::from(&task.worktree_path);
-    let (targets_present, block_text) = memory::scan_injected_targets(&root, &targets);
-    Ok(InjectionReport {
-        task_id: id,
-        injected,
-        targets_present,
-        block_text,
-    })
-}
-
-// ── 컨텍스트 가시성 (설계 0008 §A) — 벤더 × {글로벌, 프로젝트} 실측 ──
-
-/// 벤더 4종의 글로벌+프로젝트 컨텍스트 파일을 실측 표시 — "메모리 주입이 실제로 뭘 읽는지" 가시화
-/// (설계 0008 D1: 가시성만 통합, 파이프라인 불변·글로벌 파일은 읽기 전용).
-#[tauri::command]
-pub async fn context_report(
-    state: State<'_, AppState>,
-    task_id: i64,
-) -> Result<memory::context_audit::ContextReport, String> {
-    let pool = pool_of(&state)?;
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    memory::context_audit::report(
-        &pool,
-        task_id,
-        &home,
-        state.capture_enabled.load(Ordering::Relaxed),
-        state.reflect_enabled.load(Ordering::Relaxed),
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
-
-/// 컨텍스트 파일 내용 지연 로드 — `context_report(task_id)`가 나열한 경로만 허용(임의 경로 읽기 차단).
-#[tauri::command]
-pub async fn context_file_read(
-    state: State<'_, AppState>,
-    task_id: i64,
-    path: String,
-) -> Result<String, String> {
-    let pool = pool_of(&state)?;
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let requested = PathBuf::from(&path);
-    memory::context_audit::read_file(&pool, task_id, &home, &requested)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn capture_enabled_get(state: State<AppState>) -> bool {
-    state.capture_enabled.load(Ordering::Relaxed)
-}
-
-#[tauri::command]
-pub async fn capture_enabled_set(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
-    state.capture_enabled.store(enabled, Ordering::Relaxed);
-    let pool = pool_of(&state)?;
-    db::set_setting(
-        &pool,
-        "capture_enabled",
-        if enabled { "true" } else { "false" },
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
-
-/// 회고 opt-in 조회 — 캡처와 독립이다.
-#[tauri::command]
-pub fn reflect_enabled_get(state: State<AppState>) -> bool {
-    state.reflect_enabled.load(Ordering::Relaxed)
-}
-
-#[tauri::command]
-pub async fn reflect_enabled_set(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
-    state.reflect_enabled.store(enabled, Ordering::Relaxed);
-    let pool = pool_of(&state)?;
-    db::set_setting(
-        &pool,
-        "reflect_enabled",
-        if enabled { "true" } else { "false" },
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
 
 // ── 설정: 캡처 실행 프로파일 (설계 0055) ──
 
@@ -8423,15 +8422,6 @@ pub async fn capture_profile_set(
             .map_err(|e| e.to_string())?;
     }
     Ok(())
-}
-
-/// 마지막 캡처·회고 실행 기록 — `kind`별로 하나씩.
-///
-/// 이 커맨드가 존재하는 이유가 이 작업의 근본 원인이다. 모델 상속 자체보다, 무엇이 어떤
-/// 모델로 돌고 있는지 앱이 말하지 못한 것이 문제를 며칠간 보이지 않게 했다.
-#[tauri::command]
-pub fn capture_last_runs() -> HashMap<String, crate::capture::invoke::CaptureRun> {
-    crate::capture::invoke::last_runs()
 }
 
 // ── 설정: 동시 실행 상한 ──
@@ -8518,17 +8508,23 @@ pub fn default_shell() -> ShellSpec {
     };
 }
 
-/// 사용량 인사이트 집계 — `~/.claude/projects` 전체 트랜스크립트 스캔.
+/// 공급자 로컬 세션 사용량과 Praxis 주 대화 접수 입력 메타데이터를 집계한다.
 /// range: "all" | "30d" | "7d". tz_offset_secs: 로컬 UTC 오프셋(KST=32400, 프론트 제공).
-/// DB 비의존(파일 IO만)이라 blocking 풀로 오프로드.
+/// 공급자 파일 IO는 blocking 풀로, 앱 입력 메타데이터는 기존 대화 원장에서 읽는다.
 #[tauri::command]
 pub async fn insights_compute(
+    state: State<'_, AppState>,
     range: String,
     tz_offset_secs: i64,
 ) -> Result<insights::Insights, String> {
-    tauri::async_runtime::spawn_blocking(move || insights::compute(&range, tz_offset_secs))
+    let pool = pool_of(&state)?;
+    // A metrics read failure must not hide provider usage or masquerade as zero.
+    let prompt_injection = crate::convo::prompt_metrics::summarize(&pool, &range, now()).await.ok();
+    let mut result = tauri::async_runtime::spawn_blocking(move || insights::compute(&range, tz_offset_secs))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    result.prompt_injection = prompt_injection;
+    Ok(result)
 }
 
 /// 에이전트 × 스킬 사용 통계 — 메인 세션 + 서브에이전트 트랜스크립트 스캔.
@@ -8559,7 +8555,7 @@ pub async fn agent_health(force: bool) -> crate::agenthealth::HealthSnapshot {
     crate::agenthealth::snapshot(force).await
 }
 
-/// 시작 시 자동 업데이트 on/off. 미설정은 켜짐이다.
+/// 시작 시 자동 업데이트 on/off. 미설정은 꺼짐이다.
 #[tauri::command]
 pub async fn auto_update_get(state: State<'_, AppState>) -> Result<bool, String> {
     let pool = pool_of(&state)?;
@@ -8695,44 +8691,84 @@ pub async fn task_patterns(
         .map_err(|error| error.to_string())
 }
 
-/// 주간 회고 다이제스트. `week_start`가 없으면 가장 최근 주를 준다.
+/// 신호 카드(설계 §5, T2·T3) — S1(한 번 보고 닫은 작업) · S2(저장소 집중) · S6(토큰 사용량 급증) ·
+/// L1(교훈 주제 반복).
 ///
-/// 먼저 inbox를 한 번 거둔다 — 생성 작업이 만든 서술이 DB로 들어오는 통로가 그것뿐이라,
-/// 조회가 건너뛰면 영영 비어 있다(`quiz_next`와 같은 이유).
+/// "all" 구간은 직전 구간이 없어 S1·S6을 낼 수 없다 — 이때는 `insights::compute`의 무거운
+/// 파일 스캔(`spawn_blocking`)을 아예 건너뛴다. L1은 변화가 아니라 반복을 재는 신호라 "all"에서도
+/// 낸다(§9 T3) — 교훈 투영 읽기(파일 IO)만 `spawn_blocking`으로 보낸다.
 #[tauri::command]
-pub async fn retro_digest_get(
-    app: tauri::AppHandle,
+pub async fn insight_cards(
     state: State<'_, AppState>,
-    week_start: Option<i64>,
-) -> Result<Option<crate::retro::RetroDigest>, String> {
+    range: String,
+    tz_offset_secs: i64,
+) -> Result<Vec<insights::InsightCard>, String> {
     let pool = pool_of(&state)?;
-    let dir = retro_inbox_dir(&app);
-    // 수집 실패가 조회를 막지 않는다 — 이미 쌓인 다이제스트는 보여줄 수 있다.
-    if let Err(e) = crate::retro::inbox::collect_and_store(&pool, &dir, now()).await {
-        eprintln!("회고 inbox 수집 실패: {e}");
-    }
-    crate::retro::get(&pool, week_start)
+    let now = now();
+    let spend = if range == "all" {
+        None
+    } else {
+        let range_for_blocking = range.clone();
+        let snapshot = tauri::async_runtime::spawn_blocking(move || {
+            insights::compute(&range_for_blocking, tz_offset_secs)
+        })
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        Some(insights::SpendSnapshot::from_insights(&snapshot))
+    };
+    let repos = db::known_repos(&pool).await.map_err(|e| e.to_string())?;
+    let known_repos = repos.clone();
+    let projections = tauri::async_runtime::spawn_blocking(move || {
+        insights::load_lesson_projections(&repos)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    insights::compute_cards(
+        &pool,
+        &range,
+        tz_offset_secs,
+        now,
+        spend.as_ref(),
+        &projections,
+        &known_repos,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
-/// 생성된 주 목록(최신순) — 회고 화면의 주 이동용.
+/// 발견 카드 무시(설계 §6.4·§8, T4) — `(signal, repo)` 쌍을 7일 동안 가라앉힌다.
+/// 저장소에 묶이지 않은 카드(S1)는 `repo`가 `None`으로 온다.
 #[tauri::command]
-pub async fn retro_digest_list(
+pub async fn insight_card_dismiss(
     state: State<'_, AppState>,
-    limit: i64,
-) -> Result<Vec<crate::retro::RetroWeekRef>, String> {
+    signal: insights::SignalId,
+    repo: Option<String>,
+) -> Result<(), String> {
     let pool = pool_of(&state)?;
-    crate::retro::list(&pool, limit)
+    insights::dismiss_card(&pool, signal.as_str(), repo.as_deref().unwrap_or(""), now())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|error| error.to_string())
 }
 
-fn retro_inbox_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
-    app.path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join(crate::retro::generate::INBOX_SUBDIR)
+/// 교훈 주제(설계 §6, T3) — 저장소별 subject 빈도 · 직전 구간 대비 증감 · 버린 길 목록.
+///
+/// 교훈 투영(`docs/lessons.json`)이 없는 저장소는 조용히 빠진다(§6.3) — 빈 "0" 상태를
+/// 그리지 않는다(ledger #554). 파일 IO(투영 읽기)만 `spawn_blocking`으로 보낸다.
+#[tauri::command]
+pub async fn lesson_themes(
+    state: State<'_, AppState>,
+    range: String,
+    tz_offset_secs: i64,
+) -> Result<Vec<insights::RepoLessons>, String> {
+    let pool = pool_of(&state)?;
+    let now = now();
+    let repos = db::known_repos(&pool).await.map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let projections = insights::load_lesson_projections(&repos);
+        insights::compute_lesson_themes(&projections, &range, now, tz_offset_secs)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// 레포의 스킬 목록 (프로젝트 + 글로벌, 이름순). 동기 파일 IO.
@@ -8839,6 +8875,13 @@ pub struct MultiReviewItem {
 pub struct MultiReviewResult {
     pub items: Vec<MultiReviewItem>,
     pub synthesis: Option<String>,
+    /// 파이프라인 리뷰의 구조화 데이터. 일반 멀티 리뷰는 채우지 않고, 읽을 때 그대로 통과시킨다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_reviews: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_structured: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking: Option<bool>,
 }
 
 /// source_kind별 리뷰 콘텐츠 준비. plan은 repo 하위로 제한(fsapi 트래버설 가드),
@@ -9009,7 +9052,7 @@ pub async fn multi_review(
         (None, None, None)
     };
 
-    let result = MultiReviewResult { items, synthesis };
+    let result = MultiReviewResult { items, synthesis, vendor_reviews: None, synthesis_structured: None, blocking: None };
     let detail = crate::multireview::ReviewDetail {
         content,
         prompt_review,
@@ -9283,6 +9326,10 @@ mod followup_boundary_tests;
 #[path = "commands/debate_tests.rs"]
 mod debate_tests;
 
+#[cfg(all(test, unix))]
+#[path = "commands/question_debate_tests.rs"]
+mod question_debate_tests;
+
 #[cfg(test)]
 #[path = "commands/resume_history_tests.rs"]
 mod resume_history_tests;
@@ -9490,6 +9537,27 @@ mod convo_admission_tests {
     }
 
     #[tokio::test]
+    async fn admission_preserves_prompt_metrics_without_changing_user_text() {
+        let (pool, task, path) = fixture().await;
+        let mut metrics = crate::convo::prompt_metrics::PromptMetrics::new(
+            crate::convo::Vendor::Claude, true, true, "요청",
+        );
+        metrics.finish("요청");
+        let event = serde_json::json!({"kind":"user", "text":"요청", "prompt_metrics":metrics}).to_string();
+        persist_convo_admission(&pool, &task, ConversationInputOrigin::UserMessage, &event, None, 10, None).await.unwrap();
+        let stored: String = sqlx::query_scalar("SELECT event FROM convo_events WHERE task_id=?")
+            .bind(task.id).fetch_one(&pool).await.unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored["text"], "요청");
+        assert_eq!(stored["prompt_metrics"]["user_bytes"], 6);
+        let summary = crate::convo::prompt_metrics::summarize(&pool, "all", 10).await.unwrap();
+        assert_eq!(summary.observed_turns, 1);
+        assert_eq!(summary.unknown_turns, 0);
+        pool.close().await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn admission_rolls_back_each_database_boundary_before_receipt_commit() {
         for trigger in [
             "CREATE TRIGGER fail_observation BEFORE INSERT ON task_events WHEN NEW.kind = 'user_followup_input_observed' BEGIN SELECT RAISE(ABORT, 'observation'); END",
@@ -9512,6 +9580,7 @@ mod convo_admission_tests {
                 receipt_reservation,
                 ConvoAdmissionAction::ReleaseManualTakeover,
                 10,
+                None,
             )
             .await;
 
@@ -9522,6 +9591,26 @@ mod convo_admission_tests {
             assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM convo_events WHERE task_id = ?").bind(task.id).fetch_one(&pool).await.unwrap(), 0);
             std::fs::remove_file(path).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn purpose_and_user_admission_roll_back_together() {
+        let (pool,task,path)=fixture().await;
+        let source=crate::notifications::source_id(&pool).await.unwrap();
+        let plan=crate::project_plan::ProjectPlan{schema_version:2,source_id:source.clone(),revision:0,repo:task.repo.clone(),objective:"목적".into(),phases:vec![],task_bindings:vec![],dependencies:vec![]};
+        let saved=crate::project_plan::save(&pool,&source,&task.repo,plan,0,&source,3).await.unwrap();
+        crate::project_plan::bind_initial(&pool,task.id,&crate::project_plan::PurposeSelection{source_id:source.clone(),canonical_repo:task.repo.clone(),plan_revision:saved.revision,phase_id:None},4).await.unwrap();
+        let candidate=crate::project_plan::prepare_purpose(&pool,task.id,"round",5).await.unwrap().unwrap();
+        sqlx::query("CREATE TRIGGER fail_purpose_event BEFORE INSERT ON convo_events BEGIN SELECT RAISE(ABORT,'event failed'); END").execute(&pool).await.unwrap();
+        let event=r#"{"kind":"user","text":"ask","receipt_request_id":"review:atomic"}"#;
+        assert!(persist_convo_admission(&pool,&task,ConversationInputOrigin::UserMessage,event,None,6,Some(&candidate)).await.is_err());
+        assert!(crate::project_plan::purpose_get(&pool,&source,task.id,"round").await.unwrap().is_none());
+        assert_eq!(db::get_task(&pool,task.id).await.unwrap().unwrap().state,tstate::AWAITING_REVIEW);
+        sqlx::query("DROP TRIGGER fail_purpose_event").execute(&pool).await.unwrap();
+        persist_convo_admission(&pool,&task,ConversationInputOrigin::UserMessage,event,None,6,Some(&candidate)).await.unwrap();
+        assert_eq!(crate::project_plan::purpose_get(&pool,&source,task.id,"round").await.unwrap().unwrap().project_objective,"목적");
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM convo_events WHERE task_id=?").bind(task.id).fetch_one(&pool).await.unwrap(),1);
+        pool.close().await;std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
@@ -9545,6 +9634,7 @@ mod convo_admission_tests {
                 receipt_reservation,
                 action,
                 10,
+                None,
             )
             .await
             .unwrap();
@@ -9907,15 +9997,71 @@ mod agent_switch_tests {
     }
 
     #[tokio::test]
-    async fn question_binding_blocks_provider_switch_and_debate_without_losing_idle_reservation() {
-        let (path, worktree)=paths();let pool=db::init_pool(&path).await.unwrap();let id=task(&pool,&worktree,"codex").await;
-        crate::convo::interaction::bind(&pool,id).await.unwrap();let active=active();
-        assert!(switch_task_agent_checked(&pool,active.clone(),id,"claude","").await.is_err());
+    async fn question_binding_supports_switch_and_debate_and_preserves_answers() {
+        use crate::convo::interaction as ledger;
+        let (path, worktree) = paths();
+        let pool = db::init_pool(&path).await.unwrap();
+        let id = task(&pool, &worktree, "codex").await;
+        ledger::bind(&pool, id).await.unwrap();
+        let execution = ledger::begin(&pool, id, 100).await.unwrap();
+        ledger::started(&pool, &execution, "old-session", "turn").await.unwrap();
+        let question = ledger::open(&pool, &execution, &serde_json::json!(1), "call", &serde_json::json!({
+            "kind":"clarification", "questions":[{"id":"scope","question":"변경 범위?", "options":[{"id":"keep","label":"질문 응답 유지","description":""}], "allow_free_text":true,"is_secret":false}]
+        }), 100).await.unwrap();
+        ledger::submit(&pool, id, &execution, &question, "answer", &[ledger::Answer {
+            question_id: "scope".into(), option_id: Some("keep".into()), text: None,
+        }], 101).await.unwrap();
+        ledger::take_dispatch(&pool, &execution, 102).await.unwrap().unwrap();
+        ledger::written(&pool, "answer").await.unwrap();
+        ledger::settle(&pool, &execution, "call").await.unwrap();
+        ledger::finish(&pool, &execution, "completed", None).await.unwrap();
+
+        let active = active();
+        let (switched, _) = switch_task_agent_checked(&pool, active.clone(), id, "claude", "sonnet").await.unwrap();
         assert!(active.lock().unwrap().is_empty());
-        assert!(debate_start_checked(&pool,active.clone(),id,"claude","").await.is_err());
+        assert_eq!(ledger::runtime_of(&pool, id).await.unwrap().as_deref(), Some(ledger::RUNTIME_LOCAL));
+        assert!(switched.convo_session_id.is_none());
+        assert!(switched.pending_capsule.as_deref().unwrap().contains("질문 응답 유지"));
+        let snapshot = ledger::snapshot(&pool, id).await.unwrap();
+        assert_eq!(snapshot.items[0].id, question);
+        assert_eq!(snapshot.items[0].receipt.as_ref().unwrap().state, "acknowledged");
+
+        debate_start_checked(&pool, active.clone(), id, &[DebateOpponent { agent: "codex".into(), model: None }, DebateOpponent { agent: "agy".into(), model: None }]).await.unwrap();
         assert!(active.lock().unwrap().is_empty());
-        assert_eq!(db::get_task(&pool,id).await.unwrap().unwrap().convo_session_id.as_deref(),Some("old-session"));
-        pool.close().await;let _=std::fs::remove_dir_all(worktree);let _=std::fs::remove_file(path);
+        assert_eq!(db::debate_sides(&pool, id).await.unwrap().len(), 2);
+        assert!(switch_task_agent_checked(&pool, active.clone(), id, "codex", "").await.unwrap_err().contains("토론 중"));
+        debate_end_checked(&pool, active.clone(), id).await.unwrap();
+        switch_task_agent_checked(&pool, active.clone(), id, "codex", "").await.unwrap();
+        assert_eq!(ledger::runtime_of(&pool, id).await.unwrap().as_deref(), Some(ledger::RUNTIME));
+        assert!(active.lock().unwrap().is_empty());
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(worktree);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn question_execution_blocks_switch_and_debate_until_fully_finished() {
+        use crate::convo::interaction as ledger;
+        let (path, worktree) = paths();
+        let pool = db::init_pool(&path).await.unwrap();
+        let id = task(&pool, &worktree, "codex").await;
+        ledger::bind(&pool, id).await.unwrap();
+        let execution = ledger::begin(&pool, id, 100).await.unwrap();
+        let active = active();
+        for phase in ["starting", "running", "cancelling", "finalizing", "cleanup_failed"] {
+            ledger::phase(&pool, &execution, phase).await.unwrap();
+            assert!(switch_task_agent_checked(&pool, active.clone(), id, "claude", "").await.is_err(), "{phase}");
+            assert!(debate_start_checked(&pool, active.clone(), id, &[DebateOpponent { agent: "claude".into(), model: None }]).await.is_err(), "{phase}");
+            assert!(active.lock().unwrap().is_empty());
+            assert_eq!(db::get_task(&pool, id).await.unwrap().unwrap().convo_session_id.as_deref(), Some("old-session"));
+        }
+        ledger::finish(&pool, &execution, "failed", None).await.unwrap();
+        assert!(switch_task_agent_checked(&pool, active.clone(), id, "agy", "").await.unwrap_err().contains("Codex"));
+        assert_eq!(ledger::runtime_of(&pool, id).await.unwrap().as_deref(), Some(ledger::RUNTIME));
+        assert_eq!(db::get_task(&pool, id).await.unwrap().unwrap().agent.as_deref(), Some("codex"));
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(worktree);
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -10027,6 +10173,7 @@ mod agent_switch_tests {
         let (path, worktree) = paths();
         let pool = db::init_pool(&path).await.unwrap();
         let id = task(&pool, &worktree, "claude").await;
+        crate::convo::interaction::bind_runtime(&pool, id, crate::convo::interaction::RUNTIME_LOCAL).await.unwrap();
         db::set_pending_capsule(&pool, id, "old handoff")
             .await
             .unwrap();
@@ -10057,6 +10204,7 @@ mod agent_switch_tests {
         assert_eq!(unchanged.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(unchanged.convo_session_id.as_deref(), Some("old-session"));
         assert_eq!(unchanged.pending_capsule.as_deref(), Some("old handoff"));
+        assert_eq!(crate::convo::interaction::runtime_of(&pool, id).await.unwrap().as_deref(), Some(crate::convo::interaction::RUNTIME_LOCAL));
         assert!(!db::list_convo_events(&pool, id).await.unwrap()[0].contains("\"agent\""));
         let _ = std::fs::remove_dir_all(worktree);
     }
@@ -10171,102 +10319,6 @@ mod reconcile_tests {
     }
 }
 
-/// 컨텍스트 가시성(설계 0008 §A) — 벤더 매트릭스/허용 목록/파일 실측의 순수 로직 단위테스트.
-#[cfg(test)]
-mod context_visibility_tests {
-    use super::*;
-    use crate::memory::context_audit::{
-        allowed as is_allowed_context_path, inspect as inspect_context_file, vendor_matrix,
-    };
-
-    #[test]
-    fn vendor_matrix_covers_four_vendors_and_only_agy_is_uncertain() {
-        let home = PathBuf::from("/home/u");
-        let m = vendor_matrix(&home);
-        assert_eq!(m.len(), 4);
-        let uncertain: Vec<&str> = m
-            .iter()
-            .filter(|(_, _, _, u)| *u)
-            .map(|(v, _, _, _)| *v)
-            .collect();
-        assert_eq!(uncertain, vec!["agy"], "agy만 불확실 라벨");
-    }
-
-    #[test]
-    fn vendor_matrix_global_paths_join_home_per_vendor() {
-        let home = PathBuf::from("/home/u");
-        let m = vendor_matrix(&home);
-        let get = |vendor: &str| m.iter().find(|(v, ..)| *v == vendor).unwrap().clone();
-        assert_eq!(get("claude").1, home.join(".claude").join("CLAUDE.md"));
-        assert_eq!(get("codex").1, home.join(".codex").join("AGENTS.md"));
-        assert_eq!(get("gemini").1, home.join(".gemini").join("GEMINI.md"));
-        assert_eq!(
-            get("agy").1,
-            home.join(".gemini").join("GEMINI.md"),
-            "agy는 gemini 글로벌 파일 공유(추정)"
-        );
-    }
-
-    #[test]
-    fn is_allowed_context_path_accepts_listed_and_rejects_arbitrary() {
-        let home = PathBuf::from("/home/u");
-        let project = PathBuf::from("/repo/worktree");
-        assert!(is_allowed_context_path(
-            &home.join(".claude").join("CLAUDE.md"),
-            &home,
-            &project
-        ));
-        assert!(is_allowed_context_path(
-            &project.join("AGENTS.md"),
-            &home,
-            &project
-        ));
-        assert!(
-            !is_allowed_context_path(&PathBuf::from("/etc/passwd"), &home, &project),
-            "허용 목록 밖 임의 경로는 거부"
-        );
-        assert!(
-            !is_allowed_context_path(&home.join(".ssh").join("id_rsa"), &home, &project),
-            "홈 하위라도 목록에 없으면 거부"
-        );
-    }
-
-    #[test]
-    fn inspect_context_file_missing_reports_not_exists() {
-        let missing = crate::testtmp::dir().join("praxis-context-report-missing-file.md");
-        let f = inspect_context_file("global", &missing);
-        assert!(!f.exists);
-        assert_eq!(f.size, 0);
-        assert!(!f.has_praxis_block);
-    }
-
-    // 주입 블록 판정은 scoped_file 경유 읽기에 기대는데, 그 구현이 unix 전용이다
-    // (윈도우에서는 Unsupported를 돌려주어 has_praxis_block이 항상 false).
-    #[cfg(unix)]
-    #[test]
-    fn inspect_context_file_detects_praxis_block_presence() {
-        let dir =
-            crate::testtmp::dir().join(format!("praxis-context-report-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("CLAUDE.md");
-        std::fs::write(
-            &path,
-            "before\n<!-- PRAXIS MEMORY START -->\n- fact\n<!-- PRAXIS MEMORY END -->\nafter",
-        )
-        .unwrap();
-        let f = inspect_context_file("project", &path);
-        assert!(f.exists);
-        assert!(f.size > 0);
-        assert!(f.has_praxis_block);
-
-        std::fs::write(&path, "no marker here").unwrap();
-        let f2 = inspect_context_file("project", &path);
-        assert!(f2.exists);
-        assert!(!f2.has_praxis_block, "마커 없으면 has_praxis_block=false");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
 
 /// 워크트리 격리 설정 해석 — 프로젝트 오버라이드 → 전역 기본 → 켜짐 폴백을 in-process SQLite로 검증.
 #[cfg(test)]
@@ -10553,83 +10605,6 @@ pub async fn wiki_read_document(
         .map_err(|error| error.to_string())
 }
 
-/// 멘션으로 고른 청크의 본문·출처. 작업 컨텍스트에 첨부할 때와
-/// "무엇이 실제로 들어갔는지" 보여줄 때 같은 경로를 쓴다.
-#[tauri::command]
-pub async fn knowledge_chunks_get(
-    state: State<'_, AppState>,
-    ids: Vec<i64>,
-) -> Result<Vec<KnowledgeChunkDetail>, String> {
-    let pool = pool_of(&state)?;
-    let _admission = crate::knowledge::vault::shared_admission(&pool)
-        .await
-        .map_err(|error| error.to_string())?;
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    // id는 앞선 검색 결과에서 온 정수라 문자열 조립이 안전하다(사용자 입력 아님).
-    let list = ids
-        .iter()
-        .map(|i| i.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT c.id, c.node_id, c.heading, c.content, n.source, n.title, n.url \
-         FROM knowledge_chunks c JOIN knowledge_nodes n ON n.id = c.node_id \
-         WHERE c.id IN ({list}) ORDER BY c.id"
-    );
-    let rows = sqlx::query(&sql)
-        .fetch_all(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    let node_ids = rows
-        .iter()
-        .filter_map(|row| {
-            use sqlx::Row;
-            row.try_get("node_id").ok()
-        })
-        .collect::<Vec<_>>();
-    let mut allowed = std::collections::HashSet::new();
-    for node_id in &node_ids {
-        if !crate::knowledge::vault::ownership::owns_legacy_node(&pool, *node_id)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            allowed.insert(*node_id);
-        }
-    }
-    let active = crate::knowledge::wiki::active_node_ids(&pool, &node_ids)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| {
-            use sqlx::Row;
-            let node_id = r.try_get("node_id").ok()?;
-            if !allowed.contains(&node_id) || !active.contains(&node_id) {
-                return None;
-            }
-            Some(KnowledgeChunkDetail {
-                chunk_id: r.try_get("id").ok()?,
-                source: r.try_get("source").ok()?,
-                title: r.try_get("title").ok()?,
-                heading: r.try_get("heading").ok()?,
-                url: r.try_get("url").ok()?,
-                content: r.try_get("content").ok()?,
-            })
-        })
-        .collect())
-}
-
-#[derive(serde::Serialize)]
-pub struct KnowledgeChunkDetail {
-    pub chunk_id: i64,
-    pub source: String,
-    pub title: String,
-    pub heading: Option<String>,
-    pub url: Option<String>,
-    pub content: String,
-}
 
 // ── 금일 할 일 (설계 0021 · 플랜 0026) ─────────────────────────────────────
 // 로컬 전용이다 — Runner/모바일 transport를 태우지 않는다 (설계 §3 Scope).

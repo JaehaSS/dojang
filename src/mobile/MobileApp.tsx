@@ -208,7 +208,7 @@ export default function MobileApp() {
             <div className="space-y-4">
               <p>
                 {session.kind === "unpaired"
-                  ? "이 기기는 아직 연결되지 않았습니다. 데스크톱 Praxis 설정에서 QR을 띄워 스캔하세요."
+                  ? "이 기기는 아직 연결되지 않았습니다. 데스크톱 Dojang 설정에서 QR을 띄워 스캔하세요."
                   : "Runner에 닿지 못했습니다. Tailscale이 켜져 있는지 확인하세요."}
               </p>
               <button

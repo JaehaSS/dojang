@@ -4,7 +4,6 @@ mod temp_root;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use praxis_lib::db::{self, state};
-use praxis_lib::memory;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -152,43 +151,6 @@ async fn state_transition_and_runner_event_commit_together() {
     let events = db::list_runner_events_after(&pool, 0, 10).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].kind, "queued");
-    let _ = std::fs::remove_file(db_path);
-}
-
-#[tokio::test]
-async fn forged_start_receipt_cannot_promote_starting_task() {
-    let (pool, db_path) = pool().await;
-    memory::migrate(&pool).await.unwrap();
-    let oldest = db::insert_task(
-        &pool, "/repo", "oldest", "main", "/wt-1", "run", None, None, "terminal", 1,
-    )
-    .await
-    .unwrap();
-    db::update_state(&pool, oldest, state::QUEUED, 3)
-        .await
-        .unwrap();
-
-    let first = db::claim_oldest_queued_task(&pool, 5)
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(first.id, oldest);
-    assert_eq!(first.state, state::STARTING);
-    assert!(db::promote_starting_task(&pool, oldest, Some((11, "[101,102]")), 8)
-        .await
-        .is_err());
-    assert_eq!(
-        db::get_task(&pool, oldest).await.unwrap().unwrap().state,
-        state::STARTING
-    );
-    let receipts: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM task_start_receipts WHERE task_id = ?")
-            .bind(oldest)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(receipts, 0);
     let _ = std::fs::remove_file(db_path);
 }
 

@@ -54,7 +54,7 @@ export function channelPlacement(input: {
   centerWidth: number;
   pinned: boolean;
   codeOpen: boolean;
-  /** 세션 열이 지켜야 하는 최소 폭. 토론이면 `MIN_DEBATE_SESSION_WIDTH`가 온다. */
+  /** 세션 열이 지켜야 하는 최소 폭. 토론이면 `debateSessionWidth(자리 수)`가 온다. */
   sessionMin?: number;
 }): ChannelPlacement {
   if (input.codeOpen) return "code";

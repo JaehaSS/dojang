@@ -168,7 +168,7 @@ describe("ChangesList 헤더 (DR-5 · DR-10)", () => {
 
     await act(async () => buttonWith("미커밋")?.click());
 
-    expect(mocks.taskDiff).toHaveBeenCalledWith(task, "uncommitted");
+    expect(mocks.taskDiff).toHaveBeenCalledWith(task, "uncommitted", true);
     expect(mocks.diffHunks).toHaveBeenCalledWith(task, "uncommitted");
     expect(mocks.annotationsList).toHaveBeenCalledWith(task, "uncommitted");
   });

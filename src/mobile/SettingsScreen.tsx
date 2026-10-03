@@ -111,7 +111,7 @@ export function SettingsScreen() {
           <Field label="인증" value="HttpOnly 세션 쿠키 (JS에서 읽을 수 없음)" />
         </div>
         <div className="px-4 pt-3 text-xs text-text-muted">
-          연결을 끊으려면 데스크톱 Praxis 설정의 <span className="text-text-secondary">모바일 기기</span>{" "}
+          연결을 끊으려면 데스크톱 Dojang 설정의 <span className="text-text-secondary">모바일 기기</span>{" "}
           목록에서 이 기기를 지우세요.
         </div>
       </section>

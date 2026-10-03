@@ -9,17 +9,15 @@ import { OutcomeGoalList } from "./OutcomeGoalList";
 
 interface PanelProps {
   range: InsightsRange;
-  onOpenMemory?: () => void;
 }
 
 interface StateProps {
   data: OutcomeInsights | null;
   loading: boolean;
   error: string | null;
-  onOpenMemory?: () => void;
 }
 
-export function OutcomeInsightsPanel({ range, onOpenMemory }: PanelProps): ReactElement {
+export function OutcomeInsightsPanel({ range }: PanelProps): ReactElement {
   const [data, setData] = useState<OutcomeInsights | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +40,6 @@ export function OutcomeInsightsPanel({ range, onOpenMemory }: PanelProps): React
       data={data}
       loading={loading}
       error={error}
-      onOpenMemory={onOpenMemory}
     />
   );
 }
@@ -51,7 +48,6 @@ export function OutcomeInsightsPanelState({
   data,
   loading,
   error,
-  onOpenMemory,
 }: StateProps): ReactElement {
   if (loading) return <PanelMessage>AX 결과 집계 중…</PanelMessage>;
   if (error || !data) {
@@ -70,7 +66,7 @@ export function OutcomeInsightsPanelState({
         </p>
       </div>
       <OutcomeMetricGrid data={data} />
-      <OutcomeGoalList data={data} onOpenMemory={onOpenMemory} />
+      <OutcomeGoalList data={data} />
       <div className="text-xs text-text-muted">
         ensemble 복수 승인 {data.ambiguous_ensemble_count} · 선택 없음 {data.no_selection_ensemble_count}
       </div>
@@ -88,8 +84,6 @@ function OutcomeMetricGrid({ data }: { data: OutcomeInsights }): ReactElement {
       value: data.ready_accepted_task_count,
       total: data.accepted_task_count,
     },
-    { label: "versioned ledger", value: data.ledger_memory_task_count, total: data.task_count },
-    { label: "legacy usage", value: data.legacy_memory_task_count, total: data.task_count },
     { label: "ensemble 선택", value: data.selected_ensemble_count, total: data.ensemble_count },
   ];
   return (

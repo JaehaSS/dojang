@@ -11,7 +11,7 @@ import {
 import { inputCls } from "./ide/formStyles";
 
 /**
- * 설정 › 지식 그래프 › Gmail (설계 0020 Phase 4).
+ * Wiki › 연결 › Gmail (설계 0020 Phase 4).
  *
  * 클라이언트 출처는 둘로 갈린다 (ADR 0147). 빌드에 client가 박혀 있으면 사용자는
  * 아무것도 입력하지 않고 `연결`만 누르면 되고, 없으면 예전처럼 자기 것을 발급해

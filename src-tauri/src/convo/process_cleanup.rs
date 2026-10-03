@@ -9,7 +9,19 @@ use std::{
     time::Duration,
 };
 
-const MARKER_NAME: &str = "PRAXIS_TURN_TOKEN";
+const MARKER_NAME: &str = "DOJANG_TURN_TOKEN";
+/// 이름을 바꾸기 전의 마커. 이전 버전이 `convo_executions.process_marker`에 저장한 값을
+/// 복구하고, 그 버전이 띄운 프로세스의 argv에서 환경변수가 새지 않게 하려고 남겨 둔다.
+const LEGACY_MARKER_NAME: &str = "PRAXIS_TURN_TOKEN";
+/// 여러 빌드가 재사용하도록 턴보다 오래 사는 JVM 빌드 데몬의 메인 클래스.
+///
+/// `./gradlew`는 포그라운드로 끝나도 분리된 데몬을 남기고, 그 데몬은 마커를 상속한 채 자기
+/// 그룹의 리더가 된다. 빌드는 이미 끝났으므로 유실된 작업이 아니고, 죽이면 다음 빌드만
+/// 콜드 스타트가 된다.
+const SHARED_BUILD_DAEMONS: &[&str] = &[
+    "org.gradle.launcher.daemon.bootstrap.GradleDaemon",
+    "org.jetbrains.kotlin.daemon.KotlinCompileDaemon",
+];
 /// 손상된 버퍼에서 argc를 그대로 믿지 않기 위한 상한.
 const ARGUMENT_LIMIT: usize = 64;
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(0);
@@ -82,7 +94,10 @@ impl TurnProcessScope {
 
     #[cfg(unix)]
     pub(crate) fn recover(marker: &str) -> Result<Self, String> {
-        let suffix = marker.strip_prefix("PRAXIS_TURN_TOKEN=").ok_or("Invalid process marker")?;
+        let suffix = [MARKER_NAME, LEGACY_MARKER_NAME]
+            .iter()
+            .find_map(|name| marker.strip_prefix(name)?.strip_prefix('='))
+            .ok_or("Invalid process marker")?;
         if suffix.is_empty() || suffix.len() > 120 || !suffix.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
             return Err("Invalid process marker".into());
         }
@@ -206,7 +221,26 @@ fn marked_group_leaders(marker: &str, codex_group: Option<u32>) -> BTreeMap<u32,
         let current = leaders.entry(group).or_insert(pid);
         *current = elect(*current, pid, group);
     }
+    // 데몬이 띄운 워커는 데몬의 그룹에 속하므로 그룹째 뺀다. 리더가 아닌 대표는 그룹을
+    // 만든 명령이 아니므로 판정 근거가 되지 못한다.
+    leaders.retain(|group, pid| {
+        *pid != *group || !process_arguments(*pid).is_some_and(|argv| is_shared_build_daemon(&argv))
+    });
     leaders
+}
+
+/// 턴이 아니라 사용자 환경이 소유하는 JVM 빌드 데몬인가.
+///
+/// 관측과 정리 양쪽에서 뺀다. 인자 하나만 보면 아무 프로그램이나 클래스 이름을 인자로
+/// 넘겨 정리를 피할 수 있으므로, 실행 파일이 `java`인 경우로 좁힌다.
+fn is_shared_build_daemon(argv: &[String]) -> bool {
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    std::path::Path::new(program).file_name() == Some(std::ffi::OsStr::new("java"))
+        && argv[1..]
+            .iter()
+            .any(|entry| SHARED_BUILD_DAEMONS.contains(&entry.as_str()))
 }
 
 /// 두 후보 중 그룹을 대표할 pid. 리더(`pid == group`)가 이기고, 없으면 작은 쪽이 이긴다.
@@ -311,34 +345,33 @@ mod runtime_tests;
 
 /// 시스템의 모든 pid.
 ///
-/// `proc_listallpids`는 개수가 아니라 **바이트 수**(`nprocs * size_of::<i32>()`)를 돌려준다.
-/// 조회와 결과 모두 그 단위다 — 개수로 읽으면 4배 과할당한 뒤 뒤쪽 3/4가 초기값 `0`으로 남은
-/// Vec을 돌려주게 되고, 반환 길이가 아무 의미도 갖지 못한다. 지금은 호출자의 `pid > 1`
-/// 필터가 그 0들을 걸러 무해하지만, 그 가드를 건드리거나 이 함수를 다른 곳에서 쓰면 바로
-/// 버그가 된다.
+/// `proc_listallpids`의 반환값은 PID **개수**, buffersize 인자만 **바이트 수**다.
+/// 반환값까지 sizeof(pid)로 나누면 할당과 truncate 양쪽에서 목록을 줄여,
+/// 오래된 자식 프로세스를 관측·정리하지 못한다.
 #[cfg(target_os = "macos")]
 fn process_ids() -> Vec<u32> {
     const PID_SIZE: usize = std::mem::size_of::<i32>();
     /// 조회와 실제 읽기 사이에 새로 뜬 프로세스를 담을 여유분.
     const HEADROOM: usize = 64;
 
-    let probed_bytes = unsafe { nix::libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if probed_bytes <= 0 {
+    let probed_count = unsafe { nix::libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if probed_count <= 0 {
         return Vec::new();
     }
-    let mut pids = vec![0i32; probed_bytes as usize / PID_SIZE + HEADROOM];
+    let mut pids = vec![0i32; probed_count as usize + HEADROOM];
     let capacity_bytes = pids
         .len()
         .checked_mul(PID_SIZE)
         .and_then(|size| i32::try_from(size).ok())
         .unwrap_or(i32::MAX);
-    let written_bytes = unsafe {
+    let written_count = unsafe {
         nix::libc::proc_listallpids(pids.as_mut_ptr().cast(), capacity_bytes)
     }
     .max(0) as usize;
-    pids.truncate((written_bytes / PID_SIZE).min(pids.len()));
+    pids.truncate(written_count.min(pids.len()));
     pids.into_iter()
         .filter_map(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0)
         .collect()
 }
 
@@ -495,7 +528,9 @@ fn procargs2_arguments(buffer: &[u8]) -> Vec<String> {
 
 /// 이 엔트리가 우리 마커 환경변수인가 — argv 영역이 끝났다는 유일한 신호.
 fn starts_with_marker(entry: &[u8]) -> bool {
-    entry.starts_with(MARKER_NAME.as_bytes()) && entry.get(MARKER_NAME.len()) == Some(&b'=')
+    [MARKER_NAME, LEGACY_MARKER_NAME]
+        .iter()
+        .any(|name| entry.starts_with(name.as_bytes()) && entry.get(name.len()) == Some(&b'='))
 }
 
 /// `/proc/<pid>/cmdline` 바이트에서 argv를 꺼낸다. macOS 파서와 같은 규칙을 따른다.
@@ -580,7 +615,7 @@ mod tests {
     /// (`tests/convo_process_cleanup_test.rs`).
     #[test]
     fn an_unused_marker_matches_nothing() {
-        let groups = marked_process_groups("PRAXIS_TURN_TOKEN=marker-that-nobody-carries");
+        let groups = marked_process_groups("DOJANG_TURN_TOKEN=marker-that-nobody-carries");
         assert!(groups.is_empty(), "무관한 그룹이 잡혔다: {groups:?}");
     }
 
@@ -743,7 +778,7 @@ mod tests {
         let buffer = procargs2(
             2,
             "/bin/echo",
-            &["echo", "hello", "PRAXIS_TURN_TOKEN=1-2-3"],
+            &["echo", "hello", "DOJANG_TURN_TOKEN=1-2-3"],
         );
         assert_eq!(procargs2_arguments(&buffer), vec!["echo", "hello"]);
     }
@@ -754,7 +789,7 @@ mod tests {
         let buffer = procargs2(
             4,
             "/bin/echo",
-            &["echo", "hello", "PRAXIS_TURN_TOKEN=1-2-3"],
+            &["echo", "hello", "DOJANG_TURN_TOKEN=1-2-3"],
         );
         assert_eq!(procargs2_arguments(&buffer), vec!["echo", "hello"]);
     }
@@ -763,7 +798,7 @@ mod tests {
     /// 그 상태에서도 마커는 새어 나가면 안 된다.
     #[test]
     fn an_empty_argv0_does_not_leak_the_marker() {
-        let buffer = procargs2(3, "/x", &["", "a", "b", "PRAXIS_TURN_TOKEN=1-2-3"]);
+        let buffer = procargs2(3, "/x", &["", "a", "b", "DOJANG_TURN_TOKEN=1-2-3"]);
         let parsed = procargs2_arguments(&buffer);
         assert!(
             !parsed.iter().any(|entry| entry.contains(MARKER_NAME)),
@@ -774,10 +809,10 @@ mod tests {
     /// 이름이 같아도 `=`가 붙지 않으면 우리 마커가 아니다 — 멀쩡한 인자를 잘라선 안 된다.
     #[test]
     fn a_lookalike_argument_is_not_mistaken_for_the_marker() {
-        let buffer = procargs2(2, "/bin/x", &["x", "PRAXIS_TURN_TOKENISH"]);
+        let buffer = procargs2(2, "/bin/x", &["x", "DOJANG_TURN_TOKENISH"]);
         assert_eq!(
             procargs2_arguments(&buffer),
-            vec!["x", "PRAXIS_TURN_TOKENISH"]
+            vec!["x", "DOJANG_TURN_TOKENISH"]
         );
     }
 
@@ -810,6 +845,11 @@ mod tests {
             vec!["sh", "-c", "", "foo"]
         );
         assert_eq!(
+            cmdline_arguments(b"node\0server.js\0DOJANG_TURN_TOKEN=1-2-3\0"),
+            vec!["node", "server.js"]
+        );
+        // 이름을 바꾸기 전 버전이 띄운 프로세스의 마커도 argv 끝으로 본다.
+        assert_eq!(
             cmdline_arguments(b"node\0server.js\0PRAXIS_TURN_TOKEN=1-2-3\0"),
             vec!["node", "server.js"]
         );
@@ -817,18 +857,38 @@ mod tests {
         assert!(cmdline_arguments(b"\0").is_empty());
     }
 
-    /// `proc_listallpids`가 돌려주는 **바이트 수**를 pid 개수로 읽으면 뒤쪽이 초기값 0으로
-    /// 남는다. 지금은 호출자의 `pid > 1` 필터가 가려 주지만, 그 필터를 건드리는 순간 드러난다.
-    ///
-    /// 살아 있는 pid만 담겼는지를 직접 본다 — 0 패딩이 섞이면 `all(> 0)`이 깨진다.
+    /// 새로 생긴 자기 자신만 확인하면 목록 앞부분만 읽는 버그를 놓친다.
+    /// 독립적인 ps 관측 전후에 계속 살아 있는 모든 PID가 조회되어야 한다.
     #[test]
     #[cfg(target_os = "macos")]
-    fn process_ids_carries_live_pids_without_zero_padding() {
+    fn process_ids_includes_all_stable_processes() {
+        fn observed_pids() -> std::collections::BTreeSet<u32> {
+            let output = Command::new("/bin/ps")
+                .args(["-axo", "pid="])
+                .output()
+                .expect("ps must run");
+            assert!(output.status.success(), "ps failed");
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .split_whitespace()
+                .map(|pid| pid.parse::<u32>().unwrap())
+                .filter(|pid| *pid > 0)
+                .collect()
+        }
+
+        let before = observed_pids();
         let pids = process_ids();
+        let after = observed_pids();
+        let missing: Vec<_> = before
+            .intersection(&after)
+            .filter(|pid| !pids.contains(pid))
+            .copied()
+            .collect();
+        assert!(missing.is_empty(), "stable processes omitted: {missing:?}");
         assert!(!pids.is_empty(), "프로세스가 하나도 안 잡혔다");
         assert!(
             pids.iter().all(|pid| *pid > 0),
-            "0 패딩이 섞였다 — 바이트 수를 pid 개수로 읽고 있다 ({}건 중 {}건이 0)",
+            "0 패딩이 섞였다 ({}건 중 {}건이 0)",
             pids.len(),
             pids.iter().filter(|pid| **pid == 0).count()
         );
@@ -861,5 +921,129 @@ mod tests {
             non_empty(vec!["sh".to_string()]),
             Some(vec!["sh".to_string()])
         );
+    }
+
+    fn argv(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|entry| entry.to_string()).collect()
+    }
+
+    #[test]
+    fn a_java_build_daemon_is_shared() {
+        assert!(is_shared_build_daemon(&argv(&[
+            "/opt/homebrew/Cellar/openjdk@17/17.0.17/libexec/openjdk.jdk/Contents/Home/bin/java",
+            "--add-opens=java.base/java.util=ALL-UNNAMED",
+            "-cp",
+            "/Users/x/.gradle/wrapper/dists/gradle-8.14.3/lib/gradle-daemon-main-8.14.3.jar",
+            "org.gradle.launcher.daemon.bootstrap.GradleDaemon",
+            "8.14.3",
+        ])));
+        assert!(is_shared_build_daemon(&argv(&[
+            "java",
+            "-cp",
+            "kotlin-daemon.jar",
+            "org.jetbrains.kotlin.daemon.KotlinCompileDaemon",
+        ])));
+    }
+
+    /// 클래스 이름을 인자로 넘기는 것만으로 정리를 피할 수 없어야 한다.
+    #[test]
+    fn a_class_name_alone_does_not_make_a_shared_daemon() {
+        assert!(!is_shared_build_daemon(&argv(&[
+            "/usr/bin/python3",
+            "server.py",
+            "org.gradle.launcher.daemon.bootstrap.GradleDaemon",
+        ])));
+        assert!(!is_shared_build_daemon(&argv(&["/usr/bin/java", "-jar", "app.jar"])));
+        assert!(!is_shared_build_daemon(&argv(&[
+            "/opt/bin/javaw",
+            "org.gradle.launcher.daemon.bootstrap.GradleDaemon",
+        ])));
+        assert!(!is_shared_build_daemon(&[]));
+    }
+
+    /// 이전 버전이 DB에 남긴 마커로도 크래시 복구 정리가 돌아야 한다.
+    #[test]
+    #[cfg(unix)]
+    fn recover_accepts_the_current_and_the_legacy_marker() {
+        assert!(TurnProcessScope::recover("DOJANG_TURN_TOKEN=1-2-3").is_ok());
+        assert!(TurnProcessScope::recover("PRAXIS_TURN_TOKEN=1-2-3").is_ok());
+        assert!(TurnProcessScope::recover("DOJANG_TURN_TOKENX=1-2-3").is_err());
+        assert!(TurnProcessScope::recover("OTHER=1-2-3").is_err());
+        assert!(TurnProcessScope::recover("DOJANG_TURN_TOKEN=").is_err());
+    }
+
+    /// 마커를 단 빌드 데몬 그룹은 생존자로 잡히지 않고, 스코프가 끝나도 죽지 않는다.
+    ///
+    /// SIP 밖 python3의 실제 바이너리를 `java`라는 심볼릭 링크로 띄워 데몬 모양의 argv를
+    /// 만든다. `/usr/bin/python3`는 macOS에서 실제 인터프리터를 다시 exec하는 셸이라
+    /// argv[0]를 바꿔도 남지 않으므로, 한 번 띄워 본 뒤 커널이 보고한 실행 파일을 쓴다.
+    /// 데몬이 아닌 자식을 함께 띄워, 관측 자체가 동작하는데도 데몬만 빠진다는 것을 확인한다.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn a_marked_build_daemon_is_neither_reported_nor_killed() {
+        use std::os::unix::process::CommandExt;
+        let mut probe = sleeper().spawn().expect("python3를 못 띄웠다");
+        let interpreter = wait_for(|| {
+            let path = TurnProcessScope::executable(probe.id())?;
+            // macOS에서는 셸 체인(python3 → xcrun → …)이 끝난 뒤의 프레임워크 바이너리가
+            // 필요하다. 중간 단계를 잡으면 링크가 다시 exec되어 argv[0]가 사라진다.
+            (!cfg!(target_os = "macos") || path.file_name()? == "Python").then_some(path)
+        })
+        .expect("python3의 실제 실행 파일을 못 찾았다");
+        probe.kill().ok();
+        probe.wait().ok();
+        let directory = std::env::temp_dir().join(format!("dojang-daemon-{}", unique_token()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let java = directory.join("java");
+        std::os::unix::fs::symlink(&interpreter, &java).unwrap();
+
+        let mut daemon = Command::new(&java);
+        daemon
+            .args([
+                "-c",
+                SLEEPER_SCRIPT,
+                "org.gradle.launcher.daemon.bootstrap.GradleDaemon",
+            ])
+            .process_group(0);
+        let scope = TurnProcessScope::attach(&mut daemon);
+        let mut daemon = daemon.spawn().expect("데몬 모양 자식을 못 띄웠다");
+        let mut control = sleeper();
+        control.env(MARKER_NAME, scope.marker().split_once('=').unwrap().1);
+        let mut control = control.spawn().expect("대조군 자식을 못 띄웠다");
+
+        wait_for(|| {
+            let observed = process_arguments(daemon.id())?;
+            observed
+                .iter()
+                .any(|entry| entry.ends_with("GradleDaemon"))
+                .then_some(())
+        })
+        .expect("데몬 모양 자식의 argv가 안 잡혔다");
+        wait_for(|| {
+            scope
+                .survivors(0, Vendor::Claude)
+                .iter()
+                .any(|survivor| survivor.group == control.id())
+                .then_some(())
+        })
+        .expect("대조군이 안 잡히면 관측 자체가 동작하지 않는 것이다");
+        let survivors = scope.survivors(0, Vendor::Claude);
+        assert!(
+            survivors.iter().all(|survivor| survivor.group != daemon.id()),
+            "빌드 데몬이 생존자로 보고됐다: {survivors:?}"
+        );
+
+        drop(scope);
+        assert!(
+            daemon.try_wait().expect("상태 조회 실패").is_none(),
+            "빌드 데몬이 턴 정리에서 죽었다"
+        );
+        assert!(
+            wait_for(|| control.try_wait().ok().flatten()).is_some(),
+            "대조군은 턴 정리에서 죽어야 한다"
+        );
+        daemon.kill().ok();
+        daemon.wait().ok();
+        std::fs::remove_dir_all(&directory).ok();
     }
 }

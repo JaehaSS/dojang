@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use sqlx::SqlitePool;
 
 use crate::db;
@@ -14,9 +16,29 @@ pub async fn persist_evidence(
     pool: &SqlitePool,
     task_id: i64,
     report: &VerifyReport,
+    root: &Path,
+    source_before: &crate::task_results::FingerprintObservation,
+    source_after: &crate::task_results::FingerprintObservation,
+    task_state: &str,
+    started_at: i64,
     created_at: i64,
 ) -> Result<(), String> {
     let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
+    // Receipt and compatibility evidence must commit together.  Otherwise a
+    // legacy caller could see ready=true without the version fence that makes
+    // that claim meaningful.
+    let current_ready = crate::task_results::persist_verify_receipt_tx(
+        &mut transaction,
+        task_id,
+        report,
+        root,
+        source_before,
+        source_after,
+        task_state,
+        started_at,
+        created_at,
+    )
+    .await?;
     let build = report.build.as_ref();
     let test = report.test.as_ref();
     let result = sqlx::query(
@@ -47,7 +69,7 @@ pub async fn persist_evidence(
             .map(|summary| i64::from(summary.failed))
             .unwrap_or(0),
     )
-    .bind(report.ready)
+    .bind(current_ready)
     .bind(created_at)
     .bind(task_id)
     .bind(TERMINAL_STATES[0])
@@ -64,7 +86,7 @@ pub async fn persist_evidence(
         &mut transaction,
         task_id,
         "verify",
-        ready_detail(report),
+        ready_detail(current_ready),
         created_at,
     )
     .await?;
@@ -92,8 +114,8 @@ async fn append_event(
     Ok(())
 }
 
-fn ready_detail(report: &VerifyReport) -> &'static str {
-    if report.ready {
+fn ready_detail(ready: bool) -> &'static str {
+    if ready {
         "ready"
     } else {
         "not-ready"

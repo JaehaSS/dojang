@@ -186,9 +186,6 @@ async fn prepare_committed(fixture: &Fixture) -> String {
             .unwrap()
     );
     // 파일형 투영에는 회수할 원장이 없다 — 블록만 걷어내고 다음 단계로 넘어간다.
-    memory::retire_task_projection_if_present(&fixture.pool, fixture.task.id, 2_000_000_003)
-        .await
-        .unwrap();
     memory::file::retire_task(&fixture.pool, fixture.task.id)
         .await
         .unwrap();
@@ -389,6 +386,7 @@ fn request(repo: &std::path::Path) -> QueuedTaskRequest {
         mode: "terminal".to_string(),
         goal_contract: None,
         resume_session: None,
+        resume_vendor: None,
     }
 }
 

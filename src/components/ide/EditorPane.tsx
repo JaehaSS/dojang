@@ -8,6 +8,7 @@ import {
 import Editor, { type OnMount } from "@monaco-editor/react";
 // 타입만 — 런타임 번들은 @monaco-editor/react가 넘겨주는 인스턴스를 그대로 쓴다.
 import type * as Monaco from "monaco-editor";
+import { isMacPlatform } from "../../lib/hotkey";
 import { looksLikeHtml } from "../../lib/looks-like-html";
 import { langFromPath } from "../../lib/monaco";
 import { useTheme } from "../../lib/use-theme";
@@ -19,21 +20,18 @@ import { DiffTab } from "./DiffTab";
 import { TableView } from "./TableView";
 import { GotoOverlay, type GotoState } from "./GotoOverlay";
 import { ReferencesPanel } from "./ReferencesPanel";
-import { CodeGraphView } from "./CodeGraphView";
 import {
   dedupeTargets,
   resolveOutcome,
   shouldFallbackToReferences,
 } from "../../lib/lsp";
 import type {
-  CodeGraphDirection,
   EditorSettings,
   FileKind,
   LspGotoKind,
   LspStatusInfo,
   LspTarget,
 } from "../../lib/ipc";
-import type { CodeWikiStatus } from "../../lib/code-wiki-ipc";
 import type { TabKey } from "../../lib/tab-key";
 import { lspSemanticTokens } from "../../lib/ipc";
 import { DEFAULT_EDITOR_SETTINGS } from "../../lib/editor-settings";
@@ -47,15 +45,6 @@ import { bubblePlacement, shouldShowBubble } from "../../lib/selection-ask";
 import { linesOfRange } from "../../lib/md-selection";
 import { SelectionAskBubble, type BubbleAnchor } from "./SelectionAskBubble";
 import type { SplitAxis } from "./editor-split";
-import { CodeGraphControl, CodeGraphPanel } from "./CodeGraphPanel";
-import { CodeWikiControl, CodeWikiPanel } from "./CodeWikiPanel";
-import { useCodeWikiPanel } from "./useCodeWikiPanel";
-import {
-  useCodeGraphPanel,
-  type CodeGraphPanelState,
-  type CodeGraphSource,
-  type EditorCodeGraphActions,
-} from "./useCodeGraphPanel";
 
 /** 에디터에 열린 탭 한 개. */
 export interface OpenFile {
@@ -90,8 +79,6 @@ const REPL_CONTEXT_KEY = "praxisReplRunnable";
 
 const isMarkdown = (p: string) => /\.(md|markdown)$/i.test(p);
 const isHtml = (p: string) => /\.(html?|xhtml)$/i.test(p);
-const isGeneratedWikiPath = (p: string) =>
-  p === "docs/codebase/index.md" || p.startsWith("docs/codebase/modules/");
 
 type EditorInst = Parameters<OnMount>[0];
 type MonacoInst = Parameters<OnMount>[1];
@@ -108,8 +95,6 @@ export interface EditorPaneProps {
   /** content = 에디터의 라이브 값(키 입력 직후 React state가 늦어도 유실 없게). */
   onSave: (path: string, content: string) => void;
   onReload: (path: string) => void;
-  /** 생성 후에도 저장하지 않은 버퍼를 보존하는 디스크 재읽기. */
-  onReloadClean?: (path: string) => void;
   /** 기본 앱으로 열기 (바이너리/이미지/대용량 — OS 연결 프로그램). */
   onOpenPath: (path: string) => void;
   /** Finder에서 보기 (파일 선택된 채 폴더 열기). */
@@ -176,20 +161,6 @@ export interface EditorPaneProps {
   navigationScope?: string;
   /** 이 파일에서 정의 이동을 쓸 수 있는지 물어본다. 없으면 상태 배지를 띄우지 않는다. */
   onLspStatus?: (path: string) => Promise<LspStatusInfo>;
-  /** 로컬 워크트리의 세대형 영향 분석. 원격 화면에서는 넘기지 않는다. */
-  codeGraph?: EditorCodeGraphActions;
-  graphTool?: {
-    panel: CodeGraphPanelState;
-    open: boolean;
-    direction: CodeGraphDirection;
-    depth: number;
-    onIndex: (source: CodeGraphSource) => void;
-    onImpact: (source: CodeGraphSource) => void;
-    onNeighborhood: (source: CodeGraphSource) => void;
-    onDirection: (direction: CodeGraphDirection) => void;
-    onDepth: (depth: number) => void;
-    onClose: () => void;
-  };
   /** App이 지시하는 커서 이동 지점. 대상 파일 탭이 활성화된 뒤에 적용된다. */
   reveal?: {
     path: string;
@@ -310,7 +281,6 @@ export function EditorPane({
   onChange,
   onSave,
   onReload,
-  onReloadClean,
   onOpenPath,
   onRevealPath,
   onLinkMenu,
@@ -329,8 +299,6 @@ export function EditorPane({
   sourceVersion,
   navigationScope = String(taskId),
   onLspStatus,
-  codeGraph,
-  graphTool,
   reveal = null,
   onRevealed,
   onAsk,
@@ -438,7 +406,7 @@ export function EditorPane({
   const tokenRef = useRef<symbol | null>(null);
   if (tokenRef.current === null) tokenRef.current = Symbol("editor-pane");
   const token = tokenRef.current;
-  const lspScopeKey = String(codeGraph?.scope ?? taskId);
+  const lspScopeKey = String(taskId);
   const [lspState, setLspState] = useState<LspInfoState>({
     scopeKey: lspScopeKey,
     path: null,
@@ -451,65 +419,6 @@ export function EditorPane({
     lspState.scopeKey === lspScopeKey && lspState.path === lspPath;
   const lspInfo =
     lspCurrent && lspState.state === "ready" ? lspState.value : null;
-  const graphAvailable =
-    codeGraph != null && lspPath != null && lspInfo?.server != null;
-  const graphChecking =
-    codeGraph != null &&
-    lspPath != null &&
-    (!lspCurrent || lspState.state === "idle" || lspState.state === "loading");
-  const graphUnsupported =
-    codeGraph != null &&
-    lspPath != null &&
-    lspInfo?.server === null &&
-    lspCurrent &&
-    lspState.state === "ready";
-  const wikiAvailable = graphAvailable && codeGraph?.wiki != null;
-  const wikiDirty =
-    (active?.dirty ?? false) ||
-    files.some((file) => file.dirty && isGeneratedWikiPath(file.path));
-  const reloadGeneratedWiki = useCallback(
-    (status: CodeWikiStatus) => {
-      if (!onReloadClean) return;
-      const generated = new Set([
-        status.indexPath,
-        ...status.modules.map((module) => module.pagePath),
-      ]);
-      files
-        .filter((file) => !file.dirty && generated.has(file.path))
-        .forEach((file) => onReloadClean(file.path));
-    },
-    [files, onReloadClean],
-  );
-  const graphPosition = useCallback(() => {
-    const position = editorRef.current?.getPosition();
-    if (!position) return null;
-    return { line: position.lineNumber, column: position.column };
-  }, []);
-  const currentGraphSource = useCallback((): CodeGraphSource | null => {
-    const editor = editorRef.current;
-    const position = graphPosition();
-    if (!active?.path || !position) return null;
-    return {
-      path: active.path,
-      dirty: active.dirty,
-      ...position,
-      scrollTop: editor?.getScrollTop?.() ?? 0,
-      scrollLeft: editor?.getScrollLeft?.() ?? 0,
-    };
-  }, [active?.dirty, active?.path, graphPosition]);
-  const ownGraph = useCodeGraphPanel({
-    actions: graphAvailable ? codeGraph : undefined,
-    path: graphAvailable ? (active?.path ?? null) : null,
-    dirty: active?.dirty ?? false,
-    getPosition: graphPosition,
-  });
-  const wiki = useCodeWikiPanel({
-    actions: wikiAvailable ? codeGraph?.wiki : undefined,
-    scope: wikiAvailable ? (codeGraph?.scope ?? null) : null,
-    sourcePath: wikiAvailable ? (active?.path ?? null) : null,
-    dirty: wikiDirty,
-    onGenerated: reloadGeneratedWiki,
-  });
 
   useEffect(() => {
     paneFiles.set(token, () => filesRef.current);
@@ -527,10 +436,6 @@ export function EditorPane({
 
   const [gotoState, setGotoState] = useState<GotoState | null>(null);
   const [references, setReferences] = useState<LspTarget[] | null>(null);
-  const [graphOpen, setGraphOpen] = useState(false);
-  const [graphDirection, setGraphDirection] = useState<CodeGraphDirection>("incoming");
-  const [graphDepth, setGraphDepth] = useState(1);
-  const graph = graphTool?.panel ?? ownGraph;
   const gotoRef = useRef(onGoto);
   gotoRef.current = onGoto;
   const openTargetRef = useRef(onOpenTarget);
@@ -693,17 +598,28 @@ export function EditorPane({
     });
   }, []);
 
-  /** ⌘B(정의) · ⌥⌘B(구현). 선언 위에서 ⌘B를 누르면 제자리 대신 사용처를 띄운다. */
-  const runGoto = useCallback(async (kind: LspGotoKind) => {
+  /**
+   * ⌘B(정의) · ⌥⌘B(구현). 선언 위에서 ⌘B를 누르면 제자리 대신 사용처를 띄운다.
+   *
+   * `declarationOnly`는 ⌘클릭이 부르는 경로다. 다른 곳으로 가는 이동은 Monaco의 클릭
+   * 동선이 이미 처리하므로, 여기서는 선언 위에서 누른 경우의 사용처 목록만 맡는다.
+   */
+  const runGoto = useCallback(async (
+    kind: LspGotoKind,
+    options: { at?: Monaco.IPosition; declarationOnly?: boolean } = {},
+  ) => {
     const ed = editorRef.current;
     const path = activeRef.current;
     const goto = gotoRef.current;
     if (!ed || !path || !goto || filesRef.current.find((file) => file.path === path)?.readOnly) return;
-    const pos = ed.getPosition();
+    const pos = options.at ?? ed.getPosition();
     if (!pos) return;
+    const declarationOnly = options.declarationOnly === true;
     const version = sourceVersionRef.current?.(path) ?? 0;
     const scope = navigationScopeRef.current;
-    const request = ++gotoRequestRef.current;
+    // ⌘클릭 보조 조회는 사용처로 넘어가기로 정해지기 전까지 번호를 올리지 않는다. 먼저 올리면
+    // 진행 중인 ⌘B가 결과를 버리고, 상태를 쓰지 않는 이 조회 탓에 "조회 중"이 남는다.
+    let request = declarationOnly ? gotoRequestRef.current : ++gotoRequestRef.current;
 
     const referenceRequest = kind === "references" ? (beginReferencesRef.current?.() ?? 0) : null;
     const ask = (k: LspGotoKind) =>
@@ -715,7 +631,7 @@ export function EditorPane({
         column: pos.column,
       });
 
-    setGotoState({ phase: "loading", label: GOTO_LABEL[kind] });
+    if (!declarationOnly) setGotoState({ phase: "loading", label: GOTO_LABEL[kind] });
     try {
       let effective = kind;
       let targets = await ask(kind);
@@ -723,9 +639,13 @@ export function EditorPane({
         kind === "definition" &&
         shouldFallbackToReferences(targets, { path, line: pos.lineNumber })
       ) {
+        if (declarationOnly) {
+          if (gotoRequestRef.current !== request) return;
+          request = ++gotoRequestRef.current;
+        }
         effective = "references";
         targets = await ask("references");
-      }
+      } else if (declarationOnly) return;
       if (
         navigationScopeRef.current !== scope ||
         gotoRequestRef.current !== request ||
@@ -760,6 +680,8 @@ export function EditorPane({
       setGotoState(null);
       navigateTarget(outcome.target);
     } catch (e) {
+      // ⌘클릭은 Monaco의 이동과 함께 도는 보조 조회다 — 여기서 실패를 띄우면 정상 이동 위에 배너가 겹친다.
+      if (declarationOnly) return;
       setGotoState({
         phase: "error",
         label: GOTO_LABEL[kind],
@@ -776,7 +698,11 @@ export function EditorPane({
 
   /**
    * LSP를 Monaco의 **언어 기능**으로 등록한다 — ⌘클릭, ⌘를 누른 채 hover했을 때의 밑줄,
-   * F12, Peek(⌥F12), 사용처(⇧F12)가 전부 여기서 따라온다.
+   * F12, Peek(⌥F12)가 여기서 따라온다.
+   *
+   * 사용처는 등록하지 않는다. Monaco의 사용처 UI는 결과가 한 건이면 목록 없이 바로 이동하고,
+   * 여러 건이면 열려 있지 않은 파일의 미리보기를 만들지 못한다. 프로바이더가 없으면 우클릭
+   * 메뉴의 Monaco 항목도 숨으므로, 사용처 요청은 모두 앱의 사용처 목록(runGoto)으로 모은다.
    *
    * 키바인딩을 하나씩 흉내 내는 대신 Monaco가 이미 가진 동선에 백엔드를 꽂는 쪽을 택했다.
    * 대신 Monaco가 결과를 URI로만 다루므로, 워크트리 밖 위치나 아직 열지 않은 파일로 가는
@@ -849,12 +775,6 @@ export function EditorPane({
               position: Monaco.Position,
             ) => query(model, position, "implementation"),
           }),
-          m.languages.registerReferenceProvider(language, {
-            provideReferences: (
-              model: Monaco.editor.ITextModel,
-              position: Monaco.Position,
-            ) => query(model, position, "references"),
-          }),
         );
       }
 
@@ -908,11 +828,32 @@ export function EditorPane({
       ed.addCommand(m.KeyMod.Alt | m.KeyCode.KeyB, () => {
         void runGotoRef.current("references");
       });
-      // 참조 찾기 — VS Code·IntelliJ 공통 바인딩. Monaco 기본은 F12(정의)뿐이고, 우클릭
-      // 메뉴에는 이미 있다(컨텍스트 메뉴를 끄지 않았고 reference 프로바이더가 등록돼 있다).
-      // 없던 것은 키보드 경로다.
-      ed.addCommand(m.KeyMod.Shift | m.KeyCode.F12, () => {
-        void runGotoRef.current("references");
+      // 참조 찾기 — VS Code·IntelliJ 공통 바인딩(⇧F12). 우클릭 메뉴 항목도 같은 액션이다.
+      ed.addAction({
+        id: "praxis.findReferences",
+        label: "사용처 보기",
+        keybindings: [m.KeyMod.Shift | m.KeyCode.F12],
+        contextMenuGroupId: "navigation",
+        contextMenuOrder: 1.45,
+        run: () => void runGotoRef.current("references"),
+      });
+      // 선언 위 ⌘클릭 → 사용처 목록. 다른 곳으로 가는 이동은 Monaco의 클릭 동선이 그대로 맡는다.
+      // Monaco처럼 누른 자리에서 뗐을 때만 클릭으로 본다 — ⌘-드래그는 선택이다.
+      let pressed: Monaco.IPosition | null = null;
+      const clickAt = (e: Monaco.editor.IEditorMouseEvent) => {
+        const trigger = isMacPlatform() ? e.event.metaKey : e.event.ctrlKey;
+        if (!trigger || e.target.type !== m.editor.MouseTargetType.CONTENT_TEXT) return null;
+        return e.target.position;
+      };
+      ed.onMouseDown((e) => {
+        pressed = e.event.leftButton ? clickAt(e) : null;
+      });
+      ed.onMouseUp((e) => {
+        const at = clickAt(e);
+        const from = pressed;
+        pressed = null;
+        if (at && from && at.lineNumber === from.lineNumber && at.column === from.column)
+          void runGotoRef.current("definition", { at, declarationOnly: true });
       });
       ed.addCommand(m.KeyMod.Alt | m.KeyCode.F7, () => {
         void runGotoRef.current("references");
@@ -992,7 +933,6 @@ export function EditorPane({
   useEffect(() => {
     setGotoState(null);
     if (!referencesRef.current) setReferences(null);
-    setGraphOpen(false);
     setBubble(null);
   }, [activeKey]);
 
@@ -1246,48 +1186,6 @@ export function EditorPane({
             {active.readOnly && (
               <span className="text-xs text-text-muted" role="status">읽기 전용</span>
             )}
-            {graphAvailable && (
-              <CodeGraphControl
-                status={graph.status}
-                dirty={active.dirty}
-                busy={graph.busy}
-                onIndex={() => {
-                  const source = currentGraphSource();
-                  if (source && graphTool) graphTool.onIndex(source);
-                  else void graph.index();
-                }}
-                onCancel={() => void graph.cancel()}
-                onImpact={() => {
-                  const source = currentGraphSource();
-                  if (source && graphTool) graphTool.onImpact(source);
-                  else void graph.inspect();
-                }}
-                onNeighborhood={() => {
-                  const source = currentGraphSource();
-                  if (source && graphTool) graphTool.onNeighborhood(source);
-                  else {
-                    setGraphOpen(true);
-                    void graph.inspectNeighborhood(graphDirection, graphDepth);
-                  }
-                }}
-              />
-            )}
-            {wikiAvailable && <CodeWikiControl onOpen={wiki.show} />}
-            {graphChecking && (
-              <span className="text-xs text-text-muted" role="status">
-                코드 그래프 지원 확인 중
-              </span>
-            )}
-            {lspState.state === "error" && lspCurrent && (
-              <span className="text-xs text-status-failed" role="status">
-                코드 그래프 지원 확인 실패
-              </span>
-            )}
-            {graphUnsupported && (
-              <span className="text-xs text-text-muted" role="status">
-                이 파일 형식은 코드 그래프를 지원하지 않습니다
-              </span>
-            )}
             {/* 언어 서버 상태 — 정의 이동이 되는 파일인지 눈으로 확인되는 자리. */}
             {lspInfo?.server && (
               <span
@@ -1296,7 +1194,7 @@ export function EditorPane({
                 }`}
                 title={
                   lspInfo.available
-                    ? `${lspInfo.server} — ⌘클릭·F12로 정의, ⌥⌘B로 구현, ⇧F12로 사용처`
+                    ? `${lspInfo.server} — ⌘클릭·F12로 정의, ⌥⌘B로 구현, ⇧F12·선언 위 ⌘클릭으로 사용처`
                     : (lspInfo.detail ?? "정의 이동을 쓸 수 없습니다")
                 }
                 aria-label={
@@ -1404,56 +1302,11 @@ export function EditorPane({
         )}
       </div>
 
-      {!graphTool && graphAvailable && graph.open && (
-        <CodeGraphPanel
-          impact={graph.impact}
-          error={graph.error}
-          onOpen={(item) => {
-            navigateTarget({ path: item.relPath, abs_path: item.relPath, line: item.line + 1, column: item.character + 1, external: false });
-            graph.close();
-          }}
-          onClose={graph.close}
-        />
-      )}
       {references && !onReferences && (
         <ReferencesPanel
           targets={references}
           onOpen={navigateTarget}
           onClose={() => setReferences(null)}
-        />
-      )}
-      {!graphTool && graphOpen && (
-        <CodeGraphView
-          graph={graph.neighborhood}
-          error={graph.error}
-          direction={graphDirection}
-          depth={graphDepth}
-          onDirection={(direction) => {
-            setGraphDirection(direction);
-            void graph.inspectNeighborhood(direction, graphDepth);
-          }}
-          onDepth={(depth) => {
-            setGraphDepth(depth);
-            void graph.inspectNeighborhood(graphDirection, depth);
-          }}
-          onOpen={(node) => {
-            navigateTarget({ path: node.relPath, abs_path: node.relPath, line: node.line + 1, column: node.character + 1, external: false });
-            setGraphOpen(false);
-          }}
-          onClose={() => setGraphOpen(false)}
-        />
-      )}
-      {wikiAvailable && wiki.open && active && (
-        <CodeWikiPanel
-          status={wiki.status}
-          error={wiki.error}
-          busy={wiki.busy}
-          sourcePath={active.path}
-          dirty={wikiDirty}
-          onGenerate={(path) => void wiki.generate(path)}
-          onOpenPath={(path) => void wiki.openPath(path)}
-          onReload={() => void wiki.reload()}
-          onClose={wiki.close}
         />
       )}
 
@@ -1487,6 +1340,8 @@ export function EditorPane({
               renderWhitespace: "selection",
               // ⌘클릭을 정의 이동에 내준다 — 멀티커서는 ⌥클릭으로(VS Code 기본과 동일).
               multiCursorModifier: "alt",
+              // 선언 위 ⌘클릭의 대체 동작(Monaco 사용처 UI)을 끈다 — 사용처는 앱 목록이 띄운다.
+              gotoLocation: { alternativeDefinitionCommand: "" },
               // 에디터로서의 기본기 — 들여쓰기 가이드, 활성 줄 강조, 괄호 짝 색.
               guides: { indentation: true, bracketPairs: true },
               renderLineHighlight: "all",

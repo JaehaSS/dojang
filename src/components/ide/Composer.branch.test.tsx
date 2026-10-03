@@ -9,6 +9,10 @@ import { initialInterviewState } from "../../lib/interview";
 const mocks = vi.hoisted(() => ({
   gitStatus: vi.fn(async () => true),
   gitBranches: vi.fn(async () => ({ current: "main", branches: ["main", "dev"] })),
+  gitCheckoutBranch: vi.fn(async (_path: string, branch: string) => ({
+    current: branch,
+    branches: ["main", "dev"],
+  })),
   useWorktreeOverrideGet: vi.fn(async (): Promise<boolean | null> => null),
 }));
 
@@ -20,6 +24,7 @@ vi.mock("../../lib/ipc", () => ({
   gitStatus: mocks.gitStatus,
   gitInit: vi.fn(async () => true),
   gitBranches: mocks.gitBranches,
+  gitCheckoutBranch: mocks.gitCheckoutBranch,
   pasteImageSave: vi.fn(async () => ""),
   useWorktreeOverrideGet: mocks.useWorktreeOverrideGet,
   useWorktreeOverrideClear: vi.fn(async () => {}),
@@ -178,6 +183,40 @@ describe("Composer의 base 브랜치 선택", () => {
     await renderComposer({ useWorktree: false, baseBranch: "dev" });
 
     expect(branchChip("dev")?.title).toContain("전환");
+  });
+
+  it("메뉴에서 체크아웃하면 메인 체크아웃을 전환하고 새 현재 브랜치를 따른다", async () => {
+    const setBaseBranch = vi.fn();
+    await renderComposer({ setBaseBranch });
+
+    await act(async () => branchChip("main")?.click());
+    const search = container!.querySelector<HTMLInputElement>("input[role='combobox']")!;
+    await act(async () => {
+      search.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    const button = [...container!.querySelectorAll("button")].find((b) => b.textContent === "체크아웃");
+    await act(async () => button?.click());
+
+    expect(mocks.gitCheckoutBranch).toHaveBeenCalledWith("/repo", "dev");
+    expect(setBaseBranch).toHaveBeenCalledWith("");
+    expect(branchChip("dev")).not.toBeNull();
+  });
+
+  it("체크아웃이 실패하면 이유를 보여준다", async () => {
+    mocks.gitCheckoutBranch.mockRejectedValueOnce("작업 #7이 아직 끝나지 않아 브랜치를 전환할 수 없습니다");
+    await renderComposer();
+
+    await act(async () => branchChip("main")?.click());
+    const search = container!.querySelector<HTMLInputElement>("input[role='combobox']")!;
+    await act(async () => {
+      search.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    await act(async () => {
+      search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true }));
+    });
+
+    expect(container!.textContent).toContain("브랜치 전환 실패");
+    expect(container!.textContent).toContain("#7");
   });
 
   it("git 저장소가 아니면 숨긴다", async () => {

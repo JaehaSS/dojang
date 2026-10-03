@@ -24,9 +24,6 @@ fn provenance(task_id: i64, commit_digit: char) -> ApprovalProvenance {
     ApprovalProvenance {
         task_id,
         instruction_digest: decision::provenance::digest(&format!("instruction-{task_id}")),
-        start_receipts: vec![],
-        memory_versions: vec![(9, 2)],
-        evidence_checks: vec![],
         verification_run: None,
         commit_sha: commit_digit.to_string().repeat(40),
     }

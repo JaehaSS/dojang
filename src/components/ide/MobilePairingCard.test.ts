@@ -5,14 +5,14 @@ const CODE = "ab".repeat(32);
 
 describe("pairingUrl", () => {
   it("스킴이 없으면 https를 붙인다 — 사용자는 보통 호스트만 적는다", () => {
-    expect(pairingUrl("mini1.tail41b650.ts.net", CODE)).toBe(
-      `https://mini1.tail41b650.ts.net/m/#pair=${CODE}`,
+    expect(pairingUrl("my-mac.example.ts.net", CODE)).toBe(
+      `https://my-mac.example.ts.net/m/#pair=${CODE}`,
     );
   });
 
   it("스킴이 있으면 그대로 쓴다", () => {
-    expect(pairingUrl("https://mini1.tail41b650.ts.net", CODE)).toBe(
-      `https://mini1.tail41b650.ts.net/m/#pair=${CODE}`,
+    expect(pairingUrl("https://my-mac.example.ts.net", CODE)).toBe(
+      `https://my-mac.example.ts.net/m/#pair=${CODE}`,
     );
   });
 

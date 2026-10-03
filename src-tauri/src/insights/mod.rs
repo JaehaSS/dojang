@@ -1,10 +1,11 @@
-//! 사용량 인사이트 — `~/.claude/projects/*/*.jsonl` 전체를 스캔해 세션/메시지/토큰/모델 통계를 집계.
+//! 사용량 인사이트 — 로컬 Claude 프로젝트와 Codex 세션의 관측 가능한 사용량을 집계.
 //! Tauri 비의존(단위 테스트 가능). 여러 모델을 사용하는 환경을 가정해 **모델별 분해**를 함께 제공.
 //!
 //! 시간 버킷(날짜/시간/요일)은 로컬 시간대 기준. 외부 의존성(chrono 등) 없이 ISO8601 타임스탬프를
 //! 직접 파싱한다. 프로젝트별 분해는 메시지의 `cwd` 필드를 키로 삼는다.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -13,10 +14,19 @@ use std::time::SystemTime;
 use serde::Serialize;
 
 mod agent_skills;
+mod cards;
+pub mod dismissals;
+mod lessons;
 mod outcomes;
 mod patterns;
 pub use agent_skills::{
     compute_agent_skills, AgentSkillUsage, AgentSlice, AgentStat, SkillSlice, SkillStat,
+};
+pub use cards::{compute_cards, Evidence, InsightCard, SignalId, SpendSnapshot};
+pub use dismissals::{dismiss as dismiss_card, migrate as migrate_dismissals};
+pub use lessons::{
+    compute_lesson_themes, load_projections as load_lesson_projections, AbandonedItem,
+    LedgerEntry, RepoLessons, RepoProjection, SubjectCount,
 };
 pub use outcomes::{compute_outcomes, OutcomeInsights};
 pub use patterns::{compute_patterns, TaskPatterns};
@@ -25,7 +35,7 @@ pub use patterns::{compute_patterns, TaskPatterns};
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ModelStat {
     pub model: String,
-    /// 모델 제공자 — 지금은 Claude 트랜스크립트만 스캔하므로 항상 "claude".
+    /// 모델 제공자 — 로컬 CLI 기록에서 정규화한 "claude" | "codex".
     pub provider: String,
     pub messages: u64,
     pub sessions: u64,
@@ -35,6 +45,12 @@ pub struct ModelStat {
     pub cache_creation_tokens: u64,
     /// 캐시 읽기 토큰 — 비용 계산 시 입력가×0.1.
     pub cache_read_tokens: u64,
+    /// 캐시 비율의 분모·분자를 모두 확인한 사용량 표본 수.
+    pub cache_observed_messages: u64,
+    pub cache_observed_input_tokens: u64,
+    pub cache_observed_read_tokens: u64,
+    /// 사용량은 있었지만 캐시 비율을 계산할 수 없던 표본 수.
+    pub cache_unknown_messages: u64,
     pub total_tokens: u64,
     /// 24칸 — 이 모델의 시간대별 메시지 수.
     pub hours: Vec<u64>,
@@ -47,6 +63,17 @@ pub struct DayStat {
     pub date: String,
     pub messages: u64,
     pub tokens: u64,
+}
+
+/// 일별 캐시 관측치. `cache_read_tokens / input_tokens`는 observed 표본만의 비율이다.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct CacheDayStat {
+    pub date: String,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub observed_messages: u64,
+    pub unknown_messages: u64,
 }
 
 /// 프로젝트(cwd) 한 곳의 사용량 집계.
@@ -84,6 +111,15 @@ pub struct Insights {
     pub cache_creation_tokens: u64,
     /// 캐시 읽기 토큰 전체 합계.
     pub cache_read_tokens: u64,
+    pub cache_observed_messages: u64,
+    pub cache_observed_input_tokens: u64,
+    pub cache_observed_read_tokens: u64,
+    pub cache_unknown_messages: u64,
+    /// 날짜 오름차순. 전체 로컬 CLI 기록의 캐시 관측치이며 Praxis 전용 측정이 아니다.
+    pub cache_days: Vec<CacheDayStat>,
+    /// Praxis 주 대화 접수 입력 측정. 과거 행이나 명령 경로는 None으로 남는다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_injection: Option<crate::convo::prompt_metrics::PromptInjectionSummary>,
     pub active_days: u64,
     pub current_streak: u64,
     pub longest_streak: u64,
@@ -155,15 +191,28 @@ struct Msg<'a> {
     session: &'a str,
     cwd: &'a str,
     model: Option<&'a str>,
+    provider: &'a str,
     input: u64,
     output: u64,
     cache_c: u64,
     cache_r: u64,
+    cache_observed: bool,
+    cache_unknown: bool,
 }
 
 impl Msg<'_> {
+    fn input_total(&self) -> u64 {
+        if self.provider == "codex" { self.input } else { self.input + self.cache_c + self.cache_r }
+    }
+
     fn total(&self) -> u64 {
-        self.input + self.output + self.cache_c + self.cache_r
+        // Claude reports cache reads/writes outside input_tokens. Codex's cached input is already
+        // a subset of total input, so adding it here would inflate both totals and model shares.
+        if self.provider == "codex" {
+            self.input + self.output
+        } else {
+            self.input + self.output + self.cache_c + self.cache_r
+        }
     }
 }
 
@@ -254,6 +303,11 @@ struct Acc {
     output_tokens: u64,
     cache_creation_tokens: u64,
     cache_read_tokens: u64,
+    cache_observed_messages: u64,
+    cache_observed_input_tokens: u64,
+    cache_observed_read_tokens: u64,
+    cache_unknown_messages: u64,
+    cache_days: BTreeMap<i64, CacheDayStat>,
     sessions: HashSet<String>,
     day_msgs: BTreeMap<i64, (String, u64, u64)>, // day_num → (date, messages, tokens)
     active_days: BTreeSet<i64>,
@@ -305,6 +359,32 @@ impl Acc {
         self.output_tokens += m.output;
         self.cache_creation_tokens += m.cache_c;
         self.cache_read_tokens += m.cache_r;
+        if m.cache_observed {
+            self.cache_observed_messages += 1;
+            self.cache_observed_input_tokens += m.input_total();
+            self.cache_observed_read_tokens += m.cache_r;
+            let day = self
+                .cache_days
+                .entry(ts.day)
+                .or_insert_with(|| CacheDayStat {
+                    date: ts.date.clone(),
+                    ..Default::default()
+                });
+            day.input_tokens += m.input_total();
+            day.cache_read_tokens += m.cache_r;
+            day.cache_write_tokens += m.cache_c;
+            day.observed_messages += 1;
+        } else if m.cache_unknown {
+            self.cache_unknown_messages += 1;
+            let day = self
+                .cache_days
+                .entry(ts.day)
+                .or_insert_with(|| CacheDayStat {
+                    date: ts.date.clone(),
+                    ..Default::default()
+                });
+            day.unknown_messages += 1;
+        }
         self.total_tokens += total;
         if !m.session.is_empty() {
             self.sessions.insert(m.session.to_string());
@@ -331,27 +411,31 @@ impl Acc {
             }
         }
         if let Some(name) = m.model {
-            let ms = self
-                .models
-                .entry(name.to_string())
-                .or_insert_with(|| ModelStat {
-                    model: name.to_string(),
-                    provider: "claude".to_string(),
-                    hours: vec![0; 24],
-                    ..Default::default()
-                });
+            let key = format!("{}\u{1f}{name}", m.provider);
+            let ms = self.models.entry(key.clone()).or_insert_with(|| ModelStat {
+                model: name.to_string(),
+                provider: m.provider.to_string(),
+                hours: vec![0; 24],
+                ..Default::default()
+            });
             ms.messages += 1;
             ms.input_tokens += m.input;
             ms.output_tokens += m.output;
             ms.cache_creation_tokens += m.cache_c;
             ms.cache_read_tokens += m.cache_r;
+            ms.cache_observed_messages += u64::from(m.cache_observed);
+            if m.cache_observed {
+                ms.cache_observed_input_tokens += m.input_total();
+                ms.cache_observed_read_tokens += m.cache_r;
+            }
+            ms.cache_unknown_messages += u64::from(m.cache_unknown);
             ms.total_tokens += total;
             if (ts.hour as usize) < 24 {
                 ms.hours[ts.hour as usize] += 1;
             }
             if !m.session.is_empty() {
                 self.model_sessions
-                    .entry(name.to_string())
+                    .entry(key)
                     .or_default()
                     .insert(m.session.to_string());
             }
@@ -460,10 +544,16 @@ struct Rec {
     /// 원본 cwd. 저장소 루트 해석은 파일시스템 상태에 달려 있어 캐시에 담지 않는다.
     cwd: String,
     model: Option<String>,
+    provider: String,
     input: u64,
     output: u64,
     cache_c: u64,
     cache_r: u64,
+    /// 사용량 줄이었지만 캐시 비율에 필요한 필드가 빠졌음을 구분한다.
+    cache_observed: bool,
+    cache_unknown: bool,
+    /// Claude 재기록을 합칠 때 사용하는 안정 메시지 ID. request id는 합치지 않는다.
+    stable_id: Option<String>,
 }
 
 /// 파일 한 개의 파싱 결과 + 그때의 mtime·size. 둘 중 하나라도 다르면 다시 읽는다.
@@ -489,8 +579,9 @@ pub fn compute(range: &str, offset_secs: i64) -> Insights {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    compute_in(
+    compute_with_roots(
         &crate::sessionhome::projects_root().unwrap_or_default(),
+        crate::sessionhome::codex_sessions_root().as_deref(),
         range,
         offset_secs,
         now,
@@ -498,20 +589,51 @@ pub fn compute(range: &str, offset_secs: i64) -> Insights {
 }
 
 /// 트랜스크립트 루트와 현재 시각을 주입받는 본체 — 테스트가 가짜 루트로 부른다.
+#[cfg(test)]
 fn compute_in(root: &Path, range: &str, offset_secs: i64, now: i64) -> Insights {
+    compute_with_roots(root, None, range, offset_secs, now)
+}
+
+/// Claude 프로젝트와 Codex rollout roots를 함께 집계한다. 테스트는 실제 사용자 세션을
+/// 섞지 않도록 roots를 주입한다.
+fn compute_with_roots(
+    root: &Path,
+    codex_root: Option<&Path>,
+    range: &str,
+    offset_secs: i64,
+    now: i64,
+) -> Insights {
     let cut = cutoff(range, now);
     // 직전 구간 = 현재 구간과 같은 길이로 그 앞. all이면 비교 대상 없음.
     let prev_cut = range_span(range).map(|span| cut - span).unwrap_or(0);
     let mut prev = range_span(range).map(|_| PrevAcc::default());
     let mut acc = Acc::default();
     let files = transcript_files(root);
+    let codex_files = codex_root.map(codex_rollout_files).unwrap_or_default();
     let cell = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cell.lock().unwrap_or_else(|e| e.into_inner());
-    let live: HashSet<&PathBuf> = files.iter().collect();
+    let live: HashSet<&PathBuf> = files.iter().chain(&codex_files).collect();
     cache.retain(|path, _| live.contains(path));
     for path in &files {
-        let recs = cached_recs(&mut cache, path);
+        let recs = cached_recs(&mut cache, path, read_claude_file);
         apply_records(&mut acc, &mut prev, recs, cut, prev_cut, offset_secs);
+    }
+    // Codex usage is cumulative per rollout. Keep only small numeric records; the scanner
+    // never retains message text, tool payloads, or the rest of the JSON object.
+    // 레코드는 파일 전체의 누적값에서 나오고 cutoff와 무관하므로 Claude와 같은 캐시에 담는다 —
+    // 없으면 range 칩을 바꿀 때마다 rollout 전체(GB 단위)를 다시 파싱한다.
+    let mut seen = HashSet::new();
+    for path in &codex_files {
+        let recs: Vec<Rec> = cached_recs(&mut cache, path, read_codex_file)
+            .iter()
+            .filter(|r| {
+                r.stable_id
+                    .as_ref()
+                    .is_none_or(|id| seen.insert((r.session.clone(), id.clone())))
+            })
+            .cloned()
+            .collect();
+        apply_records(&mut acc, &mut prev, &recs, cut, prev_cut, offset_secs);
     }
     drop(cache);
     // 로컬 오늘 = (now + offset)의 day.
@@ -520,7 +642,11 @@ fn compute_in(root: &Path, range: &str, offset_secs: i64, now: i64) -> Insights 
 }
 
 /// 캐시가 파일의 현재 mtime·size와 맞으면 그대로, 아니면 읽어서 갱신한 뒤 돌려준다.
-fn cached_recs<'a>(cache: &'a mut HashMap<PathBuf, CachedFile>, path: &Path) -> &'a [Rec] {
+fn cached_recs<'a>(
+    cache: &'a mut HashMap<PathBuf, CachedFile>,
+    path: &Path,
+    read: fn(&Path) -> Vec<Rec>,
+) -> &'a [Rec] {
     let meta = std::fs::metadata(path).ok();
     let mtime = meta.as_ref().and_then(|m| m.modified().ok());
     let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -530,15 +656,25 @@ fn cached_recs<'a>(cache: &'a mut HashMap<PathBuf, CachedFile>, path: &Path) -> 
         .unwrap_or(false);
     if !fresh {
         FILE_READS.fetch_add(1, Ordering::Relaxed);
-        let recs = std::fs::read_to_string(path)
-            .map(|c| parse_records(&c))
-            .unwrap_or_default();
+        let recs = read(path);
         cache.insert(path.to_path_buf(), CachedFile { mtime, size, recs });
     }
     cache.get(path).map(|c| c.recs.as_slice()).unwrap_or(&[])
 }
 
-/// JSONL 본문 → 원시 레코드. user/assistant 외의 줄과 깨진 줄은 버린다.
+fn read_claude_file(path: &Path) -> Vec<Rec> {
+    std::fs::read_to_string(path)
+        .map(|c| parse_records(&c))
+        .unwrap_or_default()
+}
+
+fn read_codex_file(path: &Path) -> Vec<Rec> {
+    std::fs::File::open(path)
+        .map(|f| parse_codex_reader(BufReader::new(f)))
+        .unwrap_or_default()
+}
+
+/// JSONL 본문 → 원시 Claude 레코드. user/assistant 외의 줄과 깨진 줄은 버린다.
 fn parse_records(content: &str) -> Vec<Rec> {
     let mut out = Vec::new();
     for line in content.lines() {
@@ -564,15 +700,23 @@ fn parse_records(content: &str) -> Vec<Rec> {
         let str_of = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let (mut input, mut output, mut cache_c, mut cache_r) = (0u64, 0u64, 0u64, 0u64);
         let mut model: Option<String> = None;
+        let mut cache_observed = false;
+        let mut cache_unknown = ty == "assistant";
         if ty == "assistant" {
+            model = Some("unknown".into());
             if let Some(m) = v.get("message") {
-                model = m.get("model").and_then(|x| x.as_str()).map(str::to_string);
+                model = Some(m.get("model").and_then(|x| x.as_str()).unwrap_or("unknown").to_string());
                 if let Some(u) = m.get("usage") {
-                    let g = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-                    input = g("input_tokens");
-                    output = g("output_tokens");
-                    cache_c = g("cache_creation_input_tokens");
-                    cache_r = g("cache_read_input_tokens");
+                    let g = |k: &str| u.get(k).and_then(|x| x.as_u64());
+                    input = g("input_tokens").unwrap_or(0);
+                    output = g("output_tokens").unwrap_or(0);
+                    cache_c = g("cache_creation_input_tokens").unwrap_or(0);
+                    cache_r = g("cache_read_input_tokens").unwrap_or(0);
+                    // Explicit zero is observed; a missing, negative, or wrong-typed field is not.
+                    cache_observed = g("input_tokens").is_some()
+                        && g("cache_creation_input_tokens").is_some()
+                        && g("cache_read_input_tokens").is_some();
+                    cache_unknown = !cache_observed;
                 }
             }
         }
@@ -581,10 +725,255 @@ fn parse_records(content: &str) -> Vec<Rec> {
             session: str_of("sessionId"),
             cwd: str_of("cwd"),
             model,
+            provider: "claude".to_string(),
             input,
             output,
             cache_c,
             cache_r,
+            cache_observed,
+            cache_unknown,
+            stable_id: v
+                .get("message")
+                .and_then(|m| m.get("id"))
+                .and_then(|x| x.as_str())
+                .or_else(|| v.get("uuid").and_then(|x| x.as_str()))
+                .map(|id| {
+                    // Some transcript writers reuse a message wrapper across provider requests.
+                    // Do not collapse those separate requests merely because their wrapper ID is
+                    // stable; absent requestId preserves the normal single-message identity.
+                    match v.get("requestId").and_then(|x| x.as_str()) {
+                        Some(request) => format!("{id}\u{1f}{request}"),
+                        None => id.to_string(),
+                    }
+                }),
+        });
+    }
+    dedup_claude_records(out)
+}
+
+/// Rewritten Claude chunks may repeat the same assistant message. The stable message ID is
+/// intentionally scoped to a session, while `requestId` remains distinct because providers can
+/// legitimately use it for separate requests. Last valid usage snapshot wins.
+fn dedup_claude_records(records: Vec<Rec>) -> Vec<Rec> {
+    let mut selected: HashMap<(String, String), usize> = HashMap::new();
+    let mut out: Vec<Rec> = Vec::with_capacity(records.len());
+    for rec in records {
+        if rec.provider != "claude" || rec.stable_id.is_none() {
+            out.push(rec);
+            continue;
+        }
+        let key = (
+            rec.session.clone(),
+            rec.stable_id.clone().unwrap_or_default(),
+        );
+        if let Some(&index) = selected.get(&key) {
+            if rec.cache_observed || !out[index].cache_observed { out[index] = rec; }
+        } else {
+            selected.insert(key, out.len());
+            out.push(rec);
+        }
+    }
+    out
+}
+
+const MAX_CODEX_FILES: usize = 10_000;
+
+/// Rollouts live beneath date directories. Bound both traversal and retained data: each returned
+/// record contains timestamps and numeric token counters only.
+fn codex_rollout_files(root: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut out = Vec::new();
+    let mut visited = 0;
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if out.len() >= MAX_CODEX_FILES || visited > 20_000 {
+                return out;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file()
+                && path.extension().is_some_and(|ext| ext == "jsonl")
+                && entry.file_name().to_string_lossy().starts_with("rollout-")
+            {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CodexTotals {
+    input: u64,
+    cached: u64,
+    output: u64,
+    cache_write: Option<u64>,
+}
+
+fn codex_usage(v: &serde_json::Value) -> Option<CodexTotals> {
+    let totals = v.pointer("/payload/info/total_token_usage")?;
+    let parsed = CodexTotals {
+        input: totals.get("input_tokens")?.as_u64()?,
+        cached: totals.get("cached_input_tokens")?.as_u64()?,
+        output: totals.get("output_tokens")?.as_u64()?,
+        // The field is newer than the other totals, so it is optional rather than making the
+        // otherwise complete cache read observation unknown.
+        cache_write: totals
+            .get("cache_write_input_tokens")
+            .and_then(|v| v.as_u64()),
+    };
+    (parsed.cached <= parsed.input).then_some(parsed)
+}
+
+/// Cumulative Codex snapshots become per-delta records. A first snapshot, an incomplete vector,
+/// or a counter rollback establishes a new baseline but is deliberately unknown rather than a
+/// synthetic usage amount. turn_context supplies the active model for following deltas.
+#[cfg(test)]
+fn parse_codex_records(content: &str) -> Vec<Rec> {
+    parse_codex_reader(BufReader::new(std::io::Cursor::new(content)))
+}
+
+enum CodexKind {
+    Session(String),
+    Turn { model: Option<String>, cwd: String },
+    Token(Option<CodexTotals>),
+}
+
+struct CodexEvent {
+    epoch: i64,
+    index: usize,
+    kind: CodexKind,
+}
+
+fn parse_codex_reader(reader: impl BufRead) -> Vec<Rec> {
+    // Parse one line at a time and retain only the timestamp, active context, and counters. A
+    // rollout can contain image/tool payloads; they are discarded after each line.
+    let mut events = Vec::new();
+    for (index, line) in reader.lines().map_while(Result::ok).enumerate() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(epoch) = v
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .and_then(parse_epoch)
+        else {
+            continue;
+        };
+        let kind = match v.get("type").and_then(|v| v.as_str()) {
+            Some("session_meta") => CodexKind::Session(
+                v.pointer("/payload/id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            ),
+            Some("turn_context") => CodexKind::Turn {
+                model: v
+                    .pointer("/payload/model")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                cwd: v
+                    .pointer("/payload/cwd")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            },
+            Some("event_msg")
+                if v.pointer("/payload/type").and_then(|v| v.as_str()) == Some("token_count") =>
+            {
+                CodexKind::Token(codex_usage(&v))
+            }
+            _ => continue,
+        };
+        events.push(CodexEvent { epoch, index, kind });
+    }
+    events.sort_by_key(|event| (event.epoch, event.index));
+
+    let mut model: Option<String> = None;
+    let mut baseline: Option<CodexTotals> = None;
+    let mut session = String::new();
+    let mut cwd = String::new();
+    let mut out = Vec::new();
+    for event in events {
+        let epoch = event.epoch;
+        let current = match event.kind {
+            CodexKind::Session(id) => {
+                if session != id { baseline = None; model = Some("unknown".into()); }
+                session = id;
+                continue;
+            }
+            CodexKind::Turn {
+                model: next_model,
+                cwd: next_cwd,
+            } => {
+                model = Some(next_model.unwrap_or_else(|| "unknown".into()));
+                cwd = next_cwd;
+                continue;
+            }
+            CodexKind::Token(current) => if session.is_empty() { None } else { current },
+        };
+        let (input, cache_r, output, cache_c, observed, unknown) = match (baseline, current) {
+            (_, None) => {
+                // An incomplete vector cannot safely advance any fieldwise counter. Force the
+                // next complete snapshot to become a fresh baseline as well.
+                baseline = None;
+                (0, 0, 0, 0, false, true)
+            }
+            (None, Some(current)) => {
+                baseline = Some(current);
+                (0, 0, 0, 0, false, true)
+            }
+            (Some(previous), Some(current)) => {
+                if current == previous { continue; }
+                let valid = current.input >= previous.input
+                    && current.cached >= previous.cached
+                    && current.output >= previous.output
+                    && current.cached <= current.input
+                    && current.cached.saturating_sub(previous.cached) <= current.input.saturating_sub(previous.input)
+                    && !matches!((previous.cache_write, current.cache_write), (Some(before), Some(after)) if after < before);
+                if !valid {
+                    // Counter resets can happen at compaction/rollout boundaries. Do not
+                    // attribute the following full counter as a delta from a stale total.
+                    baseline = None;
+                    (0, 0, 0, 0, false, true)
+                } else {
+                    baseline = Some(current);
+                    let cache_c = match (previous.cache_write, current.cache_write) {
+                        (Some(before), Some(after)) if after >= before => after - before,
+                        _ => 0,
+                    };
+                    (
+                        current.input - previous.input,
+                        current.cached - previous.cached,
+                        current.output - previous.output,
+                        cache_c,
+                        true,
+                        false,
+                    )
+                }
+            }
+        };
+        out.push(Rec {
+            epoch,
+            session: session.clone(),
+            cwd: cwd.clone(),
+            model: model.clone(),
+            provider: "codex".to_string(),
+            input,
+            output,
+            cache_c,
+            cache_r,
+            cache_observed: observed,
+            cache_unknown: unknown,
+            stable_id: current.map(|c| format!("{epoch}:{}:{}:{}:{:?}", c.input, c.cached, c.output, c.cache_write)),
         });
     }
     out
@@ -608,10 +997,13 @@ fn apply_records(
             session: &r.session,
             cwd: &r.cwd,
             model: r.model.as_deref(),
+            provider: &r.provider,
             input: r.input,
             output: r.output,
             cache_c: r.cache_c,
             cache_r: r.cache_r,
+            cache_observed: r.cache_observed,
+            cache_unknown: r.cache_unknown,
         };
         if r.epoch >= cutoff {
             acc.add(&ts, &msg);
@@ -710,6 +1102,12 @@ fn finalize(acc: Acc, prev: Option<PrevAcc>, today: i64) -> Insights {
         output_tokens: acc.output_tokens,
         cache_creation_tokens: acc.cache_creation_tokens,
         cache_read_tokens: acc.cache_read_tokens,
+        cache_observed_messages: acc.cache_observed_messages,
+        cache_observed_input_tokens: acc.cache_observed_input_tokens,
+        cache_observed_read_tokens: acc.cache_observed_read_tokens,
+        cache_unknown_messages: acc.cache_unknown_messages,
+        cache_days: acc.cache_days.into_values().collect(),
+        prompt_injection: None,
         active_days: acc.active_days.len() as u64,
         current_streak,
         longest_streak,
@@ -974,6 +1372,105 @@ mod tests {
     }
 
     #[test]
+    fn cache_zero_is_observed_but_missing_fields_are_unknown() {
+        let known = r#"{"type":"assistant","timestamp":"2026-06-30T08:00:00Z","sessionId":"s","message":{"id":"one","model":"m","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let missing = r#"{"type":"assistant","timestamp":"2026-06-30T08:01:00Z","sessionId":"s","message":{"id":"two","model":"m","usage":{"input_tokens":0,"output_tokens":0}}}"#;
+        let mut acc = Acc::default();
+        feed(&mut acc, &format!("{known}\n{missing}"), 0, 0);
+        let ins = finalize(acc, None, days_from_civil(2026, 6, 30));
+        assert_eq!(ins.cache_observed_messages, 1);
+        assert_eq!(ins.cache_unknown_messages, 1);
+        assert_eq!(ins.models[0].cache_observed_messages, 1);
+        assert_eq!(ins.models[0].cache_unknown_messages, 1);
+    }
+
+    #[test]
+    fn claude_rewritten_message_keeps_latest_usage_but_request_ids_stay_distinct() {
+        let line = |request: &str, input: u64| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-06-30T08:00:00Z","sessionId":"s","requestId":"{request}","message":{{"id":"same","model":"m","usage":{{"input_tokens":{input},"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}}}}"#
+            )
+        };
+        let same_request = [line("r1", 10), line("r1", 20)].join("\n");
+        let once = parse_records(&same_request);
+        assert_eq!(once.len(), 1);
+        assert_eq!(once[0].input, 20);
+        let separate_requests = [line("r1", 10), line("r2", 20)].join("\n");
+        assert_eq!(parse_records(&separate_requests).len(), 2);
+    }
+
+    #[test]
+    fn codex_deltas_use_pre_range_baseline_model_and_skip_repeats_or_resets() {
+        let content = [
+            r#"{"timestamp":"2026-06-20T00:00:00Z","type":"session_meta","payload":{"id":"s"}}"#,
+            r#"{"timestamp":"2026-06-20T00:00:01Z","type":"turn_context","payload":{"model":"gpt-a","cwd":"/tmp/a"}}"#,
+            r#"{"timestamp":"2026-06-20T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":50,"cache_write_input_tokens":5,"output_tokens":10}}}}"#,
+            r#"{"timestamp":"2026-06-30T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":160,"cached_input_tokens":90,"cache_write_input_tokens":7,"output_tokens":16}}}}"#,
+            r#"{"timestamp":"2026-06-30T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":160,"cached_input_tokens":90,"cache_write_input_tokens":7,"output_tokens":16}}}}"#,
+            r#"{"timestamp":"2026-06-30T00:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":1}}}}"#,
+        ].join("\n");
+        let recs = parse_codex_records(&content);
+        assert_eq!(recs.len(), 3);
+        assert!(recs[0].cache_unknown);
+        assert!(recs[1].cache_observed);
+        assert_eq!(
+            (recs[1].input, recs[1].cache_r, recs[1].cache_c),
+            (60, 40, 2)
+        );
+        assert!(recs[2].cache_unknown);
+        let mut acc = Acc::default();
+        let mut prev = None;
+        apply_records(
+            &mut acc,
+            &mut prev,
+            &recs,
+            cutoff("7d", days_from_civil(2026, 6, 30) * 86400 + 3600),
+            0,
+            0,
+        );
+        let ins = finalize(acc, None, days_from_civil(2026, 6, 30));
+        assert_eq!(
+            ins.input_tokens, 60,
+            "the pre-range snapshot is baseline only"
+        );
+        assert_eq!(ins.models[0].provider, "codex");
+        assert_eq!(ins.models[0].model, "gpt-a");
+        assert_eq!(ins.cache_days[0].date, "2026-06-30");
+    }
+
+    #[test]
+    fn observed_denominators_exclude_unknown_claude_samples_and_include_cache_input() {
+        let known = r#"{"type":"assistant","timestamp":"2026-06-30T08:00:00Z","sessionId":"s","message":{"id":"a","model":"m","usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":80,"cache_creation_input_tokens":10}}}"#;
+        let unknown = r#"{"type":"assistant","timestamp":"2026-06-30T08:01:00Z","sessionId":"s","message":{"id":"b","model":"m","usage":{"input_tokens":900,"output_tokens":1,"cache_read_input_tokens":900}}}"#;
+        let mut acc = Acc::default();
+        feed(&mut acc, &format!("{known}\n{unknown}"), 0, 0);
+        let ins = finalize(acc, None, days_from_civil(2026, 6, 30));
+        assert_eq!(ins.cache_observed_input_tokens, 100);
+        assert_eq!(ins.cache_observed_read_tokens, 80);
+        assert_eq!(ins.models[0].cache_observed_input_tokens, 100);
+        assert_eq!(ins.models[0].cache_observed_read_tokens, 80);
+        assert_eq!(ins.cache_days[0].input_tokens, 100);
+        assert_eq!(ins.cache_days[0].cache_read_tokens, 80);
+        assert_eq!(ins.cache_unknown_messages, 1);
+        let partial_same = unknown.replace("\"b\"", "\"a\"");
+        let recs = parse_records(&format!("{partial_same}\n{known}\n{partial_same}"));
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].input, 10);
+        assert!(recs[0].cache_observed);
+    }
+
+    #[test]
+    fn codex_delta_cannot_cache_more_than_its_input() {
+        let content = r#"{"timestamp":"2026-06-20T00:00:00Z","type":"session_meta","payload":{"id":"s"}}
+{"timestamp":"2026-06-20T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":1}}}}
+{"timestamp":"2026-06-20T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":101,"cached_input_tokens":50,"output_tokens":2}}}}"#;
+        let recs = parse_codex_records(content);
+        assert_eq!(recs.len(), 2);
+        assert!(recs.iter().all(|r| r.cache_unknown && !r.cache_observed));
+        assert_eq!(recs[0].model.as_deref(), Some("unknown"));
+    }
+
+    #[test]
     fn normalize_repo_root_folds_worktree_path() {
         let never = |_: &Path| false;
         assert_eq!(
@@ -1007,6 +1504,44 @@ mod tests {
             normalize_repo_root("/home/me/plain", &never),
             "/home/me/plain"
         );
+    }
+
+    #[test]
+    fn codex_rollouts_are_cached_until_file_changes() {
+        let _g = guard();
+        let root = tmp_projects("codex-cache-claude");
+        let codex = tmp_projects("codex-cache-rollouts");
+        let now = days_from_civil(2026, 6, 30) * 86400 + 9 * 3600;
+        let meta = [
+            r#"{"timestamp":"2026-06-30T00:00:00Z","type":"session_meta","payload":{"id":"s"}}"#,
+            r#"{"timestamp":"2026-06-30T00:00:01Z","type":"turn_context","payload":{"model":"gpt-a","cwd":"/tmp/a"}}"#,
+            r#"{"timestamp":"2026-06-30T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}}}"#,
+        ];
+        write_jsonl(&codex, "rollout-a.jsonl", &meta.join("\n"));
+
+        let first = compute_with_roots(&root, Some(&codex), "all", 0, now);
+        let after_first = file_read_count();
+        let second = compute_with_roots(&root, Some(&codex), "7d", 0, now);
+        assert_eq!(
+            file_read_count(),
+            after_first,
+            "range를 바꿔도 rollout을 다시 읽지 않는다"
+        );
+        assert_eq!(first.total_tokens, second.total_tokens);
+
+        let grown = [
+            meta.join("\n"),
+            r#"{"timestamp":"2026-06-30T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":0,"output_tokens":20}}}}"#.to_string(),
+        ]
+        .join("\n");
+        write_jsonl(&codex, "rollout-a.jsonl", &grown);
+        let third = compute_with_roots(&root, Some(&codex), "all", 0, now);
+        assert_eq!(
+            file_read_count(),
+            after_first + 1,
+            "바뀐 rollout 하나만 다시 읽는다"
+        );
+        assert_eq!(third.total_tokens, first.total_tokens + 60);
     }
 
     #[test]

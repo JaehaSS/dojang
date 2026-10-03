@@ -1,5 +1,7 @@
+use super::diff_limits::{marker, omission, LARGE, MAX_PATCH_BYTES};
 use std::collections::HashSet;
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
 
 use super::diff_stats::format_diff_stat;
 use super::{run_git, BaselineStatus, DiffRange, FileDiff, Worktree};
@@ -171,6 +173,15 @@ fn tracked_diff(
     context: u32,
     change: ChangedPath,
 ) -> anyhow::Result<FileDiff> {
+    for path in &change.paths {
+        if let Some(reason) = omission(&worktree.path.join(path)) {
+            return Ok(FileDiff {
+                path: change.paths.last().cloned().unwrap_or_default(),
+                status: change.status,
+                patch: marker(path, reason),
+            });
+        }
+    }
     // 파일 목록은 UTF-8 경로를 쓰므로 patch 헤더도 같은 표기를 강제한다. Git 기본값의
     // 비ASCII C-style 이스케이프가 남으면 구조화 hunk가 파일에 연결되지 않는다.
     let mut args = vec![
@@ -185,7 +196,8 @@ fn tracked_diff(
     ];
     args.extend(change.paths.iter().cloned());
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let patch = run_git(&worktree.path, &refs)?;
+    let path = change.paths.last().cloned().unwrap_or_default();
+    let patch = run_diff_command(worktree, &refs, &path)?;
     Ok(FileDiff {
         path: change.paths.last().cloned().unwrap_or_default(),
         status: change.status,
@@ -205,6 +217,13 @@ fn untracked_paths(worktree: &Worktree) -> anyhow::Result<Vec<String>> {
 }
 
 fn untracked_diff(worktree: &Worktree, context: u32, path: String) -> anyhow::Result<FileDiff> {
+    if let Some(reason) = omission(&worktree.path.join(&path)) {
+        return Ok(FileDiff {
+            patch: marker(&path, reason),
+            path,
+            status: "A".into(),
+        });
+    }
     // tracked patch와 같은 경로 계약을 지켜 신규 파일도 기본 통합 보기에 연결한다.
     let patch = run_diff_command(
         worktree,
@@ -218,6 +237,7 @@ fn untracked_diff(worktree: &Worktree, context: u32, path: String) -> anyhow::Re
             "/dev/null",
             &path,
         ],
+        &path,
     )?;
     Ok(FileDiff {
         path,
@@ -226,17 +246,29 @@ fn untracked_diff(worktree: &Worktree, context: u32, path: String) -> anyhow::Re
     })
 }
 
-fn run_diff_command(worktree: &Worktree, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("git")
+fn run_diff_command(worktree: &Worktree, args: &[&str], path: &str) -> anyhow::Result<String> {
+    let mut child = Command::new("git")
         .current_dir(&worktree.path)
         .args(args)
-        .output()?;
-    if !output.status.success() && output.status.code() != Some(1) {
-        anyhow::bail!(
-            "git {:?} 실패: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut bytes = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .expect("piped stdout")
+        .take(MAX_PATCH_BYTES + 1)
+        .read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() as u64 > MAX_PATCH_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        read?;
+        return Ok(marker(path, LARGE));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let status = child.wait()?;
+    if !status.success() && status.code() != Some(1) {
+        anyhow::bail!("git diff failed for {path}: {status}");
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }

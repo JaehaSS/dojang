@@ -11,6 +11,7 @@ use praxis_lib::review_ops::ReviewClaims;
 use praxis_lib::runner::auth::RunnerAuth;
 use praxis_lib::runner::config::{ExecutionPolicy, RunnerConfig};
 use praxis_lib::runner::events::EventHub;
+use praxis_lib::runner::actions::RunnerTaskActions;
 use praxis_lib::runner::http::{self, RunnerHttpState};
 use praxis_lib::runner::queue::QueueWorker;
 use tower::ServiceExt;
@@ -46,13 +47,11 @@ async fn active_review_claim_blocks_runner_terminal_transitions() {
         started_at: 0,
         review_claims: claims,
     };
-    let app = http::router(state);
+    let app = http::mobile_surface_router(state, std::sync::Arc::new(RunnerTaskActions));
 
     for (method, uri) in [
         (Method::POST, "/v1/tasks/7/approve"),
         (Method::POST, "/v1/tasks/7/discard"),
-        (Method::POST, "/v1/tasks/7/cancel"),
-        (Method::DELETE, "/v1/tasks/7"),
     ] {
         let mut request = Request::builder()
             .method(method)
@@ -116,21 +115,15 @@ async fn durable_quarantine_blocks_runner_review_and_mutation_after_claim_reset(
     )
     .await
     .unwrap();
-    let app = http::router(state(pool, &root));
+    let app = http::mobile_surface_router(state(pool, &root), std::sync::Arc::new(RunnerTaskActions));
 
     for (method, suffix, body) in [
         (Method::POST, "approve", ""),
         (Method::POST, "discard", ""),
-        (Method::POST, "cancel", ""),
         (Method::POST, "run", ""),
-        (Method::DELETE, "", ""),
         (Method::POST, "verify", r#"{"preview_token":"x"}"#),
     ] {
-        let uri = if suffix.is_empty() {
-            format!("/v1/tasks/{task_id}")
-        } else {
-            format!("/v1/tasks/{task_id}/{suffix}")
-        };
+        let uri = format!("/v1/tasks/{task_id}/{suffix}");
         let mut request = Request::builder()
             .method(method)
             .uri(uri)

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use tauri::{AppHandle, State};
 
@@ -87,6 +87,11 @@ pub struct PreviewDto {
     pub query_hash: String,
     pub created_at: i64,
     pub references: Vec<ReferenceDto>,
+}
+#[derive(Deserialize)]
+pub struct AttachmentSelectionDto {
+    pub revision_id: String,
+    pub expected_hash: String,
 }
 #[derive(Serialize)]
 pub struct ImportedSourceDto {
@@ -501,49 +506,73 @@ pub async fn knowledge_vault_search(
 }
 
 #[tauri::command]
-pub async fn knowledge_vault_preview(
+pub async fn knowledge_vault_prepare_attachments(
     state: State<'_, AppState>,
     repo_root: String,
     query: String,
     client_ref: String,
+    selections: Vec<AttachmentSelectionDto>,
+    input_mode: Option<String>,
 ) -> Result<PreviewDto, String> {
     let pool = pool_of(&state)?;
     let binding = binding(&pool, &repo_root).await.map_err(text)?;
-    let preview = vault::retrieval::create_preview(&pool, &binding, &query, &client_ref, now())
-        .await
-        .map_err(text)?;
-    let mut references = Vec::new();
-    for item in preview.references {
-        let row: (String, String) = sqlx::query_as("SELECT d.id, d.title FROM vault_revisions r JOIN vault_documents d ON d.id = r.document_id WHERE r.id = ?").bind(&item.revision_id).fetch_one(&pool).await.map_err(text)?;
-        references.push(ReferenceDto {
-            document_id: row.0,
-            title: row.1,
-            scope: "project".into(),
-            revision_id: item.revision_id,
-            revision_hash: item.revision_hash,
-            snippet: item.snippet,
-            reason: item.reason,
-            excluded: false,
-            stale_reason: None,
+    let input_mode = input_mode.unwrap_or_else(|| "default".into());
+    if !matches!(input_mode.as_str(), "default" | "task_only") {
+        return Err("selected attachments require default or task_only input mode".into());
+    }
+    if selections.is_empty() {
+        if input_mode == "task_only" {
+            vault::selected_attachments::prepare_task_only(
+                &pool, &binding, &query, &client_ref, now(),
+            )
+            .await
+            .map_err(text)?;
+        } else {
+            vault::selected_attachments::cancel(&pool, &binding, &client_ref, &query, now())
+                .await
+                .map_err(text)?;
+        }
+        return Ok(PreviewDto {
+            id: String::new(),
+            query_hash: String::new(),
+            created_at: now(),
+            references: Vec::new(),
         });
     }
+    let selections = selections
+        .into_iter()
+        .map(|item| vault::selected_attachments::Selection {
+            revision_id: item.revision_id,
+            expected_hash: item.expected_hash,
+        })
+        .collect::<Vec<_>>();
+    let snapshot = vault::selected_attachments::prepare(
+        &pool,
+        &binding,
+        &query,
+        &client_ref,
+        &selections,
+        &input_mode,
+        now(),
+    )
+    .await
+    .map_err(text)?;
     Ok(PreviewDto {
-        id: preview.id,
-        query_hash: preview.query_hash,
-        created_at: preview.created_at,
-        references,
+        id: snapshot.preview.id,
+        query_hash: snapshot.preview.query_hash,
+        created_at: snapshot.preview.created_at,
+        references: snapshot.references.into_iter().map(|item| ReferenceDto {
+            document_id: item.document_id,
+            title: item.title,
+            scope: item.scope,
+            revision_id: item.item.revision_id,
+            revision_hash: item.item.revision_hash,
+            snippet: item.item.snippet,
+            reason: item.item.reason,
+            excluded: false,
+            stale_reason: None,
+        }).collect(),
     })
-}
-
-#[tauri::command]
-pub async fn knowledge_vault_preview_exclude(
-    state: State<'_, AppState>,
-    preview_id: String,
-    revision_id: String,
-) -> Result<(), String> {
-    vault::retrieval::exclude_reference(&pool_of(&state)?, &preview_id, &revision_id)
-        .await
-        .map_err(text)
 }
 
 #[tauri::command]

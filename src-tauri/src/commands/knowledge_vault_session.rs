@@ -91,7 +91,7 @@ async fn session_root(pool: &sqlx::SqlitePool, vault_id: &str) -> Result<String,
 /// Claude Code만 `/이름`이 스킬 호출이고, 나머지는 평문으로 이름을 부른다.
 fn session_seed(agent: &str, skill: &str, wiki_dir: &str) -> String {
     let boundary =
-        format!("이 폴더는 Praxis 개인 지식창고다. 위키 문서는 {wiki_dir}/ 아래에만 쓴다.");
+        format!("이 폴더는 Dojang 개인 지식창고다. 위키 문서는 {wiki_dir}/ 아래에만 쓴다.");
     match agent {
         "claude" => format!("/{skill} {boundary}"),
         _ => format!("{skill} 스킬을 사용해라. {boundary}"),
@@ -135,7 +135,7 @@ mod tests {
     fn seed_carries_the_configured_skill_and_wiki_folder() {
         let claude = session_seed("claude", "knowledge-harness", "문서/기술-위키/wiki");
         assert!(claude.starts_with("/knowledge-harness "));
-        assert!(claude.contains("이 폴더는 Praxis 개인 지식창고다."));
+        assert!(claude.contains("이 폴더는 Dojang 개인 지식창고다."));
         assert!(claude.contains("위키 문서는 문서/기술-위키/wiki/ 아래에만 쓴다."));
         let other = session_seed("codex", "knowledge-harness", "문서/기술-위키/wiki");
         assert!(other.starts_with("knowledge-harness 스킬을 사용해라."));

@@ -1872,3 +1872,47 @@ async fn external_session_adoption_is_exclusive_while_a_live_task_holds_the_sess
     pool.close().await;
     let _ = std::fs::remove_file(path);
 }
+
+#[tokio::test]
+async fn external_session_vendor_identity_and_concurrent_claims() {
+    let path = temp_db();
+    let pool = db::init_pool(&path).await.unwrap();
+    let claude = db::insert_task(&pool, "/r", "c", "main", "/wc", "i", Some("claude"), None, "conversation", 1).await.unwrap();
+    let a = db::insert_task(&pool, "/r", "a", "main", "/wa", "i", Some("codex"), None, "conversation", 1).await.unwrap();
+    let b = db::insert_task(&pool, "/r", "b", "main", "/wb", "i", Some("codex"), None, "conversation", 1).await.unwrap();
+    db::adopt_external_session_vendor(&pool, claude, "claude", "same-id", 2).await.unwrap();
+    let (one, two) = tokio::join!(
+        db::adopt_external_session_vendor(&pool, a, "codex", "same-id", 2),
+        db::adopt_external_session_vendor(&pool, b, "codex", "same-id", 2),
+    );
+    assert_ne!(one.is_ok(), two.is_ok());
+    let winner = if one.is_ok() { a } else { b };
+    let loser = if one.is_ok() { b } else { a };
+    assert!(matches!(if one.is_err() {one} else {two}, Err(db::AdoptError::Conflict(id)) if id == winner));
+    assert_eq!(db::live_task_with_session_vendor(&pool, "claude", "same-id").await.unwrap(), Some(claude));
+    // Changing the running task's provider and session does not rewrite its immutable external source.
+    sqlx::query("UPDATE tasks SET agent='claude', convo_session_id=NULL WHERE id=?").bind(winner).execute(&pool).await.unwrap();
+    assert_eq!(db::live_task_with_session_vendor(&pool, "codex", "same-id").await.unwrap(), Some(winner));
+    assert!(db::adopt_external_session_vendor(&pool, loser, "claude", "other", 3).await.is_err());
+    pool.close().await;
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn external_session_vendor_migration_preserves_general_codex_sessions() {
+    let path = temp_db();
+    let pool = db::init_pool(&path).await.unwrap();
+    let legacy = db::insert_task(&pool, "/r", "l", "main", "/wl", "i", Some("claude"), None, "conversation", 1).await.unwrap();
+    let codex = db::insert_task(&pool, "/r", "c", "main", "/wc", "i", Some("codex"), None, "conversation", 1).await.unwrap();
+    sqlx::query("UPDATE tasks SET resumed_session='legacy' WHERE id=?").bind(legacy).execute(&pool).await.unwrap();
+    db::set_convo_session(&pool, codex, "codex-original").await.unwrap();
+    pool.close().await;
+    let pool = db::init_pool(&path).await.unwrap();
+    let (vendor,): (Option<String>,) = sqlx::query_as("SELECT resumed_vendor FROM tasks WHERE id=?").bind(legacy).fetch_one(&pool).await.unwrap();
+    assert_eq!(vendor.as_deref(), Some("claude"));
+    let (vendor,): (Option<String>,) = sqlx::query_as("SELECT resumed_vendor FROM tasks WHERE id=?").bind(codex).fetch_one(&pool).await.unwrap();
+    assert_eq!(vendor, None);
+    assert_eq!(db::live_task_with_session_vendor(&pool, "codex", "codex-original").await.unwrap(), Some(codex));
+    pool.close().await;
+    let _ = std::fs::remove_file(path);
+}

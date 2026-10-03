@@ -680,3 +680,59 @@ describe("최근 세션 행도 트리 카드와 같은 메뉴를 쓴다", () => 
     expect(container.querySelector('section[aria-label="세션 작업"]')).not.toBeNull();
   });
 });
+
+describe("세션 우클릭 메뉴의 머지", () => {
+  const renderMerge = async (task: Task, onMergeTask?: (task: Task) => void) => {
+    await act(async () => {
+      root.render(
+        <SessionTaskNavigation
+          tasks={[task]}
+          selectedKey={null}
+          projects={[ALPHA]}
+          onOpenTask={() => {}}
+          onNewInRepo={() => {}}
+          onDeleteTask={() => {}}
+          onMergeTask={onMergeTask}
+          onRemoveProject={() => {}}
+          onDiscardOrphans={() => {}}
+        />,
+      );
+    });
+  };
+  // 최근 세션 행과 트리 카드는 같은 메뉴를 연다 — 좌표로 집을 수 있는 쪽을 쓴다.
+  const recent = (id: number, patch: Partial<Task> = {}): Task => ({
+    ...makeTask(id, ALPHA, Math.floor(Date.now() / 1000) - 60),
+    ...patch,
+  });
+  const openMenu = async (id: number) => {
+    const card = container.querySelector<HTMLElement>(
+      `section[aria-label="최근 세션"] [data-task-key="local:${id}"]`,
+    )!;
+    await fire(card, "contextmenu", { clientX: 20, clientY: 30 });
+    return document.body.querySelector<HTMLElement>('[role="menu"]');
+  };
+
+  it("검토 대기 워크트리 작업은 base 브랜치로 머지하는 항목을 띄우고 onMergeTask로 넘긴다", async () => {
+    const merged: number[] = [];
+    await renderMerge(recent(31, { state: "AwaitingReview" }), (task) => merged.push(task.id));
+
+    const menu = await openMenu(31);
+    expect(menu?.textContent).toContain("main에 머지");
+
+    await fire(item("main에 머지"), "click");
+
+    expect(merged).toEqual([31]);
+    expect(document.body.querySelector('[role="menu"]')).toBeNull();
+  });
+
+  it("실행 중·직접 실행 작업이나 핸들러가 없으면 머지 항목이 없다", async () => {
+    await renderMerge(recent(32), () => {});
+    expect((await openMenu(32))?.textContent).not.toContain("에 머지");
+
+    await renderMerge(recent(33, { state: "AwaitingReview", worktree_path: ALPHA }), () => {});
+    expect((await openMenu(33))?.textContent).not.toContain("에 머지");
+
+    await renderMerge(recent(34, { state: "AwaitingReview" }));
+    expect((await openMenu(34))?.textContent).not.toContain("에 머지");
+  });
+});

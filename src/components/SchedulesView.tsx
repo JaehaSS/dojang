@@ -16,7 +16,7 @@ import { TaskPayloadTemplate } from "./TaskPayloadTemplate";
 import { CronPreview } from "./CronPreview";
 import { getTransport } from "../lib/transport";
 
-const KIND_LABEL: Record<string, string> = { task: "작업", reminder: "리마인더", retro: "회고" };
+const KIND_LABEL: Record<string, string> = { task: "작업", reminder: "리마인더" };
 
 /** 빠른 리마인더 버튼의 분 단위 프리셋. */
 const QUICK_DELAYS = [
@@ -115,7 +115,7 @@ export function SchedulesView() {
   const [err, setErr] = useState<string | null>(null);
   const [label, setLabel] = useState("");
   const [cron, setCron] = useState("");
-  const [kind, setKind] = useState<"task" | "reminder" | "retro">("task");
+  const [kind, setKind] = useState<"task" | "reminder">("task");
   const [repo, setRepo] = useState("");
   const [instruction, setInstruction] = useState("");
   const [agent, setAgent] = useState("");
@@ -143,9 +143,7 @@ export function SchedulesView() {
       const payload =
         kind === "reminder"
           ? JSON.stringify({ text: text.trim() })
-          : kind === "retro"
-            ? JSON.stringify({ repo: repo.trim(), agent: agent.trim() })
-            : JSON.stringify({ repo: repo.trim(), instruction: instruction.trim(), agent: agent.trim() });
+          : JSON.stringify({ repo: repo.trim(), instruction: instruction.trim(), agent: agent.trim() });
       await scheduleAdd(host, label.trim(), cron.trim(), kind, payload, tzOffsetSecs);
       setLabel("");
       setCron("");
@@ -159,13 +157,8 @@ export function SchedulesView() {
     }
   };
 
-  // retro는 저장소·지시사항이 모두 선택이다 — 비우면 러너가 최근 작업 저장소로 해석한다.
   const payloadReady =
-    kind === "reminder"
-      ? text.trim() !== ""
-      : kind === "retro"
-        ? true
-        : repo.trim() !== "" && instruction.trim() !== "";
+    kind === "reminder" ? text.trim() !== "" : repo.trim() !== "" && instruction.trim() !== "";
   const canSubmit = label.trim() !== "" && cron.trim() !== "" && payloadReady;
 
   return (
@@ -207,17 +200,16 @@ export function SchedulesView() {
             <select
               className={inputCls}
               value={kind}
-              onChange={(e) => setKind(e.target.value as "task" | "reminder" | "retro")}
+              onChange={(e) => setKind(e.target.value as "task" | "reminder")}
             >
               <option value="task">자동 작업 실행</option>
               <option value="reminder">리마인더 알림</option>
-              <option value="retro">주간 회고 생성</option>
             </select>
           </div>
 
           <div className="flex flex-col gap-2">
             <label className="text-xs text-text-muted">
-              {kind === "reminder" ? "알림 내용" : kind === "retro" ? "회고 설정" : "작업 설정"}
+              {kind === "reminder" ? "알림 내용" : "작업 설정"}
             </label>
             <TaskPayloadTemplate
               kind={kind}
@@ -235,11 +227,6 @@ export function SchedulesView() {
                 }
               }}
             />
-            {kind === "retro" && (
-              <div className="text-text-muted text-xs">
-                저장소를 비우면 최근 작업 저장소에서 지난주 회고를 만듭니다. 결과는 승인 대기로 올라옵니다.
-              </div>
-            )}
           </div>
 
           <button

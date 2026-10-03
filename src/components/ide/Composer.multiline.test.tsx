@@ -45,11 +45,6 @@ vi.mock("./MentionDropdown", () => ({ MentionDropdown: () => null }));
 vi.mock("./SkillDropdown", () => ({ SkillDropdown: () => null }));
 vi.mock("./InterviewPanel", () => ({ InterviewPanel: () => null }));
 vi.mock("./icons", () => ({ Icon: () => null }));
-vi.mock("../knowledge-vault/VaultReferences", () => ({
-  VaultReferences: ({ onVaultMutationPendingChange }: { onVaultMutationPendingChange?: (pending: boolean) => void }) => (
-    <button data-testid="vault-pending" onClick={() => onVaultMutationPendingChange?.(true)} type="button">vault</button>
-  ),
-}));
 
 import { Composer } from "./Composer";
 
@@ -130,14 +125,6 @@ function instructionField(): HTMLInputElement | HTMLTextAreaElement {
 }
 
 describe("Composer multiline keyboard contract", () => {
-  it("keeps editing enabled while a vault policy blocks creation", async () => {
-    await renderComposer(() => undefined);
-    const textarea = instructionField() as HTMLTextAreaElement;
-    await act(async () => { (container?.querySelector('[data-testid="vault-pending"]') as HTMLButtonElement).click(); });
-    expect((container?.querySelector('[aria-label="작업 생성"]') as HTMLButtonElement).disabled).toBe(true);
-    expect(textarea.readOnly).toBe(false);
-  });
-
   it("새 작업 지시를 여러 줄 입력할 수 있는 textarea로 렌더한다", async () => {
     await renderComposer(vi.fn());
     expect(instructionField()).toBeInstanceOf(HTMLTextAreaElement);

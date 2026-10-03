@@ -131,7 +131,7 @@ function Preview({ theme, monacoThemeId }: { theme: Theme; monacoThemeId: string
       <div className="rounded-md border border-border bg-surface p-2">
         <div className="mb-1.5 flex items-center gap-1.5">
           <span className="h-2 w-2 rounded-full bg-primary" />
-          <span className="text-[11px] text-text">Praxis</span>
+          <span className="text-[11px] text-text">Dojang</span>
           <span className="ml-auto text-[10px] text-text-muted">미리보기</span>
         </div>
         <div className="rounded border border-border bg-raised px-1.5 py-1 text-[10px] text-text-secondary">

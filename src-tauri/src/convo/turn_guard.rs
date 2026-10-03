@@ -5,13 +5,10 @@ use std::collections::BTreeMap;
 
 pub(crate) const TURN_COMPLETION_GUARD: &str = "\
 # Praxis synchronous turn contract
-- This host runs one non-interactive turn at a time.
-- Never launch Agent, Task, or delegated work in background/async mode. To parallelize, issue multiple foreground agent calls in one assistant message.
-- If background work already exists, remain in this turn until every task-notification reports a terminal status and collect the result.
-- Never leave background processes or servers running after the turn. Run needed services in the foreground and terminate them before finishing.
-- Never send a long build or test command to the background (Bash `run_in_background`). The turn ends, this process dies, and the command dies with it — often before it has compiled a single line. Run it in the foreground; if it exceeds the tool timeout and the harness moves it to the background on its own, stay in this turn and collect the result.
-- Do not send a final answer, promise a later notification, or claim completion while delegated work is active.
-- After collecting all worker results, perform the parent-side diff and test verification requested by the user before the final answer.";
+- Run delegated work in foreground; collect every terminal result before ending this turn.
+- Never leave background processes or servers running after the turn.
+- Keep builds/tests in foreground. If a tool yields a running process, stay in this turn and collect its result.
+- Before the final answer, verify the actual diff and relevant tests; do not claim completion or promise later notification while work remains active.";
 
 pub(crate) fn completion_system_prompt(vendor: Vendor) -> Option<&'static str> {
     (vendor == Vendor::Claude).then_some(TURN_COMPLETION_GUARD)
@@ -34,9 +31,20 @@ pub(crate) fn guarded_message<'a>(vendor: Vendor, message: &'a str) -> Cow<'a, s
     ))
 }
 
+/// 한 턴 안의 백그라운드 작업 회수 여부를 센다.
+///
+/// 판정은 `result` 줄마다가 아니라 **프로세스가 끝난 뒤 한 번**이다(`run_turn_with_contract`가
+/// 마지막 Result를 붙들었다가 EOF에서 판정한다). claude 2.1.28x의 print 모드는 모델이 응답을
+/// 마쳐도 백그라운드 작업이 살아 있으면 프로세스를 끝내지 않고, 알림이 오면 모델을 다시 불러
+/// `result`를 또 낸다 — `result`마다 판정하면 아직 회수 중인 작업이 미완료로 찍히고, 같은 경고가
+/// `result` 수만큼 반복된다(실제로 한 턴에 세 번 찍혔다).
 #[derive(Default)]
 pub(crate) struct SubagentTurnGuard {
     pending: BTreeMap<String, String>,
+    /// 모델이 응답을 마친 뒤 하니스가 끊은 작업. 결과는 아무도 읽지 못했다.
+    cut: BTreeMap<String, String>,
+    /// 마지막 Result 이후 새 도구 호출이 없는 상태 — 이때 온 `stopped`는 하니스가 끊은 것이다.
+    answered: bool,
 }
 
 impl SubagentTurnGuard {
@@ -51,7 +59,11 @@ impl SubagentTurnGuard {
                 // 포그라운드 Bash도 일단 담기지만 결과가 곧바로 와서 빠진다. 백그라운드로
                 // 넘어간 것만 접수 응답에 걸려 남는다 — 호출 시점에는 둘을 구분할 수 없다.
                 self.pending.insert(id.clone(), summary.clone());
+                self.answered = false;
             }
+            ConvoEvent::ToolUse {
+                parent_id: None, ..
+            } => self.answered = false,
             ConvoEvent::ToolResult {
                 summary,
                 tool_use_id: Some(id),
@@ -60,14 +72,22 @@ impl SubagentTurnGuard {
             } if !is_launch_receipt(summary) => {
                 self.pending.remove(id);
             }
+            ConvoEvent::Result { .. } => self.answered = true,
             _ => {}
         }
     }
 
     pub(crate) fn observe_raw_line(&mut self, line: &str) -> Option<ConvoEvent> {
         let (tool_id, status) = terminal_notification(line)?;
-        self.pending.remove(&tool_id);
+        let title = self.pending.remove(&tool_id);
         let completed = status == "completed";
+        // 모델이 응답을 마친 뒤의 stopped/killed는 에이전트의 TaskStop이 아니라 하니스가
+        // 종료하면서 끊은 것이다 — 접수만 되고 결과는 증발했으므로 미완료와 같은 무게로 센다.
+        if self.answered && matches!(status.as_str(), "stopped" | "killed") {
+            if let Some(title) = title {
+                self.cut.insert(tool_id.clone(), title);
+            }
+        }
         Some(ConvoEvent::ToolResult {
             summary: if completed {
                 "백그라운드 작업 완료".into()
@@ -104,7 +124,7 @@ impl SubagentTurnGuard {
         else {
             return event;
         };
-        if self.pending.is_empty() {
+        if self.pending.is_empty() && self.cut.is_empty() {
             return ConvoEvent::Result {
                 text,
                 is_error: false,
@@ -115,23 +135,22 @@ impl SubagentTurnGuard {
                 tokens_out,
             };
         }
-        let titles = self
-            .pending
-            .values()
-            .map(|title| {
-                if title.trim().is_empty() {
-                    "이름 없는 작업"
-                } else {
-                    title.as_str()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut sections = Vec::new();
+        if !self.pending.is_empty() {
+            sections.push(format!("미완료 작업: {}", titles(&self.pending)));
+        }
+        if !self.cut.is_empty() {
+            sections.push(format!(
+                "응답 뒤 하니스가 끊은 작업(결과 미회수): {}",
+                titles(&self.cut)
+            ));
+        }
         let text = format!(
             "에이전트가 백그라운드 작업 {}건을 완료 회수하기 전에 턴을 종료했습니다. \
 턴이 끝나면 그 프로세스도 함께 사라지므로, 이 응답은 정상 완료로 처리되지 않았습니다.\
-\n\n미완료 작업: {titles}{LAST_RESPONSE_MARKER}{text}",
-            self.pending.len()
+\n\n{}{LAST_RESPONSE_MARKER}{text}",
+            self.pending.len() + self.cut.len(),
+            sections.join("\n")
         );
         ConvoEvent::Result {
             text,
@@ -157,7 +176,7 @@ impl SubagentTurnGuard {
         event: ConvoEvent,
         survivors: &[Survivor],
     ) -> ConvoEvent {
-        if !self.pending.is_empty() || survivors.is_empty() {
+        if !self.pending.is_empty() || !self.cut.is_empty() || survivors.is_empty() {
             return self.enforce_result(event);
         }
         let ConvoEvent::Result {
@@ -205,6 +224,25 @@ impl SubagentTurnGuard {
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.len()
     }
+
+    #[cfg(test)]
+    pub(crate) fn cut_count(&self) -> usize {
+        self.cut.len()
+    }
+}
+
+fn titles(entries: &BTreeMap<String, String>) -> String {
+    entries
+        .values()
+        .map(|title| {
+            if title.trim().is_empty() {
+                "이름 없는 작업"
+            } else {
+                title.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// 경고 한 줄에 실을 명령줄 길이 상한(문자). 넘으면 뒤를 자르고 `…`를 붙인다.
@@ -293,8 +331,24 @@ fn is_async_agent_receipt(summary: &str) -> bool {
         || summary.contains("resumed from transcript in the background")
 }
 
+/// 백그라운드 작업의 종료 알림에서 `(tool_use_id, status)`를 꺼낸다.
+///
+/// 형태가 둘이다. claude 2.1.28x의 stream-json은 구조화된 `system/task_notification` 한 줄로
+/// 알린다(2026-09-26 실측). 그 전에는 `user` 메시지 본문의 `<task-notification>` 태그였고,
+/// 트랜스크립트 파일에는 지금도 그 형태가 남아 있어 둘 다 받는다. 문자열 쪽만 읽던 동안
+/// 새 형태를 통째로 놓쳐, 회수가 끝난 작업까지 미완료로 찍혔다.
 fn terminal_notification(line: &str) -> Option<(String, String)> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("type").and_then(|item| item.as_str()) == Some("system")
+        && value.get("subtype").and_then(|item| item.as_str()) == Some("task_notification")
+    {
+        let status = value.get("status").and_then(|item| item.as_str())?;
+        if !is_terminal_status(status) {
+            return None;
+        }
+        let tool_id = value.get("tool_use_id").and_then(|item| item.as_str())?;
+        return Some((tool_id.to_string(), status.to_string()));
+    }
     let content = value
         .get("content")
         .and_then(|item| item.as_str())
@@ -304,13 +358,14 @@ fn terminal_notification(line: &str) -> Option<(String, String)> {
                 .and_then(|item| item.as_str())
         })?;
     let status = tag_value(content, "status")?;
-    if !matches!(
-        status.as_str(),
-        "completed" | "failed" | "killed" | "stopped"
-    ) {
+    if !is_terminal_status(&status) {
         return None;
     }
     Some((tag_value(content, "tool-use-id")?, status))
+}
+
+fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "killed" | "stopped")
 }
 
 fn tag_value(content: &str, tag: &str) -> Option<String> {

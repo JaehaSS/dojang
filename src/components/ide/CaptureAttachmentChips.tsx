@@ -10,14 +10,8 @@ export function editorChipLabel(capture: DesignCaptureRecord): string {
   return start === end ? `${name} L${start}` : `${name} L${start}–${end}`;
 }
 
-/** 위키 문서 칩 라벨 — 제목이 곧 이름이다. 제목이 비면 파일명으로 내려간다. */
-export function wikiChipLabel(capture: DesignCaptureRecord): string {
-  return capture.outer_html || capture.file_path?.split("/").pop() || "위키 문서";
-}
-
 function chipLabel(capture: DesignCaptureRecord): string {
   if (capture.source === "editor") return editorChipLabel(capture);
-  if (capture.source === "wiki") return `위키 · ${wikiChipLabel(capture)}`;
   if (capture.source === "paste") return `이미지 · ${capture.image_path?.split("/").pop() ?? "클립보드"}`;
   const { width, height } = capture.bounding_rect;
   return `${Math.round(width)}×${Math.round(height)}${capture.image_path ? "" : " (HTML/CSS)"}`;
@@ -26,7 +20,6 @@ function chipLabel(capture: DesignCaptureRecord): string {
 /** 칩에 다 안 들어가는 것을 툴팁이 받는다 — 어느 파일인지가 제목보다 먼저 궁금해진다. */
 function chipTitle(capture: DesignCaptureRecord): string {
   if (capture.source === "editor") return capture.file_path ?? "에디터 캡처";
-  if (capture.source === "wiki") return capture.file_path ?? "위키 문서";
   if (capture.source === "paste") return capture.image_path ?? "붙여넣은 이미지";
   return capture.outer_html.slice(0, 120);
 }
@@ -48,7 +41,7 @@ export function CaptureAttachmentChips({ captures, onRemove }: Props) {
           title={chipTitle(capture)}
         >
           <Icon
-            name={capture.source === "preview" ? "code" : capture.source === "wiki" ? "fileText" : "desktop"}
+            name={capture.source === "preview" ? "code" : "desktop"}
             size={11}
           />
           {chipLabel(capture)}

@@ -131,3 +131,32 @@ describe("인증 차단 큐 작업", () => {
     expect(taskStatusLabel(other)).toBe("대기");
   });
 });
+
+describe("실행 중 열린 구조화 질문", () => {
+  const running = { state: "Running", awaiting_kind: null };
+
+  it("attention이 질문을 관측하면 실행 중 작업도 답변 대기 톤·라벨이 된다", () => {
+    expect(statusTone("Running", null, null, true)).toBe("question");
+    expect(statusTone("Starting", null, null, true)).toBe("question");
+    expect(taskDotColor(running, true)).toBe("var(--c-question)");
+    expect(taskTextClass(running, true)).toBe("text-status-question");
+    expect(taskStatusLabel(running, true)).toBe("답변 대기");
+    expect(taskStatusLabelShort(running, true)).toBe("답변");
+  });
+
+  it("관측이 없으면 실행 중 그대로다", () => {
+    expect(statusTone("Running", null, null, false)).toBe("running");
+    expect(taskStatusLabel(running)).toBe("실행 중…");
+  });
+
+  it("실행 중이 아닌 상태의 질문 관측은 상태를 덮지 않는다", () => {
+    // 턴이 끝난 뒤의 잔상 — 그때는 awaiting_kind가 같은 뜻을 싣고 있다.
+    expect(statusTone("Done", null, null, true)).toBe("done");
+    expect(statusTone("AwaitingReview", null, null, true)).toBe("awaiting");
+    expect(taskStatusLabel({ state: "Done", awaiting_kind: null }, true)).toBe("완료");
+  });
+
+  it("인증 차단은 질문보다 먼저다 — 로그인해야 답도 전달된다", () => {
+    expect(statusTone("Running", null, "auth:codex", true)).toBe("awaiting");
+  });
+});

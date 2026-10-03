@@ -26,8 +26,6 @@ pub struct EnsembleFeedbackEntry {
     pub selected_agent: Option<String>,
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
-    pub selected_memory_count: i64,
-    pub selected_approved_memory_count: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -36,8 +34,6 @@ pub struct EnsembleFeedbackHistory {
     pub selected_count: i64,
     pub pending_count: i64,
     pub ambiguous_count: i64,
-    pub selected_with_memory: i64,
-    pub selected_without_memory: i64,
 }
 
 pub async fn feedback_history(pool: &SqlitePool) -> anyhow::Result<EnsembleFeedbackHistory> {
@@ -109,9 +105,6 @@ fn feedback_entry(
             .and_then(|snapshot| snapshot.requested.clone())
             .or_else(|| selected.and_then(|candidate| candidate.task_model.clone())),
         resolved_model: model.and_then(|snapshot| snapshot.resolved.clone()),
-        selected_memory_count: selected.map_or(0, |candidate| candidate.memory_count),
-        selected_approved_memory_count: selected
-            .map_or(0, |candidate| candidate.approved_memory_count),
     })
 }
 
@@ -124,14 +117,7 @@ fn summarize_history(entries: Vec<EnsembleFeedbackEntry>) -> EnsembleFeedbackHis
         match entry.selection_status {
             EnsembleSelectionStatus::Pending => history.pending_count += 1,
             EnsembleSelectionStatus::Ambiguous => history.ambiguous_count += 1,
-            EnsembleSelectionStatus::Selected if entry.selected_memory_count > 0 => {
-                history.selected_count += 1;
-                history.selected_with_memory += 1;
-            }
-            EnsembleSelectionStatus::Selected => {
-                history.selected_count += 1;
-                history.selected_without_memory += 1;
-            }
+            EnsembleSelectionStatus::Selected => history.selected_count += 1,
         }
     }
     history

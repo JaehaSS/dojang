@@ -5,18 +5,12 @@ import type {
   BranchList,
   BrowseResult,
   ComposeOutcome,
-  ConfirmedApproval,
-  ContextReport,
-  CodeLocationInput,
   CrystallizeResult,
   DiffHunk,
   EnsembleMatrix,
-  Evidence,
-  ExternalDocumentInput,
   FileContent,
   FileDiff,
   FsNode,
-  ApplicationPolicy,
   GhRepo,
   GithubIssuesResult,
   GoalContract,
@@ -26,19 +20,13 @@ import type {
   HunkRef,
   InterviewAnswer,
   InterviewAssessment,
-  Memory,
-  MemoryEvidence,
-  MemoryStatus,
-  MemoryUsageRow,
-  MemoryVersion,
-  LocalDocumentInput,
   PartialApplyResult,
   QuickOpenTaskCandidate,
   RematchedAnnotation,
   ReviewAnnotation,
-  RevalidationReport,
   Schedule,
   SessionHomeEntry,
+  SessionHomePreview,
   SkillMeta,
   Task,
   VerifyPreview,
@@ -46,7 +34,6 @@ import type {
 } from "./ipc";
 import type { AgentRole } from "./agent-role";
 import type { MessageReceipt, SideQuestionInput, SideQuestionSnapshot } from "./side-question";
-import type { WorkflowTransport } from "./workflow/api";
 
 export type TransportKind = "local" | "remote";
 
@@ -78,6 +65,8 @@ export interface TaskRef {
  */
 export interface SessionHomeSession extends SessionHomeEntry {
   host: HostId;
+  /** 목록 응답 capability로 정규화한다. 구형 Runner는 false다. */
+  preview_supported?: boolean;
 }
 
 /**
@@ -155,17 +144,17 @@ export type BaselineStatus = { kind: "pinned" | "degraded" | "legacy" };
 export interface TaskDiffResult {
   files: FileDiff[];
   baseline: BaselineStatus;
+  /** 새 Runner가 파일 diff와 같은 기준점에서 만든 리뷰 데이터. */
+  review?: { hunks: DiffHunk[]; annotations: RematchedAnnotation[]; warning?: string };
 }
 
 export interface PraxisTransport {
   kind: TransportKind;
   /** 이 transport가 대표하는 호스트. 레지스트리의 키이자 `taskList()`가 행에 주입하는 값. */
   hostId: HostId;
-  /** Workflow는 인증된 Runner API 전용이다. 로컬 Tauri IPC에는 대응 명령을 만들지 않는다. */
-  workflow?: WorkflowTransport;
   taskList(): Promise<Task[]>;
   taskDiffStat(id: number): Promise<string>;
-  taskDiff(id: number, range?: DiffRange): Promise<TaskDiffResult>;
+  taskDiff(id: number, range?: DiffRange, includeReview?: boolean): Promise<TaskDiffResult>;
   fsTree(id: number): Promise<FsNode[]>;
   fsTreePath(repository: string): Promise<FsNode[]>;
   /** 디렉터리 한 단계 나열 — 파일 브라우저의 지연 로딩. 경로가 비면 첫 root를 연다. */
@@ -186,6 +175,8 @@ export interface PraxisTransport {
   gitInit(path: string): Promise<boolean>;
   /** 새 작업의 base 후보 — 로컬 브랜치 목록과 현재 체크아웃. 로컬 전용. */
   gitBranches(path: string): Promise<BranchList>;
+  /** 메인 체크아웃을 기존 로컬 브랜치로 전환하고 갱신된 목록을 돌려준다. 로컬 전용. */
+  gitCheckoutBranch(path: string, branch: string): Promise<BranchList>;
   repositoryList(): Promise<string[]>;
   fsRead(id: number, path: string): Promise<FileContent>;
   fsWrite(id: number, path: string, content: string): Promise<number>;
@@ -200,7 +191,7 @@ export interface PraxisTransport {
   /** 세션 모델 오버라이드 교체 — 다음 턴부터 적용된다. 빈 문자열=해제(벤더 기본으로 복귀).
    *  진행 중인 턴은 프로세스가 이미 떠 있어 바뀌지 않는다. 로컬·원격 모두 지원한다. */
   taskModelSet(id: number, model: string): Promise<void>;
-  conversationSubmit(id: number, requestId: string, message: string, imagePaths: string[]): Promise<MessageReceipt>;
+  conversationSubmit(id: number, requestId: string, message: string, imagePaths: string[], previewClientRef?: string): Promise<MessageReceipt>;
   conversationReceipt(id: number, requestId: string): Promise<MessageReceipt>;
   sideQuestionRead(id: number): Promise<SideQuestionSnapshot>;
   sideQuestionSend(id: number, input: SideQuestionInput): Promise<SideQuestionSnapshot>;
@@ -224,51 +215,12 @@ export interface PraxisTransport {
   githubIssueDelete(repo: string, issueNumber: number): Promise<void>;
   verifySpec(id: number): Promise<VerifyPreview>;
   taskVerify(id: number, previewToken: string): Promise<VerifyReport>;
-  evidenceGet(id: number): Promise<Evidence | null>;
   reviewProcessQuarantines(): Promise<ReviewProcessQuarantine[]>;
   reviewProcessReconcile(receiptId: number): Promise<ReviewProcessRepairResult>;
   scheduleAdd(request: ScheduleCreateRequest): Promise<number>;
   scheduleRemove(id: number): Promise<void>;
   scheduleSetEnabled(id: number, enabled: boolean): Promise<void>;
   reminderAdd(text: string, delayMinutes: number): Promise<number>;
-  memoryList(): Promise<Memory[]>;
-  /** 보관 — `archived` 전이. 본문·근거·이력이 남는다. */
-  memoryArchive(id: number): Promise<void>;
-  /** 영구 삭제 — 보관된 항목의 본문을 지운다. 되돌릴 수 없다. */
-  memoryPurge(id: number): Promise<void>;
-  memoryAdd(repo: string, kind: string, content: string): Promise<number>;
-  memoryUpdate(id: number, content: string, kind: string): Promise<void>;
-  /**
-   * 항상-적용 지정/해제. 반환값은 "실제로 바뀌었는가" — `false`는 이미 목표 상태였다는
-   * 뜻이라 응답을 잃은 클라이언트가 재시도해도 안전하다.
-   * 구버전 Runner는 이 엔드포인트가 없어 404로 응답한다(호출측이 제어를 숨긴다).
-   */
-  memorySetApplicationPolicy(
-    id: number,
-    policy: ApplicationPolicy,
-    expectedVersion: number,
-    expectedPolicy: ApplicationPolicy,
-  ): Promise<boolean>;
-  memoryVersions(id: number): Promise<MemoryVersion[]>;
-  memoryRestoreVersion(
-    id: number,
-    sourceVersion: number,
-    expectedCurrentVersion: number,
-    expectedStatus: MemoryStatus,
-  ): Promise<number>;
-  memoryConfirm(id: number, expiresAt?: number): Promise<number>;
-  memoryConfirmAndApprove(id: number, expectedVersion: number): Promise<ConfirmedApproval>;
-  memoryAddCodeEvidence(id: number, input: CodeLocationInput): Promise<number>;
-  memoryAddLocalDocumentEvidence(id: number, input: LocalDocumentInput): Promise<number>;
-  memoryAddExternalDocumentEvidence(id: number, input: ExternalDocumentInput): Promise<number>;
-  memoryEvidence(id: number): Promise<MemoryEvidence[]>;
-  memoryRevalidate(id: number): Promise<RevalidationReport>;
-  knowledgeSubmitReview(id: number): Promise<void>;
-  knowledgeApprove(id: number): Promise<void>;
-  memoryUsages(id: number): Promise<MemoryUsageRow[]>;
-  memoryPreview(repo: string, instruction: string): Promise<Memory[]>;
-  contextReport(taskId: number): Promise<ContextReport>;
-  contextFileRead(taskId: number, path: string): Promise<string>;
   /**
    * `/스킬` 자동완성 목록 — 벤더 디렉터리 실측.
    *
@@ -284,6 +236,7 @@ export interface PraxisTransport {
    * `all=true`면 무시된다. 서버가 200개로 자른다.
    */
   sessionHomeIndex(repo: string, all: boolean, query?: string): Promise<SessionHomeSession[]>;
+  sessionHomePreview(repo: string, vendor: "claude" | "codex", sessionId: string): Promise<SessionHomePreview>;
   diffHunks(id: number, range?: DiffRange): Promise<DiffHunk[]>;
   annotationsList(taskId: number, range?: DiffRange): Promise<RematchedAnnotation[]>;
   annotationSave(taskId: number, input: AnnotationSaveInput): Promise<ReviewAnnotation>;
@@ -321,6 +274,9 @@ export interface PraxisTransport {
 
 /** 새 작업 화면이 local Tauri와 Runner에 넘기는 공통 생성 입력. */
 export interface TaskCreateRequest {
+  purpose_selection?: { source_id: string; canonical_repo: string; plan_revision: number; phase_id: string | null };
+  /** Claude 질문 세션에서 도구 실행 전 승인을 받는다. 로컬 Claude 질문 세션에서만 보낸다. */
+  approvals?: boolean;
   /** 이 세션이 살 호스트. 생성 시점에 고정되고 이후 바뀌지 않는다 (ADR 0133). */
   host: HostId;
   repo: string;
@@ -359,6 +315,8 @@ export interface TaskCreateRequest {
    * `taskResume`(작업 id 기반, 로컬 전용)과 다른 경로다.
    */
   resumeSession?: string;
+  /** resumeSession의 출처 공급자. 구형 요청에서만 Claude로 기본 처리된다. */
+  resumeVendor?: "claude" | "codex";
 }
 
 export interface ScheduleCreateRequest {

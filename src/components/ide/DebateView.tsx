@@ -1,11 +1,11 @@
-import { useMemo, useState, type ReactElement } from "react";
+import { useMemo, useState, type ReactElement, type ReactNode } from "react";
 import { labelFor } from "../../lib/agents";
-import { convoInterrupt, debateEnd, type DebateEndReason } from "../../lib/ipc";
-import { Items, PaneHeader, Round } from "./DebateRoundGrid";
+import { convoInterrupt, debateEnd, DEBATE_SEATS, type DebateEndReason } from "../../lib/ipc";
+import { Items, PaneHeader, paneGrid, Round } from "./DebateRoundGrid";
 import { activeSide, consensusText, debateRounds, type DebateEventLike } from "./debate-rounds";
-import { MIN_DEBATE_SESSION_WIDTH } from "./workspace-split-width";
+import { debateSessionWidth } from "./workspace-split-width";
 
-/** 한 면이 누구인지 — 값은 좌측이 `tasks`, 우측이 `convo_debate_sides`에서 온다. */
+/** 한 면이 누구인지 — 값은 좌측이 `tasks`, 나머지가 `convo_debate_sides`에서 온다. */
 export interface DebatePane {
   agent: string;
   model: string | null;
@@ -16,14 +16,18 @@ interface Props {
   events: readonly DebateEventLike[];
   /** 설정의 라운드 상한 — 헤더의 `라운드 n/N` 분모. */
   roundCap: number;
-  left: DebatePane;
-  right: DebatePane;
+  /** 자리 순서(`DEBATE_SEATS`)의 면 정체 — 2자면 둘, 3자면 셋. */
+  panes: readonly DebatePane[];
   busy: boolean;
   /** 받아들여졌으면 true — 거절된 발화의 초안은 지우지 않는다. */
   onSend: (text: string) => boolean | Promise<boolean>;
   /** `토론 끝내기` 성공 — App이 단일 뷰로 돌아간다. */
   onEnded: () => void;
   onOpenLink?: (link: string) => void;
+  /** 구조화 질문은 원래 스트림 이벤트가 있던 자리에서 그린다. */
+  renderQuestion?: (id: string) => ReactNode;
+  /** 원본 이벤트가 아직 도착하지 않은 질문·정리 상태. */
+  interactionStatus?: ReactNode;
 }
 
 /** 배너 문구 — 상태는 `ended(reason)` 하나이고 이유마다 다른 것은 문자열뿐이다(설계 0020 §5). */
@@ -35,18 +39,18 @@ const BANNER: Record<DebateEndReason, string> = {
 };
 
 /**
- * 토론 세션 — 라운드를 행으로 하는 grid 둘과 전폭 컴포저 하나.
+ * 토론 세션 — 라운드를 행으로 하고 자리를 열로 하는 grid와 전폭 컴포저 하나.
  *
- * 면은 정확히 둘이고 자리는 발화자가 소유한다. 입력창이 하나이므로 포커스도 하나다 —
+ * 면은 자리 수(2~3)만큼이고 자리는 발화자가 소유한다. 입력창이 하나이므로 포커스도 하나다 —
  * 에디터 분할에서 빌릴 것이 없는 이유가 이것이다(설계 0020 §5).
  */
-export function DebateView({ taskId, events, roundCap, left, right, busy, onSend, onEnded, onOpenLink }: Props): ReactElement {
+export function DebateView({ taskId, events, roundCap, panes, busy, onSend, onEnded, onOpenLink, renderQuestion, interactionStatus }: Props): ReactElement {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const transcript = useMemo(() => debateRounds(events), [events]);
   const active = activeSide(transcript);
   const ended = transcript.ended;
-  const activeName = labelFor(active === "left" ? left.agent : right.agent);
+  const activeName = labelFor(panes[DEBATE_SEATS.indexOf(active)]?.agent ?? panes[0]?.agent ?? "");
 
   const send = async () => {
     const text = draft.trim();
@@ -64,20 +68,22 @@ export function DebateView({ taskId, events, roundCap, left, right, busy, onSend
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="min-h-0 flex-1 overflow-auto">
-        <div style={{ minWidth: MIN_DEBATE_SESSION_WIDTH }}>
-          <div className="sticky top-0 z-10 grid grid-cols-2 divide-x divide-border bg-raised">
-            <PaneHeader pane={left} side="left" active={busy && active === "left"} />
-            <PaneHeader pane={right} side="right" active={busy && active === "right"} />
+        <div style={{ minWidth: debateSessionWidth(panes.length) }}>
+          <div className="sticky top-0 z-10 grid divide-x divide-border bg-raised" style={paneGrid(panes.length)}>
+            {panes.map((pane, seat) => (
+              <PaneHeader key={DEBATE_SEATS[seat]} pane={pane} seat={seat} count={panes.length} active={busy && active === DEBATE_SEATS[seat]} />
+            ))}
           </div>
           {transcript.preamble.length > 0 && (
             <>
               <div className="px-3 pt-2 text-[11px] text-text-muted">토론 이전 대화 (발화자 미상)</div>
-              <Items items={transcript.preamble} onOpenLink={onOpenLink} />
+              <Items items={transcript.preamble} onOpenLink={onOpenLink} renderQuestion={renderQuestion} />
             </>
           )}
           {transcript.rounds.map((round, i) => (
-            <Round key={i} round={round} cap={roundCap} active={active} busy={busy} onOpenLink={onOpenLink} />
+            <Round key={i} round={round} cap={roundCap} panes={panes} active={active} busy={busy} onOpenLink={onOpenLink} renderQuestion={renderQuestion} />
           ))}
+          {interactionStatus}
         </div>
       </div>
 
@@ -86,30 +92,34 @@ export function DebateView({ taskId, events, roundCap, left, right, busy, onSend
         {busy ? `${activeName} 차례입니다` : ended ? `토론이 끝났습니다 — ${BANNER[ended]}` : ""}
       </div>
 
-      {ended && (
-        <div className="flex flex-wrap items-center gap-2 border-t border-border bg-raised px-3 py-2 text-sm">
+      {/* 끝내기는 결론이 난 뒤만의 일이 아니다 — 실수로 켰거나 첫 발화 전이어도 나갈 문이 있어야 한다.
+          점유 중에는 Runner가 물러나므로(debate_end_checked) 누르게 두지 않고 중단을 먼저 가리킨다. */}
+      <div className="flex flex-wrap items-center gap-2 border-t border-border bg-raised px-3 py-2 text-sm">
+        {ended && (
           <span className={ended === "consensus" ? "text-primary-bright" : "text-text-secondary"}>
             {ended === "consensus" ? "✓ " : ""}
             {BANNER[ended]}
           </span>
-          {ended === "consensus" && (
-            <button
-              type="button"
-              className="rounded-md border border-border px-2 py-1 text-xs text-text-secondary hover:border-border-strong"
-              onClick={copyConclusion}
-            >
-              결론 복사
-            </button>
-          )}
+        )}
+        {ended === "consensus" && (
           <button
             type="button"
-            className="ml-auto rounded-md border border-border px-2 py-1 text-xs text-text-secondary hover:border-border-strong"
-            onClick={() => void debateEnd(taskId).then(onEnded, (cause) => setError(String(cause)))}
+            className="rounded-md border border-border px-2 py-1 text-xs text-text-secondary hover:border-border-strong"
+            onClick={copyConclusion}
           >
-            토론 끝내기
+            결론 복사
           </button>
-        </div>
-      )}
+        )}
+        <button
+          type="button"
+          className="ml-auto rounded-md border border-border px-2 py-1 text-xs text-text-secondary hover:border-border-strong disabled:opacity-50 disabled:hover:border-border"
+          disabled={busy}
+          title={busy ? "라운드가 도는 동안에는 끝낼 수 없습니다 — 먼저 중단하세요" : "상대 세션을 버리고 단일 세션으로 돌아갑니다"}
+          onClick={() => void debateEnd(taskId).then(onEnded, (cause) => setError(String(cause)))}
+        >
+          토론 끝내기
+        </button>
+      </div>
       {error && <div className="border-t border-border px-3 py-1 text-xs text-status-failed">{error}</div>}
 
       <div className="flex items-end gap-2 border-t border-border px-3 py-2">

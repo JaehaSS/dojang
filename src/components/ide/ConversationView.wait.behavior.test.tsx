@@ -156,7 +156,8 @@ describe("ConversationView — 카드 높이가 바뀌면 하단을 따라간다
     await render({ busy: true, waitTaskId: 1 });
     await tick();
     expect(card()).toBeTruthy();
-    const observer = observers.find((o) => o.target.contains(card()!));
+    // 대화 영역 자신도 관찰되고 그 안에 카드가 있다 — 카드 쪽 관찰자만 고른다.
+    const observer = observers.find((o) => o.target !== scroller() && o.target.contains(card()!));
     expect(observer).toBeTruthy();
     return observer!;
   }
@@ -190,6 +191,34 @@ describe("ConversationView — 카드 높이가 바뀌면 하단을 따라간다
 
     metrics.scrollHeight = 1400;
     observer.fire();
+    expect(el.scrollTop).toBe(100);
+  });
+
+  const scrollerObserver = () => observers.find((o) => o.target === scroller())!;
+
+  it("아래 영역이 자라 대화 영역이 줄어도 하단을 보던 중이면 마지막 답변이 가려지지 않는다", async () => {
+    const metrics = { scrollHeight: 1000, clientHeight: 400 };
+    await render({ busy: false });
+    const el = scroller();
+    fakeScrollMetrics(el, metrics);
+    el.scrollTop = 600;
+    el.dispatchEvent(new Event("scroll"));
+
+    metrics.clientHeight = 200; // 컴포저·대기열이 200px 자랐다 — 스크롤 이벤트는 나지 않는다
+    scrollerObserver().fire();
+    expect(el.scrollTop).toBe(800);
+  });
+
+  it("위로 올라가 읽는 중이면 대화 영역이 줄어도 읽던 자리를 옮기지 않는다", async () => {
+    const metrics = { scrollHeight: 1000, clientHeight: 400 };
+    await render({ busy: false });
+    const el = scroller();
+    fakeScrollMetrics(el, metrics);
+    el.scrollTop = 100;
+    el.dispatchEvent(new Event("scroll"));
+
+    metrics.clientHeight = 200;
+    scrollerObserver().fire();
     expect(el.scrollTop).toBe(100);
   });
 });

@@ -46,8 +46,56 @@ describe("resolveDocumentLink", () => {
     expect(resolveDocumentLink("/work/root/docs/a.md", source)).toBeNull();
   });
 
-  it("rejects a source path that is not already workspace-relative", () => {
-    expect(resolveDocumentLink("notes.md", "/Users/test/example.md")).toBeNull();
+  it("rejects a workspace-relative source path that is not normalized", () => {
     expect(resolveDocumentLink("notes.md", "docs/../example.md")).toBeNull();
+    expect(resolveDocumentLink("notes.md", "docs//example.md")).toBeNull();
+  });
+
+  describe("source document opened from outside the root (absolute tab path)", () => {
+    const external = "/Users/test/notes/README.md";
+
+    it("resolves a relative link next to that document as an absolute path", () => {
+      expect(resolveDocumentLink("GLOSSARY.md", external, "/work/root")).toEqual({
+        kind: "file",
+        path: "/Users/test/notes/GLOSSARY.md",
+      });
+      expect(resolveDocumentLink("./sub/%ED%95%9C%EA%B8%80.md:3#x", external)).toEqual({
+        kind: "file",
+        path: "/Users/test/notes/sub/한글.md",
+      });
+      expect(resolveDocumentLink("../shared/x.md", external, "/work/root")).toEqual({
+        kind: "file",
+        path: "/Users/test/shared/x.md",
+      });
+    });
+
+    it("turns a target that lands inside the root back into a root-relative path", () => {
+      expect(resolveDocumentLink("GLOSSARY.md", "/work/root/docs/README.md", "/work/root")).toEqual({
+        kind: "file",
+        path: "docs/GLOSSARY.md",
+      });
+      expect(resolveDocumentLink("../../work/root/a.md", "/Users/test/notes/README.md", "/work/root")).toEqual({
+        kind: "file",
+        path: "/Users/work/root/a.md",
+      });
+      expect(resolveDocumentLink("../../../work/root/a.md", "/Users/test/notes/README.md", "/work/root")).toEqual({
+        kind: "file",
+        path: "a.md",
+      });
+    });
+
+    it("handles Windows drive paths with either separator", () => {
+      expect(resolveDocumentLink("GLOSSARY.md", "C:\\Users\\t\\README.md")).toEqual({
+        kind: "file",
+        path: "C:/Users/t/GLOSSARY.md",
+      });
+    });
+
+    it("does not climb above the filesystem root or resolve to a directory", () => {
+      expect(resolveDocumentLink("../../../../x.md", "/a/b/c.md")).toBeNull();
+      expect(resolveDocumentLink("..", "/a/b.md")).toBeNull();
+      expect(resolveDocumentLink("#part", external)).toBeNull();
+      expect(resolveDocumentLink("~/private.md", external)).toBeNull();
+    });
   });
 });

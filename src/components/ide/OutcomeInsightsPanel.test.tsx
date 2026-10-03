@@ -8,8 +8,6 @@ const baseline: OutcomeInsights = {
   accepted_task_count: 12,
   goal_contract_task_count: 0,
   ready_accepted_task_count: 0,
-  legacy_memory_task_count: 7,
-  ledger_memory_task_count: 0,
   ensemble_count: 5,
   selected_ensemble_count: 2,
   ambiguous_ensemble_count: 0,
@@ -33,9 +31,6 @@ describe("OutcomeInsightsPanelState", () => {
     expect(html).toContain("0 / 92");
     expect(html).toContain("승인 검증");
     expect(html).toContain("0 / 12");
-    expect(html).toContain("versioned ledger");
-    expect(html).toContain("legacy usage");
-    expect(html).toContain("7 / 92");
     expect(html).toContain("ensemble 선택");
     expect(html).toContain("2 / 5");
     expect(html).toContain("선택 없음 3");
@@ -106,17 +101,11 @@ describe("OutcomeInsightsPanelState", () => {
 
   it("turns observed gaps into explicit next actions without forcing them", () => {
     const html = renderToStaticMarkup(
-      <OutcomeInsightsPanelState
-        data={baseline}
-        loading={false}
-        error={null}
-        onOpenMemory={() => undefined}
-      />,
+      <OutcomeInsightsPanelState data={baseline} loading={false} error={null} />,
     );
 
     expect(html).toContain("추천 goal");
     expect(html).toContain("승인 전 검증");
-    expect(html).toContain(">Memory 검토 열기<");
     expect(html).toContain("측정 대상이 0건");
   });
 });

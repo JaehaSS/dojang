@@ -33,7 +33,6 @@ const REPLIES: Record<string, unknown> = {
   system_fonts_list: [{ family: "Menlo", monospace: true }],
   font_settings_get: { ui_family: "", ui_size: 14, code_family: "", code_size: 13 },
   capture_profile_get: { model: "sonnet", effort: "medium", lean: true, model_raw: "", effort_raw: "" },
-  capture_last_runs: {},
   block_unverified_get: false,
   lsp_autoinject_get: true,
   use_worktree_get: true,

@@ -96,7 +96,7 @@ async fn advance_to_committed(fixture: &Fixture) -> String {
     approval_journal::claim(&fixture.pool, fixture.task_id, false, 20)
         .await
         .unwrap();
-    memory::retire_task_projection_if_present(&fixture.pool, fixture.task_id, 21)
+    memory::file::retire_task(&fixture.pool, fixture.task_id)
         .await
         .unwrap();
     approval_journal::stage(

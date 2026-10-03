@@ -15,6 +15,7 @@ vi.mock("../../lib/ipc", () => ({
   skillsList: mocks.skillsList,
 }));
 
+
 import { AgentComposer } from "./AgentComposer";
 import { clearCaptures, getCaptures, pushCapture } from "../../lib/designmode/store";
 import { requestComposerFocus } from "../../lib/composer-focus";
@@ -225,3 +226,4 @@ describe("queued composer submission", () => {
     expect(onSend).toHaveBeenCalledTimes(2);
   });
 });
+

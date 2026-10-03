@@ -16,7 +16,7 @@ pub async fn schedule_list(state: State<'_, AppState>) -> Result<Vec<db::Schedul
     db::list_schedules(&pool).await.map_err(|e| e.to_string())
 }
 
-/// 스케줄 등록. cron 식 유효성(`cron::Schedule::from_str`)과 `kind`(러너가 실행할 수 있는 4종)를
+/// 스케줄 등록. cron 식 유효성(`cron::Schedule::from_str`)과 `kind`(러너가 실행할 수 있는 3종)를
 /// 사전 검증한다 — 잘못된 값은 저장 전에 거부. tz_offset_secs는 클라가 제공하는 브라우저 timezone.
 #[tauri::command]
 pub async fn schedule_add(
@@ -30,7 +30,7 @@ pub async fn schedule_add(
     std::str::FromStr::from_str(&cron)
         .map(|_: cron::Schedule| ())
         .map_err(|e: cron::error::Error| e.to_string())?;
-    if !matches!(kind.as_str(), "task" | "reminder" | "quiz" | "retro") {
+    if !matches!(kind.as_str(), "task" | "reminder" | "quiz") {
         return Err(format!("알 수 없는 스케줄 종류: {kind}"));
     }
     let pool = pool_of(&state)?;

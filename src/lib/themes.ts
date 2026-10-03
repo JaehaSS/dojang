@@ -114,7 +114,7 @@ export interface Theme {
 const SPECS: ThemeSpec[] = [
   {
     id: "praxis-dark",
-    label: "Praxis Dark",
+    label: "Dojang Dark",
     blurb: "중성 모노크롬 위 teal 단일 신호. 기본값.",
     kind: "dark",
     counterpart: "praxis-light",
@@ -149,7 +149,7 @@ const SPECS: ThemeSpec[] = [
   },
   {
     id: "praxis-light",
-    label: "Praxis Light",
+    label: "Dojang Light",
     blurb: "같은 규율의 밝은 대응. 상태색만 600 톤으로 내린다.",
     kind: "light",
     counterpart: "praxis-dark",
@@ -296,7 +296,7 @@ const SPECS: ThemeSpec[] = [
     // nordtheme.com/docs/colors-and-palettes — Polar Night / Snow Storm / Frost / Aurora.
     id: "nord",
     label: "Nord",
-    blurb: "미니멀·플랫한 북극 팔레트. 절제 철학이 Praxis와 가장 가깝다.",
+    blurb: "미니멀·플랫한 북극 팔레트. 절제 철학이 Dojang과 가장 가깝다.",
     kind: "dark",
     palette: {
       bg: "#2e3440", // nord0

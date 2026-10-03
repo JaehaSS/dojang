@@ -66,6 +66,9 @@ export function splitFilePath(path: string): { name: string; dir: string } {
 }
 
 export function describePatch(patch: string): string | null {
+  if (patch.includes("Praxis diff omitted: file exceeds 1 MiB")) {
+    return "파일이 1 MiB를 초과하여 내용 diff를 표시할 수 없습니다.";
+  }
   if (/Binary files |GIT binary patch/.test(patch)) {
     return "바이너리 파일 — 내용 diff를 표시할 수 없습니다.";
   }

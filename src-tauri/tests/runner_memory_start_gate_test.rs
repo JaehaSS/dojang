@@ -54,6 +54,7 @@ async fn pending_approval_proceeds_even_when_the_block_was_edited() {
             mode: "terminal".to_string(),
             goal_contract: None,
             resume_session: None,
+            resume_vendor: None,
         },
         2_000_000_000,
     )

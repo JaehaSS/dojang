@@ -22,7 +22,7 @@ interface Props {
 
 const CONVERSATION_AGENTS = AGENT_PRESETS.filter(({ key }) => key === "claude" || key === "codex" || key === "agy");
 
-function AgentDraftPicker({ agent, disabled, onChange, agents = CONVERSATION_AGENTS, heading = "다음 메시지의 에이전트", label, title }: {
+function AgentDraftPicker({ agent, disabled, onChange, agents = CONVERSATION_AGENTS, heading = "다음 메시지의 에이전트", label, title, extra }: {
   agent: string;
   disabled: boolean;
   onChange: (agent: string) => void;
@@ -31,6 +31,8 @@ function AgentDraftPicker({ agent, disabled, onChange, agents = CONVERSATION_AGE
   heading?: string;
   label?: string;
   title?: string;
+  /** 목록 끝의 추가 선택지 — 토론의 "모두 (3자 토론)"이 여기 온다. */
+  extra?: { label: string; hint: string; onSelect: () => void };
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -81,6 +83,19 @@ function AgentDraftPicker({ agent, disabled, onChange, agents = CONVERSATION_AGE
               <span className="font-code text-xs text-text-muted">{preset.key}</span>
             </button>
           ))}
+          {extra && (
+            <button
+              className="flex w-full items-center gap-2 border-t border-border px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface"
+              onClick={() => {
+                extra.onSelect();
+                setOpen(false);
+              }}
+            >
+              <Icon name="sparkle" size={13} />
+              <span className="flex-1">{extra.label}</span>
+              <span className="font-code text-xs text-text-muted">{extra.hint}</span>
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -170,11 +185,13 @@ export function SessionModelSwitch({ task, contextTokens, observedModel, inDebat
       });
   };
 
-  const startDebate = (opponent: string) => {
+  const opponents = CONVERSATION_AGENTS.filter((preset) => preset.key !== agent);
+  /** 상대는 1~2명 — 자리 순서는 고른 순서다(첫째가 우측, 둘째가 셋째). */
+  const startDebate = (picked: readonly string[]) => {
     if (!canSwitchAgent || busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
-    debateStart(taskRef(task), opponent)
+    debateStart(taskRef(task), picked.map((opponent) => ({ agent: opponent })))
       .then(() => onDebateStarted?.(), (error) => window.alert(`토론을 시작하지 못했습니다: ${error}`))
       .finally(() => {
         busyRef.current = false;
@@ -196,11 +213,16 @@ export function SessionModelSwitch({ task, contextTokens, observedModel, inDebat
         <AgentDraftPicker
           agent={agent}
           disabled={!canSwitchAgent || busy}
-          agents={CONVERSATION_AGENTS.filter((preset) => preset.key !== agent)}
+          agents={opponents}
           heading="토론 상대"
           label="토론 시작"
           title={agentSwitchBlockedReason ?? (canSwitchAgent ? "고른 상대와 라운드를 주고받습니다 — 라운드 상한은 설정에서 바꿉니다" : "토론은 대화 작업이 검토 대기일 때만 시작할 수 있습니다")}
-          onChange={startDebate}
+          onChange={(opponent) => startDebate([opponent])}
+          extra={
+            opponents.length >= 2
+              ? { label: "모두 (3자 토론)", hint: opponents.slice(0, 2).map((preset) => preset.key).join("+"), onSelect: () => startDebate(opponents.slice(0, 2).map((preset) => preset.key)) }
+              : undefined
+          }
         />
       )}
       {crossAgent ? <CrossAgentDraft agent={draftAgent} model={draftModel} busy={busy} allowed={canSwitchAgent} onModelChange={setDraftModel} onSubmit={submitAgent} /> : <ModelPicker agent={agent} model={task.model ?? ""} observedModel={observedModel} onChange={changeModel} placement="down" disabled={inDebate} disabledTitle="토론 중에는 모델을 바꿀 수 없습니다" />}

@@ -472,7 +472,7 @@ fn create_preview(
             let nav_bridge = state.preview_bridge.clone();
             let builder =
                 tauri::window::WindowBuilder::new(app, format!("preview-window-{id}-{generation}"))
-                    .title(format!("Praxis Preview — task #{id}"))
+                    .title(format!("Dojang Preview — task #{id}"))
                     .min_inner_size(MIN_PREVIEW_WINDOW_WIDTH, 480.0);
             let builder = match preview_window_frame(app, bounds) {
                 Some((x, y, width, height)) => builder.position(x, y).inner_size(width, height),
@@ -749,21 +749,6 @@ pub fn designmode_close(state: State<'_, AppState>, id: i64) -> Result<(), Strin
     Ok(())
 }
 
-/// 프리뷰가 지금 보고 있는 주소 — 제어 가능 여부(loopback)를 프론트가 판단하는 재료.
-#[tauri::command]
-pub fn designmode_current_url(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<Option<String>, String> {
-    let Some(webview) = crate::preview_control::webview_of(&state, id) else {
-        return Ok(None);
-    };
-    webview
-        .url()
-        .map(|url| Some(url.to_string()))
-        .map_err(|error| error.to_string())
-}
-
 /// 사용자가 프리뷰를 되찾는다 — 대기 중이던 에이전트 명령은 그 자리에서 끊긴다.
 #[tauri::command]
 pub fn preview_take_over(
@@ -782,56 +767,6 @@ pub fn preview_release(state: State<'_, AppState>, app: AppHandle, id: i64) -> R
     state.preview_bridge.release(id);
     crate::preview_control::emit_control_state(&app, &state, id, "release", true);
     Ok(())
-}
-
-/// 수동 curl 검증용 토큰 — 디버그 빌드에서만 답한다(`generate_handler!`가 cfg 속성을 받지 못해
-/// 함수 안에서 막는다).
-#[tauri::command]
-pub fn preview_debug_token(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<(String, u16, String), String> {
-    if !cfg!(debug_assertions) {
-        return Err("debug only".into());
-    }
-    let instance = state.mcp_instance.clone().ok_or("mcp not started")?;
-    let port = state
-        .mcp_port
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .ok_or("mcp not started")?;
-    let token = state.control_tokens.issue(id, "debug")?;
-    Ok((token, port, instance))
-}
-
-/// 스냅샷 비용 집계 — 계측을 적기만 하고 읽지 않으면 없는 것과 같아서 둔다.
-/// 디버그 빌드 전용이라 배포 표면을 넓히지 않는다(`preview_debug_token`과 같은 이유).
-#[tauri::command]
-pub async fn preview_debug_snapshot_cost(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<Vec<crate::db::PreviewSnapshotCost>, String> {
-    if !cfg!(debug_assertions) {
-        return Err("debug only".into());
-    }
-    let pool = pool_of(&state)?;
-    crate::db::preview_snapshot_cost(&pool, id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// Composer 캡처 칩 목록 — worktree의 캡처 디렉터리를 그대로 읽는다.
-#[tauri::command]
-pub async fn designmode_list_captures(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<Vec<designmode::CaptureRecord>, String> {
-    let pool = pool_of(&state)?;
-    let task = db::get_task(&pool, id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("작업을 찾을 수 없습니다")?;
-    designmode::list_captures(&PathBuf::from(&task.worktree_path), id)
 }
 
 /// Composer 캡처 칩의 × 제거.

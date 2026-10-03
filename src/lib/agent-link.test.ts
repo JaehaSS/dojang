@@ -125,4 +125,13 @@ describe("resolveAgentLink", () => {
   it("still refuses relative paths that escape the worktree", () => {
     expect(resolveAgentLink("../secrets.xlsx", worktree, local)).toBeNull();
   });
+
+  it("decodes a percent-encoded tilde href into a vault file", () => {
+    // 렌더러가 href의 공백·한글을 퍼센트 인코딩해 넘긴다(`~/Documents/째하 지식창고/…`).
+    const href = `~/${encodeURI("Documents/째하 지식창고/웹어셈블리/README.md")}`;
+    expect(resolveAgentLink(href, "/Users/test/Documents/째하 지식창고", local)).toEqual({
+      kind: "task-file",
+      path: "웹어셈블리/README.md",
+    });
+  });
 });

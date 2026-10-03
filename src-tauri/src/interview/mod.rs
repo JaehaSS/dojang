@@ -1,7 +1,7 @@
 //! 인터뷰 기반 Goal Contract 결정화 — 모호성 채점·질문 생성·결정화 파서 (Tauri 비의존 코어).
 //!
-//! 보안: 레포 콘텐츠(README·트리·커밋)가 프롬프트에 들어가므로 challenge/ensemble과 동일하게
-//! **nonce 이후의 JSON만 신뢰**한다(레포에 심긴 위조 JSON 스푸핑 차단, `challenge/mod.rs:52-56` 참조).
+//! 보안: 레포 콘텐츠(README·트리·커밋)가 프롬프트에 들어가므로 ensemble과 동일하게
+//! **nonce 이후의 JSON만 신뢰**한다(레포에 심긴 위조 JSON 스푸핑 차단, `jsonextract::extract_json_object` 참조).
 //! 가중 점수는 모델이 아니라 Rust가 계산한다 — 모델은 차원별 명확도만 출력한다(Plan 0021 DR-P1).
 
 use std::path::Path;
@@ -108,7 +108,7 @@ pub(crate) fn json_after_nonce(raw: &str, nonce: &str) -> Result<serde_json::Val
         .split(nonce)
         .nth(1)
         .ok_or_else(|| "인터뷰 응답에서 검증 토큰을 찾지 못했습니다".to_string())?;
-    let json = crate::challenge::extract_json_object(after)
+    let json = crate::jsonextract::extract_json_object(after)
         .ok_or_else(|| "인터뷰 응답에서 JSON 객체를 찾지 못했습니다".to_string())?;
     serde_json::from_str(json).map_err(|e| format!("인터뷰 응답 JSON 파싱에 실패했습니다: {e}"))
 }
@@ -395,7 +395,7 @@ pub fn collect_repo_context(repo: &Path) -> Result<String, String> {
 }
 
 /// 1차 프롬프트(채점+질문). 레포 요약은 검토 대상 콘텐츠로만 취급하도록 가드하고,
-/// 응답은 nonce 토큰 뒤 JSON만 신뢰한다(ensemble/challenge와 동일 계약).
+/// 응답은 nonce 토큰 뒤 JSON만 신뢰한다(ensemble과 동일 계약).
 pub fn build_assessment_prompt(context: &str, instruction: &str, nonce: &str) -> String {
     [
         "당신은 소프트웨어 작업 사양 인터뷰어입니다. 아래 레포 요약과 작업 지시문을 읽으세요.",
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn parse_assessment_fails_closed_on_duplicate_nonce_echo() {
         // 모델이 프롬프트를 에코하며 nonce를 두 번 출력하고 진짜 JSON이 두 번째 뒤에 오면
-        // 첫 nonce 직후 구간만 신뢰하므로 Err(fail-closed) — challenge::parse_verdict와 동일 계약.
+        // 첫 nonce 직후 구간만 신뢰하므로 Err(fail-closed).
         let raw = format!(
             "{NONCE}\n(프롬프트 에코: 다음 토큰 뒤에 JSON을 출력하세요 {NONCE})\n{{\"goal\":0.5,\"constraints\":0.5,\"success\":0.5}}"
         );

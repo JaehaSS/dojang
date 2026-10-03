@@ -170,7 +170,7 @@ impl Worktree {
                 self.base
             );
         }
-        let checkpoint = self.checkpoint_commit("praxis: pre-conflict")?;
+        let checkpoint = self.checkpoint_commit("dojang: pre-conflict")?;
         self.write_conflict_checkpoint(&checkpoint)?;
         // 충돌은 정상 경로다 — exit code로 실패를 가리지 않는다.
         let _ = run_git(&self.path, &["merge", "--no-commit", "--no-ff", &base]);

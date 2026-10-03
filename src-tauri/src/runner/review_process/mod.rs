@@ -7,21 +7,6 @@ mod fence;
 #[cfg(test)]
 mod ledger_tests;
 pub use fence::{assert_task_not_quarantined, assert_task_unfenced, task_is_fenced};
-pub(crate) use fence::{claim_task_mutation, claim_task_reconciliation, TaskReconciliationGuard};
-mod recovery;
-pub(crate) use recovery::reconcile;
-mod repair;
-mod repair_ledger;
-mod repair_query;
-pub(crate) use repair::{list_quarantined, receipt_task_id, repair_quarantined};
-#[cfg(test)]
-mod repair_security_tests;
-#[cfg(test)]
-mod repair_test_support;
-#[cfg(test)]
-mod repair_tests;
-#[cfg(test)]
-mod repair_transaction_tests;
 mod schema;
 pub use schema::migrate;
 mod supervisor;
@@ -143,12 +128,6 @@ pub struct ReviewProcessLease {
     pub state: ReviewProcessState,
     pub detail: Option<String>,
     pub updated_at: i64,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct OwnedReviewProcess {
-    pub lease: ReviewProcessLease,
-    pub receipt: ReviewProcessReceipt,
 }
 
 pub(super) fn validate_registration(

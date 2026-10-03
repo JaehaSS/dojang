@@ -97,9 +97,14 @@ async fn handle_post(
 /// 아무도 받지 않는 질문을 걸고 그 자리에 멈춘다.
 fn tools_for(state: &McpState, task_id: i64) -> Tools {
     if crate::convo::question_local::active(task_id) {
-        return state
+        let tools = state
             .tools
             .with(crate::convo::interaction::mcp_tool_spec());
+        // 승인 툴은 CLI가 `--permission-prompt-tool`로 찾는다 — 목록에 없으면 CLI가 시작부터 실패한다.
+        if crate::convo::question_local::approvals_active(task_id) {
+            return tools.with(crate::convo::interaction::approval_tool_spec());
+        }
+        return tools;
     }
     state.tools.clone()
 }
@@ -175,6 +180,13 @@ async fn tool_call(
     // 질문 툴은 웹뷰로 가지 않는다 — 답이 올 때까지 여기서 멈추고, 그 답이 곧 툴 결과다.
     if name == crate::convo::interaction::TOOL_NAME {
         return match crate::convo::question_local::ask(task_id, arguments).await {
+            Ok(text) => json_body(StatusCode::OK, &tool_result(id, text)),
+            Err(error) => json_body(StatusCode::OK, &tool_failure(id, error)),
+        };
+    }
+    // 승인 결정은 CLI가 텍스트 본문의 JSON으로 읽는다. 실패도 도구 오류로 돌려 CLI가 거부로 다루게 한다.
+    if name == crate::convo::interaction::APPROVAL_TOOL {
+        return match crate::convo::question_local::approve(task_id, arguments).await {
             Ok(text) => json_body(StatusCode::OK, &tool_result(id, text)),
             Err(error) => json_body(StatusCode::OK, &tool_failure(id, error)),
         };

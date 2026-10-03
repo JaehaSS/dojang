@@ -1,7 +1,7 @@
 //! One stdio connection per turn. Requests and replies never cross execution IDs.
 use super::{
     child_reaper::ReapOnDrop, interaction as ledger, process_cleanup::TurnProcessScope, ConvoEvent,
-    TurnOutcome,
+    Side, TurnOutcome,
 };
 use crate::preview_bridge::mcp::PreviewMcpLease;
 use serde_json::{json, Value};
@@ -15,14 +15,29 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-const MAX_FRAME: u64 = 4 * 1024 * 1024;
+const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(50);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
-pub const SUPPORTED_VERSION: &str = "codex-cli 0.154.0";
+pub const SUPPORTED_VERSION: &str = "codex-cli 0.157.1";
 pub const TOOL_INSTRUCTIONS: &str = "For questions to the user, call praxis_ui.ask_user with kind=clarification, 1-3 questions (id, question, options with id/label/description, allow_free_text, is_secret=false). Ask only ordinary clarifications. Never ask for secrets or tool execution approvals. Do not call request_user_input or request_user_input_async. The tool waits for the user's reply; continue only work that does not depend on that reply. Do not treat the answer as a permission grant. All children and commands must finish within this turn.";
+const EXPANDED_TOOL_INSTRUCTIONS: &str = "Dojang supports Codex native user input and approval requests. Use the native request_user_input tool for questions when available; the praxis_ui.ask_user dynamic tool is also available for ordinary clarifications only. Never request passwords or credentials in a question. Ordinary answers do not grant execution permissions; use the provider's explicit approval flow. Native nonblocking questions can be answered while independent work continues. Computer Use, browser, Code Mode and installed connector tools are available according to this account, environment and user configuration. Use their actual capabilities and report unavailable tools. Finish all commands, Code Mode cells and delegated work within the current turn; wait for yielded cells before ending. The user can interrupt from Dojang at any time.";
+
+pub(crate) fn instructions(expanded: bool) -> String {
+    format!(
+        "{}\n\n{}",
+        super::turn_guard::TURN_COMPLETION_GUARD,
+        if expanded {
+            EXPANDED_TOOL_INSTRUCTIONS
+        } else {
+            TOOL_INSTRUCTIONS
+        }
+    )
+}
 
 pub struct Control {
     pub execution: String,
+    /// Debate seat that owns this turn's vendor session. `None` preserves historical sessions.
+    pub side: Option<Side>,
     pub cancelled: AtomicBool,
     pub cleanup_failed: AtomicBool,
     /// 로컬 MCP 런타임은 플래그를 읽어줄 이벤트 루프가 없다. 중단은 프로세스 그룹을 직접 죽인다.
@@ -34,6 +49,7 @@ impl Control {
     pub fn new(execution: String, local: bool) -> Self {
         Self {
             execution,
+            side: None,
             cancelled: AtomicBool::new(false),
             cleanup_failed: AtomicBool::new(false),
             local,
@@ -46,17 +62,24 @@ fn controls() -> &'static Mutex<HashMap<i64, Arc<Control>>> {
     MAP.get_or_init(Default::default)
 }
 pub fn register(task: i64, execution: String) -> Result<Arc<Control>, String> {
-    register_kind(task, execution, false)
+    register_turn(task, execution, false, None)
 }
 pub fn register_local(task: i64, execution: String) -> Result<Arc<Control>, String> {
-    register_kind(task, execution, true)
+    register_turn(task, execution, true, None)
 }
-fn register_kind(task: i64, execution: String, local: bool) -> Result<Arc<Control>, String> {
+pub fn register_turn(
+    task: i64,
+    execution: String,
+    local: bool,
+    side: Option<Side>,
+) -> Result<Arc<Control>, String> {
     let mut map = controls().lock().unwrap_or_else(|e| e.into_inner());
     if map.contains_key(&task) {
         return Err("이 작업의 질문 실행이 아직 종료되지 않았습니다".into());
     }
-    let c = Arc::new(Control::new(execution, local));
+    let mut control = Control::new(execution, local);
+    control.side = side;
+    let c = Arc::new(control);
     map.insert(task, c.clone());
     Ok(c)
 }
@@ -76,7 +99,9 @@ pub fn unregister(task: i64) {
 pub fn cancel(task: i64) -> bool {
     let pgid = {
         let map = controls().lock().unwrap_or_else(|e| e.into_inner());
-        let Some(c) = map.get(&task) else { return false };
+        let Some(c) = map.get(&task) else {
+            return false;
+        };
         c.cancelled.store(true, Ordering::SeqCst);
         // stdio 런타임은 다음 루프에서 플래그를 읽는다. 로컬 런타임에는 그 루프가 없다.
         if c.local {
@@ -120,8 +145,21 @@ impl Context {
     ) -> Result<T, String> {
         tauri::async_runtime::block_on(future)
     }
-    pub(super) fn changed(&self) {
+    pub(crate) fn changed(&self) {
         (self.changed)();
+    }
+    /// 질문이 열렸음을 알림 원천에 싣는다. 실행은 계속 running이라 상태 전이 알림이 없다 — 여기서
+    /// 직접 기록해야 인박스·OS 알림이 온다. 질문은 이미 원장에 열려 있으므로 실패를 전파하지 않는다:
+    /// 알림 하나가 빠지는 것이 질문이 사라지는 것보다 낫다.
+    pub(super) async fn question_opened(&self) {
+        if let Err(error) =
+            crate::notifications::record_question(&self.pool, self.task_id, crate::now()).await
+        {
+            eprintln!(
+                "[convo] 질문 알림을 기록하지 못했습니다 (task {}): {error}",
+                self.task_id
+            );
+        }
     }
     fn open(&self, wire: &Value, call: &str, args: &Value) -> Result<ConvoEvent, String> {
         let id = self.db(ledger::open(
@@ -134,12 +172,31 @@ impl Context {
         ))?;
         let event = ConvoEvent::Interaction { interaction_id: id };
         self.changed();
+        self.db(async {
+            self.question_opened().await;
+            Ok::<(), String>(())
+        })?;
         Ok(event)
     }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn check_version(bin: &str) -> Result<(), String> {
+    runtime_version(bin).map(|_| ())
+}
+
+pub fn check_exact_version(bin: &str, expected: &str) -> Result<(), String> {
+    let actual = runtime_version(bin)?;
+    if actual != expected {
+        return Err(format!(
+            "전용 Codex 버전이 일치하지 않습니다: 요청 {expected}, 확인 {actual}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn runtime_version(bin: &str) -> Result<String, String> {
     let mut c = Command::new(bin);
     c.arg("--version")
         .stdin(Stdio::null())
@@ -152,12 +209,15 @@ pub fn check_version(bin: &str) -> Result<(), String> {
     }
     let mut child = ReapOnDrop::new(c.spawn().map_err(|_| "Codex 버전을 확인할 수 없습니다")?);
     let deadline = Instant::now() + CLOSE_TIMEOUT;
-    while child.try_wait().map_err(|e| e.to_string())?.is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
         if Instant::now() >= deadline {
             return Err("Codex 버전 확인 시간 초과".into());
         }
         std::thread::sleep(POLL);
-    }
+    };
     let mut out = String::new();
     child
         .stdout
@@ -166,12 +226,13 @@ pub fn check_version(bin: &str) -> Result<(), String> {
         .take(4096)
         .read_to_string(&mut out)
         .map_err(|e| e.to_string())?;
-    if out.trim() != SUPPORTED_VERSION {
+    let version = out.trim().strip_prefix("codex-cli ").unwrap_or_default();
+    if !status.success() || super::cli_runtime::validate_version(version).is_err() {
         return Err(format!(
-            "질문 세션은 검증된 {SUPPORTED_VERSION}에서만 실행합니다"
+            "질문 세션은 검증된 {SUPPORTED_VERSION}에서만 실행합니다 (확인된 버전: {}, 종료 상태: {status})", out.trim()
         ));
     }
-    Ok(())
+    Ok(version.to_string())
 }
 
 struct Peer {
@@ -268,6 +329,10 @@ struct Events {
     agents: HashMap<String, String>,
     started_questions: HashMap<String, Value>,
     unmatched: HashMap<String, (Value, Instant)>,
+    raw_calls: HashMap<String, Option<String>>,
+    code_cells: HashSet<String>,
+    async_answers: HashMap<String, (Value, String)>,
+    approval_items: HashMap<String, Value>,
     in_tokens: i64,
     out_tokens: i64,
 }
@@ -287,6 +352,119 @@ fn terminal_agent(v: &Value) -> bool {
     )
 }
 
+fn async_input(item: &Value, thread: &str, turn: &str) -> Result<Value, String> {
+    let source = item["questions"].as_array();
+    let mut questions = Vec::new();
+    if let Some(source) = source {
+        for (index, question) in source.iter().enumerate() {
+            let options = question["options"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|label| json!({"label":label,"description":""}))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            questions.push(json!({"id":format!("question-{index}"),"header":"질문","question":field(question,"title")?,"options":options,"isOther":true,"isSecret":false}));
+        }
+    }
+    if questions.is_empty() {
+        questions.push(json!({"id":"question-0","header":"질문","question":field(item,"text")?,"options":[],"isOther":true,"isSecret":false}));
+    }
+    Ok(
+        json!({"threadId":thread,"turnId":turn,"itemId":field(item,"id")?,"isBlocking":false,"questions":questions}),
+    )
+}
+
+impl Events {
+    fn raw_tool(&mut self, item: &Value, emit: &mut impl FnMut(ConvoEvent)) -> Result<(), String> {
+        let kind = item["type"].as_str().unwrap_or_default();
+        if matches!(kind, "custom_tool_call" | "function_call") {
+            let name = item["name"].as_str().unwrap_or_default();
+            let namespace = item["namespace"].as_str().unwrap_or_default();
+            let code_mode =
+                matches!(name, "exec" | "wait") && matches!(namespace, "" | "functions");
+            // Computer Use already has public MCP items. Its raw mirror would duplicate
+            // screenshots and completion events, so only consume Code Mode wrappers.
+            if !code_mode && (kind == "function_call" || name == "apply_patch") {
+                return Ok(());
+            }
+            let call = field(item, "call_id")?.to_string();
+            let args = item["arguments"]
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok());
+            let cell = args
+                .as_ref()
+                .and_then(|v| v["cell_id"].as_str())
+                .map(str::to_string);
+            if self.raw_calls.insert(call.clone(), cell).is_some() {
+                return Err("중복 Code Mode 실행 이벤트입니다".into());
+            }
+            emit(ConvoEvent::ToolUse {
+                name: if code_mode {
+                    "Code mode".into()
+                } else {
+                    format!("Codex 도구 · {name}")
+                },
+                summary: item["input"]
+                    .as_str()
+                    .or_else(|| item["arguments"].as_str())
+                    .unwrap_or(name)
+                    .chars()
+                    .take(2000)
+                    .collect(),
+                tool_id: Some(call),
+                parent_id: None,
+            });
+        } else if matches!(kind, "custom_tool_call_output" | "function_call_output") {
+            let call = field(item, "call_id")?;
+            let Some(wait_cell) = self.raw_calls.remove(call) else {
+                return Ok(());
+            };
+            let contents = super::tool_output::for_item(item);
+            let output = contents
+                .iter()
+                .filter_map(|c| match c {
+                    super::tool_output::Content::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for line in output.lines() {
+                if let Some(cell) = line.trim().strip_prefix("Script running with cell ID ") {
+                    let cell = cell.trim().trim_end_matches('.');
+                    if !cell.is_empty() && cell.len() <= 128 {
+                        self.code_cells.insert(cell.to_string());
+                    }
+                }
+            }
+            let failed = output.contains("Script failed") || output.contains("Script error");
+            if output.contains("Script completed") || output.contains("Script terminated") || failed
+            {
+                if let Some(cell) = wait_cell {
+                    self.code_cells.remove(&cell);
+                }
+            }
+            emit(ConvoEvent::ToolResult {
+                summary: output.chars().take(2000).collect(),
+                is_error: failed,
+                result_chars: Some(output.chars().count() as i64),
+                tool_use_id: Some(call.to_string()),
+                parent_id: None,
+            });
+            if !contents.is_empty() {
+                emit(ConvoEvent::ToolOutput {
+                    tool_use_id: call.to_string(),
+                    contents,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     ctx: &Context,
@@ -303,23 +481,39 @@ pub fn run(
     on_spawn: impl FnOnce(u32),
     mut on_event: impl FnMut(ConvoEvent),
 ) -> Result<TurnOutcome, String> {
-    check_version(bin)?;
+    let version = runtime_version(bin)?;
+    let expanded = version == super::cli_runtime::DEFAULT_VERSION;
     let mut command = Command::new(bin);
     command.args([
         "app-server",
         "--stdio",
         "-c",
-        "features.computer_use=false",
-        "-c",
-        "features.code_mode=false",
-        "-c",
-        "features.code_mode_only=false",
-        "-c",
         "features.code_mode_host=true",
     ]);
+    if expanded {
+        // Computer/browser/apps retain the user's configuration and managed policy.
+        // Code Mode is the missing execution surface this adapter now understands.
+        command.args([
+            "-c",
+            "features.code_mode=true",
+            "-c",
+            "features.default_mode_request_user_input=true",
+            "-c",
+            "features.send_message_to_user_async=true",
+        ]);
+    } else {
+        command.args([
+            "-c",
+            "features.computer_use=false",
+            "-c",
+            "features.code_mode=false",
+            "-c",
+            "features.code_mode_only=false",
+        ]);
+    }
     crate::agent::service_tier::apply(&mut command, service_tier)?;
     // The host carries ordinary dynamic-tool RPCs even when the code-mode execution tool is off.
-    // This adapter supports standard command/MCP items, not native computer-use or code cells.
+    // Historical threads keep their original execution contract.
     if let Some(mcp) = mcp {
         command.args(&mcp.injection().args);
         for (k, v) in &mcp.injection().env {
@@ -337,6 +531,16 @@ pub fn run(
         command.process_group(0);
     }
     let mut native_helpers = NativeHelper::installed().into_iter().collect::<Vec<_>>();
+    if let Some(home) = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| crate::usage::home_dir().map(|h| h.join(".codex")))
+    {
+        if let Some(helper) =
+            NativeHelper::at(&home.join("plugins/.plugin-appserver/codex-code-mode-host"))
+        {
+            native_helpers.push(helper);
+        }
+    }
     let scope = TurnProcessScope::attach(&mut command);
     ctx.db(async {
         sqlx::query("UPDATE convo_executions SET process_marker=? WHERE id=?")
@@ -368,19 +572,19 @@ pub fn run(
     nonblocking(&output)?;
     let input = child.stdin.take().ok_or("Codex 입력 연결 없음")?;
     nonblocking(&input)?;
-    let (tx, rx) = mpsc::sync_channel(128);
+    let (tx, rx) = mpsc::sync_channel(8);
     let reader_stop = Arc::new(AtomicBool::new(false));
     let stop = reader_stop.clone();
     let reader_thread = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
+        let mut buffer = super::event_frame::FrameBuffer::default();
         let mut chunk = [0u8; 8192];
         while !stop.load(Ordering::SeqCst) {
-            match output.read(&mut chunk) {
+            let n = match output.read(&mut chunk) {
                 Ok(0) => {
                     let _ = tx.send(Err("Codex 연결 종료".into()));
                     break;
                 }
-                Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                Ok(n) => n,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(POLL);
                     continue;
@@ -390,22 +594,13 @@ pub fn run(
                     let _ = tx.send(Err("Codex 출력 읽기 실패".into()));
                     break;
                 }
-            }
-            while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-                if end as u64 > MAX_FRAME {
-                    let _ = tx.send(Err("Codex 이벤트 크기 제한 초과".into()));
-                    return;
-                }
-                let value = serde_json::from_slice::<Value>(&buffer[..end])
-                    .map_err(|_| "Codex 이벤트 JSON 오류".into());
-                buffer.drain(..=end);
-                let failed = value.is_err();
-                if tx.send(value).is_err() || failed {
-                    return;
-                }
-            }
-            if buffer.len() as u64 > MAX_FRAME {
-                let _ = tx.send(Err("Codex 이벤트 크기 제한 초과".into()));
+            };
+            if let Err(error) = buffer.push(&chunk[..n], |line| {
+                let value = serde_json::from_slice::<Value>(line)
+                    .map_err(|_| "이벤트 JSON 오류".to_string())?;
+                tx.send(Ok(value)).map_err(|_| "출력 수신 종료".to_string())
+            }) {
+                let _ = tx.send(Err(format!("Codex {error}")));
                 break;
             }
         }
@@ -427,9 +622,14 @@ pub fn run(
     let mut interrupted = false;
     let mut managed = HashSet::new();
     let result = (|| -> Result<bool, String> {
-        peer.rpc("initialize",json!({"clientInfo":{"name":"praxis","version":"0.1.0"},"capabilities":{"experimentalApi":true}}))?;
+        peer.rpc("initialize",json!({"clientInfo":{"name":"praxis","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
         peer.send(&json!({"method":"initialized","params":{}}))?;
-        let mut params = json!({"cwd":cwd,"approvalPolicy":"never","sandbox":"danger-full-access","developerInstructions":format!("{}\n\n{}",super::turn_guard::TURN_COMPLETION_GUARD,TOOL_INSTRUCTIONS)});
+        let mut params = json!({"cwd":cwd,"approvalPolicy":"never","sandbox":"danger-full-access","developerInstructions":instructions(expanded)});
+        if expanded {
+            // 0.157.1 does not project Code Mode calls into ThreadItem. Whitelist only
+            // tool calls/outputs below; never retain raw reasoning or auth metadata.
+            params["experimentalRawEvents"] = json!(true);
+        }
         if let Some(tier) = crate::agent::service_tier::normalize(service_tier)? {
             params["serviceTier"] = json!(tier);
         }
@@ -438,6 +638,9 @@ pub fn run(
         }
         let response = if let Some(sid) = resume {
             params["threadId"] = json!(sid);
+            // Praxis already owns the displayed transcript. This omits only the RPC
+            // history payload, preserving the provider's model context and dynamic tools.
+            params["excludeTurns"] = json!(true);
             peer.rpc("thread/resume", params)?
         } else {
             params["dynamicTools"] = json!([ledger::tool_spec()]);
@@ -484,11 +687,12 @@ pub fn run(
         managed = scope.members().into_iter().collect::<HashSet<_>>();
         let start = peer.rpc("turn/start", params)?;
         let turn = field(&start["turn"], "id")?.to_string();
-        ctx.db(ledger::started(
+        ctx.db(ledger::started_on_side(
             &ctx.pool,
             &ctx.control.execution,
             &thread_id,
             &turn,
+            ctx.control.side,
         ))?;
         on_event(ConvoEvent::SessionInit {
             session_id: thread_id.clone(),
@@ -525,7 +729,27 @@ pub fn run(
                     if ctx.control.cancelled.load(Ordering::SeqCst) {
                         break;
                     }
-                    peer.send(&json!({"id":answer.wire_id,"result":{"success":true,"contentItems":[{"type":"inputText","text":answer.output}]}}))?;
+                    if answer.native_method.as_deref()
+                        == Some(super::native_interaction::ASYNC_MESSAGE)
+                    {
+                        let rpc_id = format!("dojang-async-answer:{}", answer.answer_id);
+                        let reply = format!(
+                            "User response to your asynchronous question ({}):\n{}",
+                            answer.call_id,
+                            answer
+                                .native_result
+                                .as_ref()
+                                .ok_or("비동기 답변 형식 오류")?
+                        );
+                        peer.send(&json!({"id":rpc_id,"method":"turn/steer","params":{"threadId":thread_id,"expectedTurnId":turn,
+                            "input":[{"type":"text","text":reply,"text_elements":[]}]}}))?;
+                        events
+                            .async_answers
+                            .insert(rpc_id, (answer.wire_id.clone(), answer.answer_id.clone()));
+                    } else {
+                        let result = answer.native_result.unwrap_or_else(|| json!({"success":true,"contentItems":[{"type":"inputText","text":answer.output}]}));
+                        peer.send(&json!({"id":answer.wire_id,"result":result}))?;
+                    }
                     ctx.db(ledger::written(&ctx.pool, &answer.answer_id))?;
                     ctx.changed();
                 }
@@ -554,6 +778,98 @@ pub fn run(
             last = Instant::now();
             let method = v.get("method").and_then(Value::as_str).unwrap_or("");
             let p = &v["params"];
+            if method.is_empty() {
+                if let Some((wire_id, answer_id)) = v["id"]
+                    .as_str()
+                    .and_then(|id| events.async_answers.remove(id))
+                {
+                    if v.get("error").is_some() {
+                        ctx.db(ledger::reject_native_dispatch(&ctx.pool, &answer_id))?;
+                    }
+                    ctx.db(ledger::resolve_native(
+                        &ctx.pool,
+                        &ctx.control.execution,
+                        &wire_id,
+                    ))?;
+                    ctx.changed();
+                    continue;
+                }
+            }
+            // Native server requests belong to this exact turn. Elicitation alone permits
+            // a missing turnId in the published protocol, but still must name this thread.
+            if expanded
+                && v.get("id").is_some()
+                && matches!(
+                    method,
+                    "item/tool/requestUserInput"
+                        | "item/commandExecution/requestApproval"
+                        | "item/fileChange/requestApproval"
+                        | "item/permissions/requestApproval"
+                        | "mcpServer/elicitation/request"
+                )
+            {
+                if cancel_at.is_some() {
+                    continue;
+                }
+                let scoped = owned(p, &thread_id, &turn)
+                    || (method == "mcpServer/elicitation/request"
+                        && p["threadId"] == thread_id
+                        && p["turnId"].is_null());
+                if !scoped {
+                    return Err("다른 실행의 사용자 입력 요청입니다".into());
+                }
+                let mut request = p.clone();
+                if let Some(item) = p["itemId"]
+                    .as_str()
+                    .and_then(|id| events.approval_items.get(id))
+                {
+                    if method == "item/commandExecution/requestApproval" {
+                        for key in ["command", "cwd"] {
+                            if request[key].is_null() {
+                                request[key] = item[key].clone();
+                            }
+                        }
+                    } else if method == "item/fileChange/requestApproval" {
+                        request["changes"] = json!(item["changes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|c| json!({"path":c["path"],"kind":c["kind"]}))
+                            .collect::<Vec<_>>());
+                    }
+                }
+                let id = ctx.db(ledger::open_native(
+                    &ctx.pool,
+                    &ctx.control.execution,
+                    &v["id"],
+                    method,
+                    &request,
+                    crate::now(),
+                ))?;
+                on_event(ConvoEvent::Interaction { interaction_id: id });
+                ctx.changed();
+                ctx.db(async {
+                    ctx.question_opened().await;
+                    Ok::<(), String>(())
+                })?;
+                continue;
+            }
+            if expanded && method == "serverRequest/resolved" && p["threadId"] == thread_id {
+                if ctx.db(ledger::resolve_native(
+                    &ctx.pool,
+                    &ctx.control.execution,
+                    &p["requestId"],
+                ))? {
+                    ctx.changed();
+                }
+                continue;
+            }
+            if expanded && method == "rawResponseItem/completed" {
+                if owned(p, &thread_id, &turn) {
+                    events.raw_tool(&p["item"], &mut on_event)?;
+                }
+                continue;
+            }
             if method == "item/tool/call" {
                 if cancel_at.is_some() {
                     continue;
@@ -585,7 +901,14 @@ pub fn run(
                 );
             }
             if method == "turn/completed" && p["threadId"] == thread_id && p["turn"]["id"] == turn {
-                if pending > 0
+                let blocking = ctx
+                    .db(ledger::blocking_pending(
+                        &ctx.pool,
+                        &ctx.control.execution,
+                        crate::now(),
+                    ))?
+                    .0;
+                if blocking > 0
                     || !events.unmatched.is_empty()
                     || !events.started_questions.is_empty()
                 {
@@ -594,6 +917,8 @@ pub fn run(
                 if !events.commands.is_empty()
                     || !events.tools.is_empty()
                     || events.agents.values().any(|s| !terminal_agent(&json!(s)))
+                    || !events.raw_calls.is_empty()
+                    || !events.code_cells.is_empty()
                 {
                     return Err(
                         "미완료 명령 또는 작업자가 남아 정상 완료로 처리하지 않았습니다".into(),
@@ -607,12 +932,50 @@ pub fn run(
             if method.starts_with("item/") && !owned(p, &thread_id, &turn) {
                 continue;
             }
+            // Avoid replaying foreign subagent/turn items into this conversation.
+            if method.starts_with("item/") && !owned(p, &thread_id, &turn) {
+                continue;
+            }
             match method {
+                "warning" if p["threadId"].is_null() || p["threadId"] == thread_id => {
+                    if let Some(message) = p["message"].as_str() {
+                        on_event(ConvoEvent::ToolResult {
+                            summary: format!(
+                                "Codex: {}",
+                                message.chars().take(2000).collect::<String>()
+                            ),
+                            is_error: true,
+                            tool_use_id: None,
+                            result_chars: None,
+                            parent_id: None,
+                        });
+                    }
+                }
+                "mcpServer/startupStatus/updated"
+                    if p["threadId"] == thread_id && p["status"] == "failed" =>
+                {
+                    on_event(ConvoEvent::ToolResult {
+                        summary: format!(
+                            "MCP {} 연결 실패: {}",
+                            p["name"].as_str().unwrap_or("도구"),
+                            p["error"]
+                                .as_str()
+                                .unwrap_or("연결 설정과 인증 상태를 확인하세요")
+                                .chars()
+                                .take(1500)
+                                .collect::<String>()
+                        ),
+                        is_error: true,
+                        tool_use_id: None,
+                        result_chars: None,
+                        parent_id: None,
+                    });
+                }
                 "item/agentMessage/delta" => {
                     let id = field(p, "itemId")?.to_string();
                     let text = events.texts.entry(id.clone()).or_default();
                     text.push_str(field(p, "delta")?);
-                    if text.len() > MAX_FRAME as usize {
+                    if text.len() > MAX_MESSAGE_BYTES {
                         return Err("메시지 크기 제한 초과".into());
                     }
                     if last_text_emit.elapsed() >= Duration::from_millis(80) {
@@ -627,6 +990,12 @@ pub fn run(
                 "item/started" => {
                     let item = &p["item"];
                     let id = field(item, "id")?.to_string();
+                    if matches!(
+                        item["type"].as_str(),
+                        Some("commandExecution" | "fileChange")
+                    ) {
+                        events.approval_items.insert(id.clone(), item.clone());
+                    }
                     match item["type"].as_str() {
                         Some("dynamicToolCall") => {
                             if item["namespace"] != "praxis_ui" || item["tool"] != "ask_user" {
@@ -660,7 +1029,16 @@ pub fn run(
                                 parent_id: None,
                             });
                         }
-                        Some("fileChange" | "mcpToolCall" | "collabAgentToolCall") => {
+                        Some(
+                            "fileChange"
+                            | "mcpToolCall"
+                            | "collabAgentToolCall"
+                            | "imageGeneration"
+                            | "imageView"
+                            | "webSearch"
+                            | "functionCallOutput"
+                            | "sleep",
+                        ) => {
                             events.tools.insert(id.clone());
                             on_event(ConvoEvent::ToolUse {
                                 name: item["type"].as_str().unwrap_or("tool").into(),
@@ -678,6 +1056,7 @@ pub fn run(
                 "item/completed" => {
                     let item = &p["item"];
                     let id = field(item, "id")?.to_string();
+                    events.approval_items.remove(&id);
                     match item["type"].as_str() {
                         Some("agentMessage") => {
                             let text = field(item, "text")?.to_string();
@@ -688,6 +1067,25 @@ pub fn run(
                                 text,
                                 complete: true,
                             });
+                            if expanded && item["delivery"] == "async" {
+                                let params = async_input(item, &thread_id, &turn)?;
+                                let request_id =
+                                    json!(format!("dojang-async:{}", field(item, "id")?));
+                                let interaction_id = ctx.db(ledger::open_native(
+                                    &ctx.pool,
+                                    &ctx.control.execution,
+                                    &request_id,
+                                    super::native_interaction::ASYNC_MESSAGE,
+                                    &params,
+                                    crate::now(),
+                                ))?;
+                                on_event(ConvoEvent::Interaction { interaction_id });
+                                ctx.changed();
+                                ctx.db(async {
+                                    ctx.question_opened().await;
+                                    Ok::<(), String>(())
+                                })?;
+                            }
                         }
                         Some("dynamicToolCall") => {
                             if item["namespace"] != "praxis_ui"
@@ -722,7 +1120,16 @@ pub fn run(
                                 parent_id: None,
                             });
                         }
-                        Some("fileChange" | "mcpToolCall" | "collabAgentToolCall") => {
+                        Some(
+                            "fileChange"
+                            | "mcpToolCall"
+                            | "collabAgentToolCall"
+                            | "imageGeneration"
+                            | "imageView"
+                            | "webSearch"
+                            | "functionCallOutput"
+                            | "sleep",
+                        ) => {
                             events.tools.remove(&id);
                             if let Some(agents) = item["agentsStates"].as_object() {
                                 for (id, state) in agents {
@@ -733,16 +1140,21 @@ pub fn run(
                                 }
                             }
                             on_event(ConvoEvent::ToolResult {
-                                summary: if item["type"] == "mcpToolCall" {
-                                    "프리뷰/MCP 요청 종료".into()
-                                } else {
-                                    "작업 종료".into()
-                                },
-                                is_error: item["status"] == "failed",
-                                tool_use_id: Some(id),
+                                summary: super::tool_output::summary(item),
+                                is_error: item["status"] == "failed"
+                                    || !item["error"].is_null()
+                                    || !item["failure"].is_null(),
+                                tool_use_id: Some(id.clone()),
                                 result_chars: None,
                                 parent_id: None,
                             });
+                            let contents = super::tool_output::for_item(item);
+                            if !contents.is_empty() {
+                                on_event(ConvoEvent::ToolOutput {
+                                    tool_use_id: id,
+                                    contents,
+                                });
+                            }
                         }
                         Some(kind) if kind.ends_with("Call") || kind.ends_with("Execution") => {
                             return Err("지원하지 않는 실행 도구 이벤트입니다".into())
@@ -922,16 +1334,9 @@ pub async fn recover_execution(pool: &SqlitePool, task: i64) -> Result<(), Strin
         ledger::phase(pool, &execution, "cleanup_failed").await?;
         ledger::close_questions(pool, &execution, "connection_lost").await?;
         let marker: Option<String> = row.get("process_marker");
-        if let Some(marker) = marker {
-            let clean = tauri::async_runtime::spawn_blocking(move || {
-                TurnProcessScope::recover(&marker).map(|scope| scope.cleanup())
-            })
-            .await
-            .map_err(|e| e.to_string())??;
-            if !clean {
-                return Err("소유 자식 프로세스 회수가 끝나지 않았습니다".into());
-            }
-        }
+        // Verify and terminate the provider before marker cleanup. The latter also
+        // kills the provider; probing/killing that unreaped zombie again yields
+        // EPERM on macOS and incorrectly quarantines an otherwise recovered thread.
         if let Some(pid) = row.get::<Option<i64>, _>("pgid") {
             let identity: String = row
                 .get::<Option<String>, _>("identity_hash")
@@ -942,6 +1347,16 @@ pub async fn recover_execution(pool: &SqlitePool, task: i64) -> Result<(), Strin
                 == crate::runner::process_identity::ProcessTerminationOutcome::IdentityMismatch
             {
                 return Err("프로세스 식별 증거가 달라 자동 회수하지 않았습니다".into());
+            }
+        }
+        if let Some(marker) = marker {
+            let clean = tauri::async_runtime::spawn_blocking(move || {
+                TurnProcessScope::recover(&marker).map(|scope| scope.cleanup())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            if !clean {
+                return Err("소유 자식 프로세스 회수가 끝나지 않았습니다".into());
             }
         }
         ledger::finish(pool, &execution, "failed", Some("connection_lost")).await?;
@@ -1118,5 +1533,10 @@ mod tests;
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn check_version(_: &str) -> Result<(), String> {
+    Err("질문 세션은 현재 macOS/Linux에서만 지원합니다".into())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn runtime_version(_: &str) -> Result<String, String> {
     Err("질문 세션은 현재 macOS/Linux에서만 지원합니다".into())
 }

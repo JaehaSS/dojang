@@ -344,11 +344,22 @@ describe("SessionModelSwitch", () => {
     expect(options.map((b) => b.textContent)).toEqual([
       expect.stringContaining("Codex"),
       expect.stringContaining("Antigravity"),
+      expect.stringContaining("모두 (3자 토론)"),
     ]);
     await act(async () => (options[0] as HTMLButtonElement).click());
     // 라운드 상한은 이 자리에서 묻지 않는다 — 상대만 넘긴다.
-    expect(ipc.debateStart).toHaveBeenCalledWith({ host: LOCAL_HOST, id: 7 }, "codex");
+    expect(ipc.debateStart).toHaveBeenCalledWith({ host: LOCAL_HOST, id: 7 }, [{ agent: "codex" }]);
     expect(started).toHaveBeenCalled();
+  });
+
+  it("\"모두\"를 고르면 남은 두 에이전트가 목록 순서대로 우측·셋째 자리를 받는다", async () => {
+    await render(<SessionModelSwitch task={task()} onChanged={() => undefined} />);
+    await act(async () =>
+      ([...(container?.querySelectorAll("button") ?? [])].find((b) => b.textContent?.includes("토론 시작")) as HTMLButtonElement | undefined)?.click(),
+    );
+    const all = [...(container?.querySelectorAll("button") ?? [])].find((b) => b.textContent?.includes("모두 (3자 토론)"));
+    await act(async () => (all as HTMLButtonElement).click());
+    expect(ipc.debateStart).toHaveBeenCalledWith({ host: LOCAL_HOST, id: 7 }, [{ agent: "codex" }, { agent: "agy" }]);
   });
 
   it("토론 중에는 전환 자리를 닫는다 — 시퀀스 사이에도 작업은 검토 대기로 돌아온다", async () => {

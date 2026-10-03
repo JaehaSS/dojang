@@ -101,7 +101,12 @@ export function TerminalView({
         /* 아직 레이아웃 전 — 다음 RO에서 재시도 */
       }
     };
-    requestAnimationFrame(doFit);
+    // 입력을 받는 터미널은 앱 컴포저 없이 이것이 곧 입력창이다 — 작업을 열면 바로 칠 수 있게 포커스한다.
+    const interactive = !readOnly && getTransport(taskHost).kind !== "remote";
+    requestAnimationFrame(() => {
+      doFit();
+      if (interactive && !disposed) term.focus();
+    });
 
     const transport = getTransport(taskHost);
     // replay(스크롤백)를 선전송한 뒤 라이브 스트림을 구독한다 — 유실/중복 방지 순서 고정.
