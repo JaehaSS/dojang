@@ -487,7 +487,7 @@ fn a_malformed_program_path_does_not_panic() {
 
 /// 마커는 Rust와 TS에 손으로 복제돼 있고, 계약은 여태 **양쪽 주석으로만** 존재했다.
 /// 한쪽만 바꾸면 양쪽 테스트가 전부 초록인 채 사용자 화면에 응답 전문이 두 번 그려진다
-/// (이슈 [#119](https://github.com/JaehaSS/praxis/issues/119)).
+/// (이슈 [#119](https://github.com/JaehaSS/dojang/issues/119)).
 ///
 /// 프론트에서 Rust를 읽는 대신 여기서 TS를 읽는다 — 프론트에는 `@types/node`가 없어
 /// `node:fs`를 들이면 의존성이 하나 늘고 `tsc --noEmit`이 깨진다. Rust는 `std::fs`가

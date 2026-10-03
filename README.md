@@ -65,7 +65,7 @@ terminal, it will not work in Dojang either.** Dojang does not install the CLIs 
 
 1.0 supports **macOS on Apple Silicon only** — see [Platform support](#platform-support).
 
-1. Download `Dojang_<version>_aarch64.dmg` from the [releases page](https://github.com/JaehaSS/praxis/releases/latest).
+1. Download `Dojang_<version>_aarch64.dmg` from the [releases page](https://github.com/JaehaSS/dojang/releases/latest).
 2. Open the dmg and drag `Dojang.app` into `Applications`.
 3. The first time, do not double-click. **Right-click → Open**, then click **Open** again in the warning dialog.
 
@@ -81,7 +81,7 @@ Windows builds are produced by CI and **have not been verified on a real Windows
 
 1. Install [Git for Windows](https://git-scm.com/download/win). Dojang drives git, and runs
    `.praxis-env-setup.sh` with the `sh.exe` that ships with it.
-2. Download `Dojang_<version>_x64-setup.exe` (or the `.msi`) from the [releases page](https://github.com/JaehaSS/praxis/releases/latest)
+2. Download `Dojang_<version>_x64-setup.exe` (or the `.msi`) from the [releases page](https://github.com/JaehaSS/dojang/releases/latest)
    and run it. The installer fetches WebView2 if it is missing.
 3. The installer is not code-signed, so SmartScreen warns on first run — click **More info → Run anyway**.
 

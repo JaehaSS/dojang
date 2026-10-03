@@ -162,7 +162,7 @@ ad-hoc 서명만 돼 있고 공증은 안 받은 빌드라 정상입니다. 더�
 `SHA256SUMS.txt`와 대조하면 됩니다.
 
 **Q. 내려받을 설치 파일은 어디 있나요?**
-[릴리스 페이지](https://github.com/JaehaSS/praxis/releases/latest)에서 `Dojang_<버전>_aarch64.dmg`를
+[릴리스 페이지](https://github.com/JaehaSS/dojang/releases/latest)에서 `Dojang_<버전>_aarch64.dmg`를
 받으세요. macOS Apple Silicon 전용이고, 그 밖의 플랫폼은 소스에서 `npm run tauri build`로
 직접 빌드해야 하며 그 경로는 검증되지 않았습니다.
 

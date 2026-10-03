@@ -20,7 +20,7 @@ Dojang은 에이전트 CLI를 **직접 실행**하는 도구입니다. 앱이 CL
 
 1.0은 **macOS Apple Silicon 전용**입니다.
 
-1. [릴리스 페이지](https://github.com/JaehaSS/praxis/releases/latest)에서 `Dojang_<버전>_aarch64.dmg`를 받습니다.
+1. [릴리스 페이지](https://github.com/JaehaSS/dojang/releases/latest)에서 `Dojang_<버전>_aarch64.dmg`를 받습니다.
 2. dmg를 열고 `Dojang.app`을 `응용 프로그램` 폴더로 옮깁니다.
 3. 처음 열 때는 더블클릭하지 말고 **우클릭 → 열기**를 누른 뒤, 경고 창에서 다시 **열기**를 누릅니다.
    이 빌드는 ad-hoc 서명만 돼 있고 Apple 공증은 받지 않았습니다.

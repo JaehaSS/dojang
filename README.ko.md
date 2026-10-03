@@ -64,7 +64,7 @@ Dojang에서도 동작하지 않습니다.** Dojang이 CLI를 대신 설치하�
 
 1.0은 **macOS Apple Silicon 전용**입니다 — 자세한 내용은 [지원 범위](#지원-범위)를 보세요.
 
-1. [릴리스 페이지](https://github.com/JaehaSS/praxis/releases/latest)에서 `Dojang_<버전>_aarch64.dmg`를 받습니다.
+1. [릴리스 페이지](https://github.com/JaehaSS/dojang/releases/latest)에서 `Dojang_<버전>_aarch64.dmg`를 받습니다.
 2. dmg를 열고 `Dojang.app`을 `응용 프로그램` 폴더로 옮깁니다.
 3. 처음 열 때는 더블클릭하지 말고 **우클릭 → 열기**를 누른 뒤, 경고 창에서 다시 **열기**를 누릅니다.
 
@@ -80,7 +80,7 @@ Windows 빌드는 CI가 만들며, **실제 Windows 기기에서는 아직 검�
 
 1. [Git for Windows](https://git-scm.com/download/win)를 설치합니다. Dojang은 git을 사용하고,
    `.praxis-env-setup.sh`를 Git for Windows에 포함된 `sh.exe`로 실행합니다.
-2. [릴리스 페이지](https://github.com/JaehaSS/praxis/releases/latest)에서 `Dojang_<버전>_x64-setup.exe`(또는 `.msi`)를
+2. [릴리스 페이지](https://github.com/JaehaSS/dojang/releases/latest)에서 `Dojang_<버전>_x64-setup.exe`(또는 `.msi`)를
    받아 실행합니다. WebView2가 없으면 설치 프로그램이 내려받습니다.
 3. 설치 파일에 코드 서명이 없어 처음 실행할 때 SmartScreen 경고가 뜹니다. **추가 정보 → 실행**을 누릅니다.
 
