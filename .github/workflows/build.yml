@@ -1,6 +1,6 @@
 name: build
 
-# 태그(v*)를 밀면 macOS·Windows 설치 파일을 빌드해 해당 태그의 초안 릴리스에 올린다.
+# 태그(v*)를 밀면 macOS·Windows 설치 파일을 빌드해 해당 태그의 초안 릴리스 하나에 올린다.
 # 수동 실행(workflow_dispatch)은 빌드만 하고 아티팩트로 남긴다.
 on:
   push:
@@ -61,14 +61,25 @@ jobs:
           path: ${{ matrix.artifacts }}
           if-no-files-found: error
 
-      - name: Attach to draft release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
+  # 초안 릴리스는 태그 충돌이 없어 매트릭스 작업마다 create하면 초안이 작업 수만큼 생긴다.
+  # 빌드는 아티팩트만 남기고, 여기서 한 번만 만든다.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          shopt -s nullglob
-          files=( $(echo "${{ matrix.artifacts }}") )
-          # 두 매트릭스 작업이 동시에 만들 수 있으므로 create 실패(이미 있음)는 무시한다.
-          gh release create "$GITHUB_REF_NAME" --draft --title "Dojang ${GITHUB_REF_NAME#v}" --notes "" || true
-          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          # Windows 아티팩트는 nsis/·msi/ 하위 폴더째 내려온다 — 한 폴더로 모은다.
+          mkdir out && find dist -type f -name 'Dojang_*' -exec mv {} out/ \;
+          cd out
+          sha256sum Dojang_* > SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft \
+            --title "Dojang ${GITHUB_REF_NAME#v}" --notes "" Dojang_* SHA256SUMS.txt
