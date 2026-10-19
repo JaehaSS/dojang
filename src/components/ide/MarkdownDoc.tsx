@@ -1,11 +1,12 @@
 import { memo, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { looksLikeHtml } from "../../lib/looks-like-html";
 import { HtmlDoc } from "./HtmlDoc";
 import { Mermaid } from "./Mermaid";
 import { extractText, type CodeChild } from "./markdown-code";
 import { MD_LINE_ATTR, MD_LINE_END_ATTR } from "../../lib/md-selection";
+import { MarkdownImage, type DocumentImageReader } from "./MarkdownImage";
 
 /** hast 노드가 들고 있는 원본 위치를 DOM 속성으로 남긴다.
  *
@@ -63,12 +64,15 @@ interface Props {
   text: string;
   dark: boolean;
   loadImages?: boolean;
+  documentPath?: string;
+  rootPath?: string | null;
+  readFile?: DocumentImageReader;
   onLinkMenu?: (link: string, at: { x: number; y: number }) => void;
   /** 링크를 왼쪽 클릭했다. 없으면 앵커의 기본 동작을 그대로 둔다. */
   onOpenLink?: (link: string) => void;
 }
 
-export const MarkdownDoc = memo(function MarkdownDoc({ text, dark, loadImages = true, onLinkMenu, onOpenLink }: Props) {
+export const MarkdownDoc = memo(function MarkdownDoc({ text, dark, loadImages = true, documentPath, rootPath, readFile, onLinkMenu, onOpenLink }: Props) {
   // 본문 전체가 HTML이면 마크다운 파서가 태그를 글자로 이스케이프한다 — 샌드박스로 넘긴다.
   // (EditorPane은 그 위에서 이미 가로채므로 여기 오는 건 위키 패널 같은 경로뿐이다.)
   //
@@ -95,6 +99,11 @@ export const MarkdownDoc = memo(function MarkdownDoc({ text, dark, loadImages = 
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={(value, key, node) =>
+          key === "src" && node.tagName === "img" && /^(?:file:|data:image\/)/i.test(value)
+            ? value
+            : defaultUrlTransform(value)
+        }
         components={{
           pre: (props) => (
             <CodeBlock dark={dark} allowDiagrams={loadImages} {...lineProps(props)}>
@@ -167,8 +176,17 @@ export const MarkdownDoc = memo(function MarkdownDoc({ text, dark, loadImages = 
               {children}
             </a>
           ),
-          img: ({ alt, ...props }) =>
-            loadImages ? <img alt={alt} {...props} /> : <span className="text-text-muted">[이미지: {alt || "외부 이미지"}]</span>,
+          img: (props) => loadImages ? (
+            <MarkdownImage
+              src={typeof props.src === "string" ? props.src : undefined}
+              alt={props.alt}
+              title={props.title}
+              documentPath={documentPath}
+              rootPath={rootPath}
+              readFile={readFile}
+              {...lineProps(props)}
+            />
+          ) : <span className="text-text-muted">[이미지: {props.alt || "외부 이미지"}]</span>,
           blockquote: (props) => (
             <blockquote
               className="my-2 border-l-2 border-border-strong pl-4 text-text-secondary"

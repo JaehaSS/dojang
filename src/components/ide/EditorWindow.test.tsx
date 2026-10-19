@@ -48,6 +48,10 @@ const mocks = vi.hoisted(() => {
     onMoved: vi.fn(async () => () => {}),
     onResized: vi.fn(async () => () => {}),
     setFocus: vi.fn(async (): Promise<void> => undefined),
+    projectActivate: vi.fn(async (_root: string | null): Promise<void> => undefined),
+    projectTree: vi.fn(async (_root?: string) => [{ name: "note.txt", path: "note.txt", is_dir: false, children: [] }]),
+    projectRead: vi.fn(async (_path: string, _root?: string) => ({ kind: "text" as const, content: "project-original", mtime: 1 })),
+    projectWrite: vi.fn(async (_path: string, _content: string, _expected: string, _root?: string) => 2),
     /** 목킹한 EditorPane이 넘겨받은 onChange — 편집 상태를 만들 때 쓴다. */
     changeSpy: null as null | ((path: string, content: string) => void),
     /** 같은 이유로 붙잡아 두는 onAttachCapture — ⌘L 첨부를 흉내 낼 때 쓴다. */
@@ -56,6 +60,18 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock("@tauri-apps/api/event", () => ({ emit: mocks.emit, listen: mocks.listen }));
+vi.mock("../../lib/project-editor-ipc", () => ({
+  editorProjectActivate: mocks.projectActivate,
+  projectEditorTree: mocks.projectTree,
+  projectEditorRead: mocks.projectRead,
+  projectEditorWrite: mocks.projectWrite,
+  projectEditorResolvePath: vi.fn(),
+  projectEditorOpenPath: vi.fn(),
+}));
+vi.mock("./ProjectTerminal", () => ({
+  ProjectTerminal: ({ root }: { root?: string }) => <div data-testid="project-terminal" data-root={root} />,
+  restartProjectShell: vi.fn(),
+}));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     onCloseRequested: mocks.onCloseRequested,
@@ -113,6 +129,8 @@ vi.mock("./EditorPane", () => ({
   EditorPane: (props: {
     files: { path: string; readOnly?: boolean }[];
     onGoto?: unknown;
+    onSemanticTokens?: unknown;
+    lspScopeKey?: string;
     onChange: (path: string, content: string) => void;
     onAttachCapture?: (record: DesignCaptureRecord) => void;
     reveal?: { path: string; line: number; column: number } | null;
@@ -127,6 +145,8 @@ vi.mock("./EditorPane", () => ({
         data-paths={props.files.map((file) => file.path).join(",")}
         data-read-only={String(props.files.every((file) => file.readOnly === true))}
         data-lsp={props.onGoto ? "on" : "off"}
+        data-semantic={props.onSemanticTokens ? "on" : "off"}
+        data-lsp-scope={props.lspScopeKey ?? ""}
         data-reveal={
           props.reveal ? `${props.reveal.path}:${props.reveal.line}:${props.reveal.column}` : ""
         }
@@ -198,6 +218,7 @@ const send = async (name: string, payload: unknown) => {
 };
 
 beforeEach(() => {
+  localStorage.clear();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -217,6 +238,146 @@ afterEach(async () => {
 });
 
 describe("EditorWindow", () => {
+  const project = (root = "/repo/first", paths = ["note.txt"]) => ({
+    kind: "project", root, open_paths: paths, active_path: paths[0] ?? null,
+  });
+
+  it("홈 프로젝트를 세션 없는 공용 에디터로 열고 기존 탭을 복원한다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, project());
+    expect(mocks.projectActivate).toHaveBeenCalledWith("/repo/first");
+    expect(mocks.projectTree).toHaveBeenCalledWith("/repo/first");
+    expect(mocks.projectRead).toHaveBeenCalledWith("note.txt", "/repo/first");
+    expect(mocks.fsTree).not.toHaveBeenCalled();
+    expect(container?.textContent).toContain("/repo/first");
+    expect(container?.textContent).not.toContain("세션 #");
+    expect(container?.querySelector("[data-testid=editor-pane]")?.getAttribute("data-lsp")).toBe("on");
+    expect(container?.querySelector("[data-testid=editor-pane]")?.getAttribute("data-semantic")).toBe("on");
+    expect(container?.querySelector("[data-testid=editor-pane]")?.getAttribute("data-lsp-scope")).toBe("project:/repo/first");
+    expect(mocks.attachSpy).toBeNull();
+    expect(JSON.parse(localStorage.getItem("praxis-project-editor:/repo/first") ?? "null")).toEqual({ paths: ["note.txt"], active: "note.txt" });
+  });
+
+  it("홈 프로젝트를 바꾸기 전에 이전 루트에 저장한다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, project());
+    await act(async () => { mocks.changeSpy?.("note.txt", "my-edit"); });
+    await send(EDITOR_SESSION_EVENT, project("/repo/second", ["other.txt"]));
+    expect(mocks.projectWrite).toHaveBeenCalledWith("note.txt", "my-edit", "project-original", "/repo/first");
+    expect(mocks.projectActivate).toHaveBeenLastCalledWith("/repo/second");
+    expect(container?.textContent).toContain("/repo/second");
+    expect(container?.querySelector("[data-testid=editor-pane]")?.getAttribute("data-paths")).toBe("other.txt");
+    expect(mocks.emit).not.toHaveBeenCalledWith(EDITOR_AUTOSAVED_EVENT, expect.anything());
+  });
+
+  it("홈에서 연 창이 세션 선택을 따라 전환하고 프로젝트 셸을 해제한다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, project());
+    await act(async () => { mocks.changeSpy?.("note.txt", "my-edit"); });
+    await send(EDITOR_SESSION_EVENT, session({ task_id: 77, open_paths: ["src/new.ts"] }));
+    expect(mocks.projectWrite).toHaveBeenCalledWith("note.txt", "my-edit", "project-original", "/repo/first");
+    expect(mocks.projectActivate).toHaveBeenLastCalledWith(null);
+    expect(container?.textContent).toContain("세션 #77");
+    expect(mocks.fsRead).toHaveBeenCalledWith({ host: "local", id: 77 }, "src/new.ts");
+  });
+
+  it("세션 창에서 홈 프로젝트를 열 때 세션의 편집을 먼저 저장한다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, session({ open_paths: ["src/a.ts"] }));
+    await act(async () => { mocks.changeSpy?.("src/a.ts", "session-edit"); });
+    await send(EDITOR_SESSION_EVENT, project());
+    expect(mocks.fsWrite).toHaveBeenCalledWith({ host: "local", id: 42 }, "src/a.ts", "session-edit");
+    expect(mocks.projectActivate).toHaveBeenLastCalledWith("/repo/first");
+    expect(container?.textContent).toContain("/repo/first");
+  });
+
+  it("프로젝트 파일의 저장 충돌이 생기면 전환을 막고 원래 루트를 유지한다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, project());
+    await act(async () => { mocks.changeSpy?.("note.txt", "my-edit"); });
+    mocks.projectRead.mockResolvedValueOnce({ kind: "text", content: "outside-edit", mtime: 9 });
+    mocks.projectActivate.mockClear();
+    await send(EDITOR_SESSION_EVENT, project("/repo/second"));
+    expect(mocks.projectWrite).not.toHaveBeenCalled();
+    expect(mocks.projectActivate).not.toHaveBeenCalled();
+    expect(container?.textContent).toContain("/repo/first");
+    expect(container?.textContent).toContain("저장하지 못했습니다");
+    expect(mocks.setFocus).toHaveBeenCalled();
+  });
+
+  it("저장 도중 빠르게 선택한 프로젝트 중 마지막 선택만 적용한다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, project());
+    await act(async () => { mocks.changeSpy?.("note.txt", "my-edit"); });
+    let finish!: (mtime: number) => void;
+    mocks.projectWrite.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await send(EDITOR_SESSION_EVENT, project("/repo/second"));
+    await send(EDITOR_SESSION_EVENT, project("/repo/third", ["third.txt"]));
+    await act(async () => { finish(2); });
+    expect(mocks.projectActivate).not.toHaveBeenCalledWith("/repo/second");
+    expect(mocks.projectActivate).toHaveBeenLastCalledWith("/repo/third");
+    expect(container?.textContent).toContain("/repo/third");
+  });
+
+  it("프로젝트 창 닫기는 저장과 셸 해제 후 창을 접고 세션 파일을 복원하지 않는다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, project());
+    await act(async () => { mocks.changeSpy?.("note.txt", "my-edit"); });
+    const preventDefault = vi.fn();
+    await act(async () => { await mocks.onCloseRequested.mock.calls[0][0]({ preventDefault }); });
+    expect(preventDefault).toHaveBeenCalled();
+    expect(mocks.projectWrite).toHaveBeenCalledWith("note.txt", "my-edit", "project-original", "/repo/first");
+    expect(mocks.projectActivate).toHaveBeenLastCalledWith(null);
+    expect(mocks.emit).toHaveBeenCalledWith(EDITOR_CLOSED_EVENT, { kind: "project", root: "/repo/first" });
+  });
+
+  it("프로젝트 터미널 단축키는 현재 루트의 터미널을 연다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, project());
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { code: "Backquote", ctrlKey: true, bubbles: true })); });
+    expect(container?.querySelector("[data-testid=project-terminal]")?.getAttribute("data-root")).toBe("/repo/first");
+    await send(EDITOR_SESSION_EVENT, session());
+    expect(container?.querySelector("[data-testid=project-terminal]")).toBeNull();
+  });
+
+  it("프로젝트 셸 종료를 취소하면 창과 프로젝트를 유지한다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, project());
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { code: "Backquote", ctrlKey: true, bubbles: true })); });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false);
+    mocks.projectActivate.mockClear();
+    await act(async () => { mocks.onCloseRequested.mock.calls[0][0]({ preventDefault: vi.fn() }); });
+    expect(confirm).toHaveBeenCalledWith("실행 중인 프로젝트 셸을 종료하고 창을 닫을까요?");
+    expect(mocks.projectActivate).not.toHaveBeenCalled();
+    expect(mocks.emit).not.toHaveBeenCalledWith(EDITOR_CLOSED_EVENT, expect.anything());
+    expect(container?.textContent).toContain("/repo/first");
+    confirm.mockRestore();
+  });
+
+  it("늦은 프로젝트 배정 뒤 세션 선택이 오면 네이티브 루트도 해제한다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, session());
+    let finish!: () => void;
+    mocks.projectActivate.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await send(EDITOR_SESSION_EVENT, project());
+    await send(EDITOR_SESSION_EVENT, session({ task_id: 77 }));
+    await act(async () => { finish(); });
+    expect(mocks.projectActivate).toHaveBeenLastCalledWith(null);
+    expect(container?.textContent).toContain("세션 #77");
+  });
+
+  it("첫 프로젝트 배정 도중 창을 닫으면 늦은 배정을 취소하고 루트를 해제한다", async () => {
+    await mount();
+    let finish!: () => void;
+    mocks.projectActivate.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await send(EDITOR_SESSION_EVENT, project());
+    await act(async () => { mocks.onCloseRequested.mock.calls[0][0]({ preventDefault: vi.fn() }); });
+    await act(async () => { finish(); });
+    expect(mocks.projectActivate).toHaveBeenLastCalledWith(null);
+    expect(mocks.emit).toHaveBeenCalledWith(EDITOR_GONE_EVENT);
+    expect(container?.textContent).not.toContain("/repo/first");
+  });
+
   it("세션이 배정되기 전에는 기다린다", async () => {
     await mount();
 

@@ -14,7 +14,8 @@ import {
   OrphanedAnnotationsNotice,
   useAnnotationComposer,
 } from "./DiffAnnotationThread";
-import { DiffLineText, HunkCheckbox } from "./DiffPresentation";
+import { tokensForLine } from "../lib/diff-highlight";
+import { DiffLineText, HunkCheckbox, useDiffTheme, useHunkTokens } from "./DiffPresentation";
 
 /** 라인마다 단어 단위 강조 조각을 붙여 렌더 루프에서 짝짓기 로직이 새지 않게 한다. */
 function withIntraLine(lines: HunkLine[]): { line: HunkLine; segments?: Segment[] }[] {
@@ -36,6 +37,8 @@ interface Props {
   /** hunk 부분 승인(B-2) 선택 상태 — 생략 시 체크박스를 표시하지 않는다. */
   selectedHunkIds?: Set<string>;
   onToggleHunk?: (hunk: DiffHunk) => void;
+  /** 구문 강조 언어(Monaco 언어 id). 생략하면 평문이다. */
+  lang?: string;
 }
 
 /** unified 모드 diff — 라인 hover 거터 💬, 인라인 마크다운 주석 스레드, 고아 주석 배지,
@@ -47,9 +50,12 @@ export function AnnotatedUnifiedDiff({
   onUpdateBody,
   selectedHunkIds,
   onToggleHunk,
+  lang = "plaintext",
 }: Props) {
   const composer = useAnnotationComposer(onCreate, onUpdateBody);
   const grouped = groupAnnotationsByPosition(annotations);
+  const tokens = useHunkTokens(hunks, lang);
+  const theme = useDiffTheme();
 
   return (
     <div className="text-xs font-code leading-relaxed">
@@ -99,7 +105,13 @@ export function AnnotatedUnifiedDiff({
                     </span>
                     <span className={`flex-1 whitespace-pre-wrap ${lineKindClass[line.kind]}`}>
                       {line.kind === "add" ? "+" : line.kind === "del" ? "-" : " "}
-                      <DiffLineText text={line.text} segments={segments} kind={line.kind} />
+                      <DiffLineText
+                        text={line.text}
+                        segments={segments}
+                        tokens={tokensForLine(tokens?.get(hunk.id), line, hunk)}
+                        theme={theme}
+                        kind={line.kind}
+                      />
                     </span>
                   </div>
                   <AnnotationThread

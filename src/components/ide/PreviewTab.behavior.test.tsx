@@ -38,6 +38,7 @@ vi.mock("../../lib/designmode/editor-capture-target", () => ({
 
 import { PreviewTab, formatLastAction } from "./PreviewTab";
 import { clearCaptures, getCaptures } from "../../lib/designmode/store";
+import { enqueueDesignTransition, waitForDesignTransition } from "../../lib/design-canvas/lifecycle";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -173,6 +174,59 @@ afterEach(async () => {
 });
 
 describe("PreviewTab lifecycle", () => {
+  it("finishes a delayed Preview hide before Design can open the reused surface", async () => {
+    await switchToInline();
+    await render(true);
+    await waitForDesignTransition(taskId);
+    let release!: () => void;
+    const hidden = new Promise<undefined>((resolve) => { release = () => resolve(undefined); });
+    mocks.hide.mockImplementationOnce(() => hidden);
+    await act(async () => root?.unmount());
+    root = null;
+    const openDesign = vi.fn(async () => {});
+    const transition = enqueueDesignTransition(taskId, openDesign);
+    try {
+      await Promise.resolve();
+      expect(openDesign).not.toHaveBeenCalled();
+      release();
+      await transition;
+      expect(openDesign).toHaveBeenCalledOnce();
+    } finally { release(); await transition; }
+  });
+
+  it("cancels a queued Enter when Preview becomes inactive during Design cleanup", async () => {
+    let release!: () => void;
+    const cleanup = enqueueDesignTransition(taskId, () => new Promise<void>((resolve) => { release = resolve; }));
+    await render(true);
+    const input = container!.querySelector<HTMLInputElement>('[aria-label="프리뷰 URL"]')!;
+    await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    await render(false);
+    try {
+      await act(async () => { release(); await cleanup; });
+      await waitForDesignTransition(taskId);
+      expect(mocks.open).not.toHaveBeenCalled();
+      expect(mocks.navigate).not.toHaveBeenCalled();
+    } finally { release(); await cleanup; }
+  });
+
+  it("waits for Design cleanup before a fast Enter can open the shared native surface", async () => {
+    let release!: () => void;
+    const cleanup = enqueueDesignTransition(taskId, () => new Promise<void>((resolve) => { release = resolve; }));
+    await Promise.resolve();
+    try {
+      mocks.state.mockResolvedValue(null);
+      await render(true);
+      const input = container!.querySelector<HTMLInputElement>('[aria-label="프리뷰 URL"]')!;
+      await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+      expect(mocks.open).not.toHaveBeenCalled();
+      expect(mocks.state).not.toHaveBeenCalled();
+      await act(async () => { release(); await cleanup; });
+      expect(mocks.open).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      await cleanup;
+    }
+  });
   it("shows the persistent webview on tab activation without navigating again", async () => {
     await switchToInline();
     await render(true);

@@ -89,6 +89,7 @@ impl Server {
             instance: "question-local".into(),
             tokens: tokens.clone(),
             dispatcher: Arc::new(NoDispatch),
+            review: Arc::new(mcp::NoReview),
             tools: mcp::Tools::phase_f(),
         });
         Self {

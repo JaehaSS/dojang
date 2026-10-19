@@ -2,7 +2,7 @@
 //!
 //! 작업 컴포저의 붙여넣기는 `designmode::save_pasted_capture`가 캡처 레코드로 저장해
 //! 칩·프롬프트 주입·`image_paths` 검증·종결 정리 파이프라인을 그대로 탄다. 여기는
-//! 작업이 아직 없는 홈 컴포저(작업 생성 전) 경로만 담당한다: `<repo>/.praxis/pasted/`에
+//! 작업이 아직 없는 홈 컴포저(작업 생성 전) 경로만 담당한다: `<repo>/.dojang/pasted/`에
 //! 저장하고 절대경로를 돌려주면, 프론트가 그 경로를 지시문 텍스트에 삽입한다
 //! (에이전트 CLI는 skip-permissions로 실행되므로 절대경로 파일을 직접 읽는다).
 
@@ -60,23 +60,25 @@ pub fn save_task_image(
     if !worktree.is_dir() {
         return Err("워크트리 경로가 없습니다".into());
     }
-    let dir = crate::designmode::captures_dir(worktree, task_id);
-    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let task_id = task_id.to_string();
+    let dir = crate::project_paths::ensure_dir(
+        worktree,
+        &[crate::project_paths::DIR, "captures", &task_id],
+    )?;
     let path = dir.join(next_file_name(ext));
-    std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    crate::project_paths::write_new(&path, bytes)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// 홈 컴포저 붙여넣기 — 선택된 레포의 `.praxis/pasted/`에 저장하고 절대경로 반환.
+/// 홈 컴포저 붙여넣기 — 선택된 레포의 `.dojang/pasted/`에 저장하고 절대경로 반환.
 pub fn save_repo_image(repo: &Path, bytes: &[u8], mime: &str) -> Result<String, String> {
     let ext = validate_image(bytes, mime)?;
     if !repo.is_dir() {
         return Err("레포 경로가 없습니다".into());
     }
-    let dir = repo.join(".praxis").join("pasted");
-    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let dir = crate::project_paths::ensure_dir(repo, &[crate::project_paths::DIR, "pasted"])?;
     let path = dir.join(next_file_name(ext));
-    std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    crate::project_paths::write_new(&path, bytes)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -109,10 +111,28 @@ mod tests {
     fn save_task_image_writes_into_task_capture_dir() {
         let worktree = temp_dir("task");
         let path = save_task_image(&worktree, 7, b"png-bytes", "image/png").unwrap();
-        assert!(path.contains(".praxis/captures/7"));
+        assert!(path.contains(".dojang/captures/7"));
         assert!(path.ends_with(".png"));
         assert_eq!(std::fs::read(&path).unwrap(), b"png-bytes");
         std::fs::remove_dir_all(&worktree).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_and_repo_pastes_refuse_a_symlinked_dojang_root() {
+        use std::os::unix::fs::symlink;
+
+        let repo = temp_dir("symlinked-root");
+        let outside = temp_dir("outside");
+        let sentinel = outside.join("sentinel.txt");
+        std::fs::write(&sentinel, "keep").unwrap();
+        symlink(&outside, repo.join(crate::project_paths::DIR)).unwrap();
+
+        assert!(save_task_image(&repo, 7, b"png", "image/png").is_err());
+        assert!(save_repo_image(&repo, b"png", "image/png").is_err());
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "keep");
+        std::fs::remove_dir_all(&repo).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
     }
 
     #[test]

@@ -1,6 +1,17 @@
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { DiffHunk, FileDiff } from "../lib/ipc";
 import type { DiffRange } from "../lib/transport";
+import { hunkLines } from "../lib/annotations";
 import { describePatch, summarizePatch, toSplitRows, type Segment, type Side } from "../lib/diff";
+import {
+  getDiffTokenizer,
+  hunkTokenStreams,
+  mergeLinePieces,
+  tokenStyle,
+  type HunkTokens,
+  type TokenSpan,
+} from "../lib/diff-highlight";
+import { getActiveTheme, subscribeTheme, type Theme } from "../lib/themes";
 
 export type DiffMode = "unified" | "split";
 
@@ -24,30 +35,95 @@ function SideCell({ side }: { side: Side }) {
   );
 }
 
-/** diff 한 줄의 본문 — 단어 단위 강조가 있으면 바뀐 구간만 2단계 톤으로 덧칠한다.
- *  segments가 null이면(통째로 바뀐 줄·컨텍스트 줄) 줄 틴트만 남기고 평문으로 렌더한다. */
+/** diff 한 줄의 본문 — 단어 단위 강조가 있으면 바뀐 구간만 2단계 톤으로 덧칠하고,
+ *  토큰이 있으면 구문 색을 전경으로 얹는다(설계 DR-13). 두 축은 독립이라 조각 병합으로 끝난다.
+ *  둘 다 없으면(토크나이저 미등록·통째로 바뀐 줄) 줄 틴트만 남기고 평문으로 렌더한다. */
 export function DiffLineText({
   text,
   segments,
+  tokens,
+  theme,
   kind,
   className,
 }: {
   text: string;
   segments?: Segment[];
+  /** 이 줄의 구문 토큰. theme과 함께 와야 색이 붙는다. */
+  tokens?: TokenSpan[];
+  theme?: Theme;
   kind: string;
   className?: string;
 }) {
-  if (!segments) return <span className={className}>{text}</span>;
+  const colored = tokens && tokens.length > 0 && theme ? tokens : undefined;
+  if (!segments && !colored) return <span className={className}>{text}</span>;
   const strong = kind === "add" ? "bg-addbg-strong" : "bg-delbg-strong";
+  const pieces = mergeLinePieces(text, colored, segments, (type) =>
+    theme ? tokenStyle(type, theme) : undefined,
+  );
   return (
     <span className={className}>
-      {segments.map((segment, index) => (
-        <span key={index} className={segment.changed ? strong : undefined}>
-          {segment.text}
+      {pieces.map((piece, index) => (
+        <span
+          key={index}
+          className={piece.changed ? strong : undefined}
+          style={
+            piece.color || piece.italic
+              ? { color: piece.color, fontStyle: piece.italic ? "italic" : undefined }
+              : undefined
+          }
+        >
+          {piece.text}
         </span>
       ))}
     </span>
   );
+}
+
+/** 구문 색 해석용 활성 테마. use-theme.ts의 `useTheme`과 같되 서버 스냅샷을 준다 — diff
+ *  렌더러는 `renderToStaticMarkup` 테스트로도 그려지고, 서버 스냅샷이 없으면 React가 던진다. */
+export function useDiffTheme(): Theme {
+  return useSyncExternalStore(subscribeTheme, getActiveTheme, getActiveTheme);
+}
+
+/** hunk별 구문 토큰(설계 DR-11). 토크나이저가 없으면 null — 호출부는 평문으로 그린다.
+ *  hunk id는 내용 해시라 id 목록 + 언어가 같으면 결과도 같다. 호출부가 매 렌더 새 배열을
+ *  넘겨도(filter) 다시 토큰화하지 않도록 배열 동일성 대신 이 서명으로 갱신을 판단한다. */
+export function useHunkTokens(hunks: DiffHunk[], lang: string): Map<string, HunkTokens> | null {
+  const signature = `${lang}\u0000${hunks.map((hunk) => hunk.id).join("\u0000")}`;
+  const [state, setState] = useState<{ signature: string; tokens: Map<string, HunkTokens> } | null>(
+    null,
+  );
+  const hunksRef = useRef(hunks);
+  hunksRef.current = hunks;
+
+  useEffect(() => {
+    const tokenize = getDiffTokenizer();
+    if (!tokenize) return;
+    // 파일·언어가 바뀌는 사이에 끝난 이전 토큰화 결과는 버린다 — 다른 본문에 색을 칠하게 된다.
+    let cancelled = false;
+    const current = hunksRef.current;
+    Promise.all(
+      current.map(async (hunk) => {
+        const streams = hunkTokenStreams(hunkLines(hunk));
+        const [old, next] = await Promise.all([
+          Promise.resolve(tokenize(streams.oldText, lang)),
+          Promise.resolve(tokenize(streams.newText, lang)),
+        ]);
+        return [hunk.id, { old, new: next }] as const;
+      }),
+    )
+      .then((entries) => {
+        if (!cancelled) setState({ signature, tokens: new Map(entries) });
+      })
+      .catch(() => {
+        // 토큰화 실패는 평문으로 남긴다 — 강조는 보조 정보다.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [signature, lang]);
+
+  return state?.signature === signature ? state.tokens : null;
 }
 
 /** hunk 부분 승인(B-2) 선택 체크박스 — 통합·분할 모드가 공유한다.
@@ -190,7 +266,7 @@ export function SplitDiff({ patch }: { patch: string }) {
   const contentRows = rows.filter((row) => !["hunk", "gap"].includes(row.left.kind));
   if (contentRows.length === 0) return <PatchFallback patch={patch} />;
   return (
-    <div className="text-xs font-code leading-relaxed min-w-[720px]">
+    <div className="text-xs font-code leading-relaxed min-w-[600px]">
       {rows.map((row, index) => {
         if (row.left.kind === "hunk") {
           return (

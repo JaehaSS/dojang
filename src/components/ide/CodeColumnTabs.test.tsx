@@ -15,7 +15,7 @@ const onActivate = vi.fn();
 
 type TabsProps = Parameters<typeof CodeColumnTabs>[0];
 
-/** 네 슬롯에 서로 구분되는 더미를 넣는다 — 어느 칸이 보이는지 텍스트로 판별하기 위해서다. */
+/** 세 슬롯에 서로 구분되는 더미를 넣는다 — 어느 칸이 보이는지 텍스트로 판별하기 위해서다. */
 const render = (extra: Partial<TabsProps> = {}) => {
   const props: TabsProps = {
     active: "activity",
@@ -25,7 +25,6 @@ const render = (extra: Partial<TabsProps> = {}) => {
     activity: <div data-testid="slot-activity">작업정보 내용</div>,
     file: <div data-testid="slot-file">파일 내용</div>,
     preview: <div data-testid="slot-preview">프리뷰 내용</div>,
-    diff: <div data-testid="slot-diff">변경 목록</div>,
     ...extra,
   };
   act(() => {
@@ -58,9 +57,16 @@ afterEach(() => {
 });
 
 describe("CodeColumnTabs — 탭 구성", () => {
+  it("Design 슬롯을 제공하면 로컬 프리뷰 다음에 탭을 추가한다", () => {
+    render({ design: <div>캔버스</div>, active: "design" });
+    expect(tabLabels()).toEqual(["작업정보", "파일", "프리뷰", "Design"]);
+    expect(selectedLabel()).toBe("Design");
+    render({ design: <div>캔버스</div>, previewAvailable: false });
+    expect(tabLabels()).not.toContain("Design");
+  });
   it("작업정보가 항상 맨 앞에 상주한다", () => {
     render();
-    expect(tabLabels()).toEqual(["작업정보", "파일", "프리뷰", "Diff"]);
+    expect(tabLabels()).toEqual(["작업정보", "파일", "프리뷰"]);
   });
 
   it("프리뷰를 쓸 수 없으면 탭 자체를 만들지 않는다", () => {
@@ -97,7 +103,7 @@ describe("CodeColumnTabs — 에디터가 나가 있을 때", () => {
   it("파일 탭이 사라진다", () => {
     // 같은 코드를 두 자리에 두지 않는다.
     render({ editorPoppedOut: true });
-    expect(tabLabels()).toEqual(["작업정보", "프리뷰", "Diff"]);
+    expect(tabLabels()).toEqual(["작업정보", "프리뷰"]);
   });
 
   it("파일이 활성이던 채로 나가면 첫 탭으로 되돌린다", () => {

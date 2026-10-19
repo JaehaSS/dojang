@@ -127,19 +127,19 @@ describe("ContextGauge", () => {
       root = null;
     });
 
-    it("클릭 시 onOpenDetails를 호출한다", async () => {
+    it("클릭하면 채널 진입 콜백을 호출하고 팝업을 만들지 않는다", async () => {
       const onOpenDetails = vi.fn();
-      await act(async () => {
-        root?.render(
-          <ContextGauge task={task} observation={observation(129_200)} onOpenDetails={onOpenDetails} />,
-        );
-      });
+      await act(async () => root?.render(<ContextGauge task={task} observation={observation(129_200)} onOpenDetails={onOpenDetails} />));
+      await act(async () => container?.querySelector("button")?.click());
+      expect(onOpenDetails).toHaveBeenCalledOnce();
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(container?.querySelector("button")?.getAttribute("aria-label")).toContain("컨텍스트 구성 보기");
+    });
 
-      const button = container?.querySelector("button");
-      await act(async () => {
-        button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      });
-
+    it("관측이 없어도 채널에 진입할 수 있다", async () => {
+      const onOpenDetails = vi.fn();
+      await act(async () => root?.render(<ContextGauge task={task} observation={null} onOpenDetails={onOpenDetails} />));
+      await act(async () => container?.querySelector("button")?.click());
       expect(onOpenDetails).toHaveBeenCalledOnce();
     });
   });

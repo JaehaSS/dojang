@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearConversationScrollMemory } from "./conversationScroll";
 
 const mocks = vi.hoisted(() => ({
   translateText: vi.fn<(direction: string, text: string) => Promise<string>>(),
@@ -64,6 +65,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  clearConversationScrollMemory();
   await act(async () => root?.unmount());
   container?.remove();
   root = null;
@@ -156,16 +158,55 @@ describe("ConversationView 답변 번역", () => {
     }
   });
 
-  it("번역 블록 개수가 어긋나면 예전처럼 전체 번역을 원문 아래 붙인다", async () => {
+  it.each([
+    JSON.stringify(["하나로 합쳤습니다"]),
+    "첫째 문단 번역\n\n둘째 문단 번역",
+    JSON.stringify(["", "둘째 문단"]),
+    JSON.stringify(["첫째 문단", 2]),
+  ])("블록 응답이 잘못되어도 각 문단을 따로 번역해 원문 바로 아래 붙인다: %s", async (response) => {
     mocks.translateText.mockImplementation(async (direction, text) =>
-      direction === "en_to_ko_blocks" ? JSON.stringify(["하나로 합쳤습니다"]) : `전체: ${text}`,
+      direction === "en_to_ko_blocks" ? response : `번역: ${text}`,
     );
-    await render([{ role: "text", text: "First.\n\nSecond.", complete: true }]);
+    const code = "```ts\nconst x = 1;\n```";
+    await render([{ role: "text", text: `First.\n\n${code}\n\nSecond.`, complete: true }]);
     await click(buttons("번역")[0]);
 
-    expect(mocks.translateText).toHaveBeenLastCalledWith("en_to_ko", "First.\n\nSecond.");
-    expect(translations()).toHaveLength(1);
-    expect(translations()[0].textContent).toContain("전체: First.");
+    expect(mocks.translateText.mock.calls).toEqual([
+      ["en_to_ko_blocks", JSON.stringify(["First.", "Second."])],
+      ["en_to_ko", "First."],
+      ["en_to_ko", "Second."],
+    ]);
+    expect(translations().map((el) => el.textContent)).toEqual(["번역: First.", "번역: Second."]);
+    expect(translations()[0].previousElementSibling?.textContent).toBe("First.");
+    expect(translations()[1].previousElementSibling?.textContent).toBe("Second.");
+  });
+
+  it.each(["문단 번역 실패", "빈 번역"])("문단별 재번역 오류를 보이고 다시 시도할 수 있다: %s", async (failure) => {
+    let fail = true;
+    mocks.translateText.mockImplementation(async (direction, text) => {
+      if (direction === "en_to_ko_blocks") return "잘못된 응답";
+      if (fail && text === "Second.") {
+        if (failure === "빈 번역") return "   ";
+        throw new Error(failure);
+      }
+      return `번역: ${text}`;
+    });
+    await render([{ role: "text", text: "First.\n\nSecond.", complete: true }]);
+    await click(buttons("번역")[0]);
+    expect(container!.querySelector('[role="alert"]')?.textContent).toContain(failure === "빈 번역" ? "문단 번역이 비어 있습니다" : failure);
+
+    fail = false;
+    await click(buttons("다시 시도")[0]);
+    expect(translations().map((el) => el.textContent)).toEqual(["번역: First.", "번역: Second."]);
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("코드만 있는 답변은 원문을 유지하고 번역 호출을 하지 않는다", async () => {
+    await render([{ role: "text", text: "```ts\nconst x = 1;\n```", complete: true }]);
+    await click(buttons("번역")[0]);
+    expect(mocks.translateText).not.toHaveBeenCalled();
+    expect(translations()).toHaveLength(0);
+    expect(container!.querySelector("code")?.textContent).toContain("const x = 1;");
   });
 
   it("translatable이 없으면 버튼도 단축키도 없다", async () => {

@@ -13,7 +13,12 @@ pub struct TokenEntry {
     pub task_id: i64,
     pub spawn_id: String,
     pub issued_at: Instant,
+    /// 이 토큰으로 들어온 호출이 남기는 리뷰 노트의 author. 벤더 이름이거나 기본값 `agent`다.
+    pub label: String,
 }
+
+/// 벤더를 모르는 발급 경로가 쓰는 author 라벨.
+pub const DEFAULT_LABEL: &str = "agent";
 
 #[derive(Clone, Default)]
 pub struct ControlTokens(
@@ -24,6 +29,8 @@ pub struct ControlTokens(
 /// Retained by the dispatch task even if the HTTP caller disconnects.
 pub struct CallLease {
     pub task_id: i64,
+    /// 이 호출이 남기는 리뷰 노트의 author. 토큰과 같은 잠금 아래서 읽어, 그 사이 폐기돼도 안 바뀐다.
+    pub label: String,
     spawn_id: String,
     active: Arc<Mutex<HashMap<(i64, String), usize>>>,
 }
@@ -40,6 +47,11 @@ impl Drop for CallLease {
 
 impl ControlTokens {
     pub fn issue(&self, task_id: i64, spawn_id: &str) -> Result<String, String> {
+        self.issue_labeled(task_id, spawn_id, DEFAULT_LABEL)
+    }
+
+    /// 라벨이 붙은 발급 — 리뷰 노트의 author가 된다. 토큰 하나가 spawn 하나이므로 벤더가 고정된다.
+    pub fn issue_labeled(&self, task_id: i64, spawn_id: &str, label: &str) -> Result<String, String> {
         let token = random_hex_id()?;
         self.lock().insert(
             token.clone(),
@@ -47,6 +59,7 @@ impl ControlTokens {
                 task_id,
                 spawn_id: spawn_id.to_string(),
                 issued_at: Instant::now(),
+                label: label.to_string(),
             },
         );
         Ok(token)
@@ -56,6 +69,7 @@ impl ControlTokens {
         self.task_for_at(token, Instant::now())
     }
 
+    /// 토큰의 author 라벨. 모르는 토큰이면 None — 인증은 `task_for`가 먼저 끝낸다.
     /// 시계를 인자로 받아 TTL 경계를 테스트할 수 있게 한다.
     pub fn task_for_at(&self, token: &str, now: Instant) -> Option<i64> {
         let mut tokens = self.lock();
@@ -71,7 +85,7 @@ impl ControlTokens {
         let mut tokens = self.lock();
         let entry = tokens.get(token)?;
         if entry.issued_at.elapsed() >= TOKEN_TTL { tokens.remove(token); return None; }
-        let lease = CallLease { task_id: entry.task_id, spawn_id: entry.spawn_id.clone(), active: self.1.clone() };
+        let lease = CallLease { task_id: entry.task_id, label: entry.label.clone(), spawn_id: entry.spawn_id.clone(), active: self.1.clone() };
         // The token lock stays held until accounting is visible to revocation.
         *self.1.lock().unwrap_or_else(|e| e.into_inner()).entry((lease.task_id, lease.spawn_id.clone())).or_default() += 1;
         Some(lease)

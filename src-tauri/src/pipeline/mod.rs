@@ -14,6 +14,7 @@ pub mod review_run;
 pub mod split;
 pub mod state;
 pub mod steps;
+pub mod vendor_health;
 
 #[cfg(test)]
 mod tests;

@@ -207,7 +207,15 @@ export const SETTINGS_CATALOG: SettingEntry[] = [
     label: "영어로 일하기 보조",
     tab: "run",
     hint: "입력창 ⌘J 영어 프롬프트, 답변 번역 ⌥⌘J, 표현 짚기, 번역 모델",
-    keywords: ["translate", "번역", "영어", "english", "프롬프트", "⌘J", "표현", "단어장", "vocab"],
+    keywords: ["translate", "번역", "영어", "english", "프롬프트", "⌘J", "표현"],
+    risk: "cost",
+  },
+  {
+    id: "know-cards",
+    label: "알아둘 것 카드",
+    tab: "run",
+    hint: "도구를 많이 쓴 턴이 끝나면 놓쳤을 수 있는 개념·결정·위험을 채널 아래 카드로 남긴다",
+    keywords: ["you should know", "heads up", "주의", "카드", "판정", "know"],
     risk: "cost",
   },
 

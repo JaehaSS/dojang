@@ -20,6 +20,7 @@ import type { AgentRole } from "./agent-role";
 import type { ObservedModel } from "./models";
 import type { DesignBoundingRect, DesignCaptureRecord } from "./designmode/types";
 import type { EditorCaptureTarget } from "./designmode/editor-capture-target";
+import type { DesignEditRequest, DesignEditResult } from "./design-canvas/edit";
 
 registerTransport(tauriTransport);
 
@@ -337,6 +338,37 @@ export type ConvoEvent = (
   | { id: number; kind: "tool_output"; tool_use_id: string; contents: ToolOutputContent[]; parent_id?: string }
   /** 서브 에이전트가 실제로 돈 모델 — 세션 칩을 오염시키지 않도록 model_snapshot과 분리돼 있다. */
   | { id: number; kind: "subagent_model"; parent_id: string; model: string }
+  /** Codex 자식 세션의 관측 상태. child thread 조합이 카드의 안정 키가 된다. */
+  | {
+      id: number;
+      kind: "subagent_update";
+      vendor: "codex";
+      root_thread_id: string;
+      parent_thread_id: string;
+      child_thread_id: string;
+      execution_id: string;
+      child_turn_id?: string | null;
+      source_key: string;
+      title?: string | null;
+      nickname?: string | null;
+      agent_role?: string | null;
+      model?: string | null;
+      state: "running" | "done" | "failed" | "stopped" | "unknown";
+      observation_source: "session_log" | "stream";
+      observation_status: "available" | "missing" | "unreadable" | "unsupported" | "limited";
+      /** 중첩 자식만 직접 부모의 canonical card key를 가진다. */
+      parent_id?: string | null;
+    }
+  | {
+      id: number;
+      kind: "subagent_message";
+      /** 이 메시지를 소유한 Codex 자식 카드의 canonical key. */
+      parent_id: string;
+      source_key: string;
+      child_turn_id?: string | null;
+      text: string;
+      is_error: boolean;
+    }
   | {
       id: number;
       kind: "model_snapshot";
@@ -518,6 +550,36 @@ export const insightWikiFoldersSet = (folders: string[] | null) =>
   invoke("insight_wiki_folders_set", { folders });
 export const insightEnabledGet = () => invoke<boolean>("insight_enabled_get");
 export const insightEnabledSet = (on: boolean) => invoke("insight_enabled_set", { on });
+
+/** 알아둘 것 카드 — 도구를 많이 쓴 턴이 끝난 뒤 판정이 그 세션에 남긴 한 장. */
+export interface KnowCard {
+  id: number;
+  task_id: number;
+  kind: "you_should_know" | "heads_up";
+  topic: string;
+  title: string;
+  body: string;
+  /** 판정이 그 턴의 기록에서 그대로 옮긴 한 줄. */
+  evidence: string;
+  /** 그 턴 요청의 첫 줄 앞부분 — 페이지를 넘겨도 어느 턴의 카드인지 보인다. */
+  turn_label: string;
+  /** unix 초. */
+  created_at: number;
+  seen_at: number | null;
+  asked_at: number | null;
+}
+
+/** `asked`는 카드를 남기고, `known`·`dismissed`는 카드를 뺀다. */
+export type KnowCardAction = "asked" | "known" | "dismissed";
+
+/** 활성 카드, 최신 순. */
+export const knowCardsList = (taskId: number) => invoke<KnowCard[]>("know_cards_list", { taskId });
+/** 카드가 실제로 화면에 보였을 때만 부른다. 통지 이벤트는 없다. */
+export const knowCardSeen = (cardId: number) => invoke("know_card_seen", { cardId });
+export const knowCardAct = (cardId: number, action: KnowCardAction) =>
+  invoke("know_card_act", { cardId, action });
+export const knowCardsEnabledGet = () => invoke<boolean>("know_cards_enabled_get");
+export const knowCardsEnabledSet = (on: boolean) => invoke("know_cards_enabled_set", { on });
 
 /**
  * 큐 개수만 센다. `quizNext`와 달리 **문제를 소비하지 않아** 폴링에서 부를 수 있다.
@@ -770,6 +832,8 @@ export interface LspTarget {
 
 export interface LspStatusInfo {
   available: boolean;
+  /** 실행 파일의 가용성과 실제 분석 준비 상태는 별개다. */
+  phase?: "unavailable" | "idle" | "starting" | "analyzing" | "ready" | "error";
   /** 서버 표기명. null이면 지원 언어가 아니다. */
   server: string | null;
   /** 사용 불가 사유 (미설치 등). */
@@ -1290,6 +1354,25 @@ export interface ReviewAnnotation {
   body_md: string;
   status: AnnotationStatus;
   created_at: number;
+  /** `human`이면 사람이 쓴 주석, 그 외는 MCP로 노트를 남긴 에이전트의 벤더 이름(claude·codex…).
+   *  author 열이 없던 Runner는 필드를 주지 않으므로 없으면 사람으로 읽는다. */
+  author?: string;
+}
+
+/** Rust `review_control::NavigateRequest` — 에이전트가 `review_navigate`로 시선을 옮길 때. */
+export interface ReviewNavigatePayload {
+  task_id: number;
+  path: string;
+  hunk_id: string;
+  /** 목표 hunk 안의 줄. 화면의 hunk id가 어긋날 때 줄 번호로 되찾는다. */
+  line: number;
+  side: string;
+}
+
+/** Rust `review_control::AnnotationsChanged` — 에이전트가 노트를 남겼을 때. */
+export interface ReviewAnnotationsChangedPayload {
+  task_id: number;
+  path: string;
 }
 
 /** `annotations_list` 응답 — 현재 diff에 재매칭된 결과. `orphaned`가 true면 UI가 고아 배지를 표시. */
@@ -1594,7 +1677,9 @@ export interface VendorUsage {
   plan: string | null;
   five_hour: UsageWindow | null;
   weekly: UsageWindow | null;
-  /** "session-log" | "statusline" | "oauth" | "manual-token" */
+  /** 모델별 공유 한도가 서로 다른 경우, 상세에서 그룹을 나눠 표시한다. */
+  quota_groups?: { label: string; five_hour: UsageWindow | null; weekly: UsageWindow | null }[];
+  /** "session-log" | "statusline" | "oauth" | "manual-token" | "antigravity-local" | "antigravity-oauth" */
   source: string | null;
   updated_at: number | null;
 }
@@ -1808,6 +1893,30 @@ export interface TaskPatterns {
 /** 작업 패턴 집계 — 작업 DB만 읽는다(트랜스크립트 비의존). */
 export const taskPatterns = (range: InsightsRange) =>
   invoke<TaskPatterns>("task_patterns", {
+    range,
+    tzOffsetSecs: -new Date().getTimezoneOffset() * 60,
+  });
+
+// ── 앱 사용 시간 ──
+
+export interface AppActivity {
+  /** 앱이 켜져 있던 시간(초). */
+  open_secs: number;
+  /** 메인 창이 포커스를 가진 시간(초). */
+  focus_secs: number;
+  /** 창 포커스 중 실제로 조작한(입력 간격 60초 이하) 시간(초). */
+  input_secs: number;
+  /** 앱이 켜져 있던 로컬 날짜 수. */
+  active_days: number;
+  /** 기록이 시작된 시각(epoch초). 기록이 없으면 null. */
+  since: number | null;
+  /** 직전 동일 기간 합계. "all"에는 없다. */
+  prev: { open_secs: number; focus_secs: number; input_secs: number } | null;
+}
+
+/** 앱 사용 시간 — 조작 시간·켜져 있던 시간·창 포커스 시간. */
+export const appActivity = (range: InsightsRange) =>
+  invoke<AppActivity>("app_activity", {
     range,
     tzOffsetSecs: -new Date().getTimezoneOffset() * 60,
   });
@@ -2276,6 +2385,24 @@ export const designmodeHide = (id: number) => invoke<void>("designmode_hide", { 
 /** 프리뷰 탭을 완전히 닫을 때 웹뷰 해제. */
 export const designmodeClose = (id: number) => invoke<void>("designmode_close", { id });
 
+export interface DesignCanvasServerStatus {
+  status: "server-starting" | "ready" | "server-failed";
+  url: string | null;
+  port: number | null;
+  error: string | null;
+  logPath: string | null;
+}
+
+export const designCanvasStart = (id: number, owner: string) =>
+  invoke<DesignCanvasServerStatus>("design_canvas_start", { id, owner });
+export const designCanvasStatus = (id: number, owner: string) =>
+  invoke<DesignCanvasServerStatus>("design_canvas_status", { id, owner });
+export const designCanvasStop = (id: number, owner: string) =>
+  invoke<void>("design_canvas_stop", { id, owner });
+/** Canvas 페이지의 요청은 메인 Design 탭이 현재 surface 토큰과 함께 중계한다. */
+export const designCanvasEdit = (id: number, surface: string, request: DesignEditRequest) =>
+  invoke<DesignEditResult>("design_canvas_edit", { id, surface, request });
+
 /** Composer 칩 × — 저장된 캡처 파일 삭제. */
 export const designmodeRemoveCapture = (id: number, captureId: string) =>
   invoke<void>("designmode_remove_capture", { id, captureId });
@@ -2338,7 +2465,7 @@ export const previewWorkbenchReceipt = (taskId: number, requestId: string) =>
 export const pasteCaptureSave = (id: number, dataBase64: string, mime: string) =>
   invoke<DesignCaptureRecord>("paste_capture_save", { id, dataBase64, mime });
 
-/** 홈 컴포저(작업 생성 전) 클립보드 이미지 저장 — repo의 `.praxis/pasted/`에 남기고
+/** 홈 컴포저(작업 생성 전) 클립보드 이미지 저장 — repo의 `.dojang/pasted/`에 남기고
  *  절대경로를 돌려준다. 호출부가 그 경로를 지시문 텍스트에 삽입한다. */
 export const pasteImageSave = (repo: string, dataBase64: string, mime: string) =>
   invoke<string>("paste_image_save", { repo, dataBase64, mime });

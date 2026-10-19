@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   usageBridgeInstall,
   usageBridgeStatus,
-  usageBridgeUninstall,
   usageSnapshot,
   type BridgeStatus,
   type UsageSnapshot,
@@ -95,30 +94,17 @@ function WindowRow({
   );
 }
 
-/** Claude 전용 안내 — 잔량이 statusline JSON으로만 나오므로 브리지 설치 동선을 준다. */
+/** Claude 전용 안내 — 잔량이 statusline JSON으로만 나오므로 브리지 설치 동선을 준다. 설치된 뒤에는 아무것도 내지 않는다. */
 function BridgeControl({
   bridge,
   busy,
   onInstall,
-  onUninstall,
 }: {
   bridge: BridgeStatus | null;
   busy: boolean;
   onInstall: () => void;
-  onUninstall: () => void;
 }) {
-  if (!bridge) return null;
-  if (bridge.installed) {
-    return (
-      <div className="mt-2 pt-2 border-t border-border text-xs text-text-muted">
-        statusline 브리지 설치됨
-        {bridge.wrapped && <span> · 기존 statusline 유지</span>}
-        <button className="ml-2 text-text-secondary hover:text-text" disabled={busy} onClick={onUninstall}>
-          해제
-        </button>
-      </div>
-    );
-  }
+  if (!bridge || bridge.installed) return null;
   return (
     <div className="mt-2 pt-2 border-t border-border text-xs text-text-muted">
       <p className="mb-1">
@@ -143,14 +129,12 @@ export function VendorDetail({
   bridge,
   busy,
   onInstall,
-  onUninstall,
 }: {
   usage: VendorUsage;
   now: number;
   bridge: BridgeStatus | null;
   busy: boolean;
   onInstall: () => void;
-  onUninstall: () => void;
 }) {
   const source = sourceLabel(usage.source);
   const stale = usage.status === "stale";
@@ -161,11 +145,23 @@ export function VendorDetail({
         {usage.plan && <span className="text-xs text-text-muted">{usage.plan}</span>}
       </div>
 
-      {usage.five_hour && (
+      {!!usage.quota_groups?.length &&
+        usage.quota_groups.map((group, index) => (
+          <div key={index} className="mb-3 last:mb-0">
+            <p className="mb-1 text-xs text-text-secondary">{group.label}</p>
+            {group.five_hour && (
+              <WindowRow title="5시간" window={group.five_hour} now={now} muted={stale} />
+            )}
+            {group.weekly && <WindowRow title="주간" window={group.weekly} now={now} muted={stale} />}
+          </div>
+        ))}
+      {!usage.quota_groups?.length && usage.five_hour && (
         <WindowRow title="5시간" window={usage.five_hour} now={now} muted={stale} />
       )}
-      {usage.weekly && <WindowRow title="주간" window={usage.weekly} now={now} muted={stale} />}
-      {!usage.five_hour && !usage.weekly && (
+      {!usage.quota_groups?.length && usage.weekly && (
+        <WindowRow title="주간" window={usage.weekly} now={now} muted={stale} />
+      )}
+      {!usage.quota_groups?.length && !usage.five_hour && !usage.weekly && (
         <p className="text-xs text-text-muted">{usage.detail ?? "표시할 한도 정보가 없습니다."}</p>
       )}
       {stale && (
@@ -175,7 +171,7 @@ export function VendorDetail({
           {usage.detail ?? "새 값을 받지 못해 마지막 관측을 보여줍니다."}
         </p>
       )}
-      {usage.status === "unauthenticated" && (
+      {usage.status === "unauthenticated" && usage.vendor !== "agy" && (
         // 여기서 바로 로그인시키지 않는 이유: 로그인은 대화형 PTY라 상태바 팝오버에 담기지
         // 않는다. 어디로 가야 하는지만 확실히 알려준다.
         <p className="mt-1 text-xs text-status-awaiting">
@@ -192,7 +188,7 @@ export function VendorDetail({
       )}
 
       {usage.vendor === "claude" && (
-        <BridgeControl bridge={bridge} busy={busy} onInstall={onInstall} onUninstall={onUninstall} />
+        <BridgeControl bridge={bridge} busy={busy} onInstall={onInstall} />
       )}
     </div>
   );
@@ -292,7 +288,6 @@ export function UsageBar() {
             bridge={bridge}
             busy={busy}
             onInstall={() => void runBridge(usageBridgeInstall)}
-            onUninstall={() => void runBridge(usageBridgeUninstall)}
           />
         </div>
       )}

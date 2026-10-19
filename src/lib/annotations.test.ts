@@ -3,6 +3,7 @@ import {
   draftAnnotationIds,
   groupAnnotationsByPosition,
   hunkLines,
+  isAgentAnnotation,
   orphanedAnnotations,
   positionKey,
 } from "./annotations";
@@ -86,5 +87,22 @@ describe("orphanedAnnotations / draftAnnotationIds", () => {
 
     expect(orphanedAnnotations([draft, sent, orphan]).map((a) => a.id)).toEqual(["c"]);
     expect(draftAnnotationIds([draft, sent, orphan])).toEqual(["a", "c"]);
+  });
+});
+
+describe("agent notes", () => {
+  it("treats a missing author as human and any other author as an agent", () => {
+    expect(isAgentAnnotation(annotation())).toBe(false);
+    expect(isAgentAnnotation(annotation({ author: "human" }))).toBe(false);
+    expect(isAgentAnnotation(annotation({ author: "claude" }))).toBe(true);
+  });
+
+  it("never resends an agent note, even one stored as draft", () => {
+    const human = annotation({ id: "a", status: "draft", author: "human" });
+    const legacy = annotation({ id: "b", status: "draft" });
+    const agentSent = annotation({ id: "c", status: "sent", author: "codex" });
+    const agentDraft = annotation({ id: "d", status: "draft", author: "claude" });
+
+    expect(draftAnnotationIds([human, legacy, agentSent, agentDraft])).toEqual(["a", "b"]);
   });
 });

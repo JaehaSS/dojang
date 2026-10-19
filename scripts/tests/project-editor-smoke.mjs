@@ -6,7 +6,7 @@ import react from "@vitejs/plugin-react";
 import { chromium } from "playwright";
 import { createServer } from "vite";
 
-const directory = path.resolve(".praxis/verification/project-editor-smoke");
+const directory = path.resolve(".dojang/verification/project-editor-smoke");
 const fixture = path.join(directory, "ui-fixture");
 const source = (file) => `/@fs/${path.resolve(file)}`;
 const screenshots = [];

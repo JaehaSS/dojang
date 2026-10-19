@@ -5,7 +5,7 @@ import { chromium, webkit } from "playwright";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
-const directory = path.resolve(".praxis/verification/editor-split-native-drag");
+const directory = path.resolve(".dojang/verification/editor-split-native-drag");
 const fixture = path.join(directory, "ui-fixture");
 const source = (file) => `/@fs/${path.resolve(file)}`;
 const settleWithin = async (promise, timeout) => {

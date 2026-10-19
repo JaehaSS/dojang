@@ -28,7 +28,7 @@ function session(id: string, overrides: Partial<SessionHomeSession> = {}): Sessi
 describe("projectOf", () => {
   it("등록 프로젝트의 최장 접두를 고른다 — 워크트리도 프로젝트에 속한다", () => {
     const projects = ["/work", "/work/app"];
-    expect(projectOf(session("a", { cwd: "/work/app/.praxis/worktrees/x" }), projects)).toBe("/work/app");
+    expect(projectOf(session("a", { cwd: "/work/app/.dojang/worktrees/x" }), projects)).toBe("/work/app");
     expect(projectOf(session("b", { cwd: "/work/other" }), projects)).toBe("/work");
   });
 
@@ -69,7 +69,7 @@ describe("buildSessionHomeTree", () => {
       [
         session("old", { cwd: "/work/lib", last_active: 10 }),
         session("new", { cwd: "/work/tool", last_active: 900 }),
-        session("cur", { cwd: "/work/app/.praxis/worktrees/t", last_active: 1 }),
+        session("cur", { cwd: "/work/app/.dojang/worktrees/t", last_active: 1 }),
         session("lost", { cwd: null, last_cwd: null }),
       ],
       "/work/app",
@@ -83,7 +83,7 @@ describe("buildSessionHomeTree", () => {
     ]);
     expect(tree[0].label).toBe("app");
     expect(tree[0].detail).toBe("/work/app");
-    expect(tree[0].children[0].detail).toBe(".praxis/worktrees/t");
+    expect(tree[0].children[0].detail).toBe(".dojang/worktrees/t");
     expect(tree[3].label).toBe("(경로 없음)");
   });
 

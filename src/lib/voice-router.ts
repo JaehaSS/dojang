@@ -28,7 +28,6 @@ const VIEWS: { aliases: string[]; view: View }[] = [
   { aliases: ["워크스페이스", "작업공간", "작업", "workspace"], view: "workspace" },
   { aliases: ["앙상블", "ensemble"], view: "ensemble" },
   { aliases: ["인사이트", "통계", "insights"], view: "insights" },
-  { aliases: ["단어장", "vocab"], view: "vocab" },
   { aliases: ["환경설정", "설정", "settings"], view: "settings" },
 ];
 

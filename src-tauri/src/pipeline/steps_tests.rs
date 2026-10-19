@@ -39,7 +39,7 @@ fn verify_commits_work_and_drops_check_artifacts() {
     let d = repo("verify-artifacts");
     let fork = git_ops::head(&d).unwrap();
     write(&d, "src/a.rs", "fn a() {}\n");
-    let out = verify_ticket(&d, &fork, &v(&["src/"]), &v(&["echo built > artifact.out"]), None).unwrap();
+    let out = verify_ticket(&d, &fork, &v(&["src/"]), &v(&["echo built > artifact.out"]), &[], None).unwrap();
     assert!(out.passed, "{out:?}");
     // 산출물은 허용 경로 밖이지만 변경으로 집계되지 않고, 커밋에도 들어가지 않는다.
     assert_eq!(git_ops::committed_paths(&d, &fork).unwrap(), vec!["src/a.rs"]);
@@ -53,7 +53,7 @@ fn verify_rejects_paths_outside_allowed_without_running_checks() {
     let fork = git_ops::head(&d).unwrap();
     write(&d, "src/a.rs", "x");
     write(&d, "other/b.rs", "y");
-    let out = verify_ticket(&d, &fork, &v(&["src/"]), &v(&["echo ran > ran.out"]), None).unwrap();
+    let out = verify_ticket(&d, &fork, &v(&["src/"]), &v(&["echo ran > ran.out"]), &[], None).unwrap();
     assert!(!out.passed);
     assert!(out.summary.contains("other/b.rs"), "{}", out.summary);
     assert!(!d.join("ran.out").exists());
@@ -63,10 +63,10 @@ fn verify_rejects_paths_outside_allowed_without_running_checks() {
 fn verify_reports_no_change_and_failing_checks() {
     let d = repo("verify-fail");
     let fork = git_ops::head(&d).unwrap();
-    let none = verify_ticket(&d, &fork, &v(&["src/"]), &v(&["true"]), None).unwrap();
+    let none = verify_ticket(&d, &fork, &v(&["src/"]), &v(&["true"]), &[], None).unwrap();
     assert!(!none.passed && none.summary.contains("변경이 하나도 없습니다"));
     write(&d, "src/a.rs", "x");
-    let bad = verify_ticket(&d, &fork, &v(&["src/"]), &v(&["echo junk > j.out; exit 3"]), None).unwrap();
+    let bad = verify_ticket(&d, &fork, &v(&["src/"]), &v(&["echo junk > j.out; exit 3"]), &[], None).unwrap();
     assert!(!bad.passed && bad.summary.contains("exit 3"), "{}", bad.summary);
     assert!(!d.join("j.out").exists());
     assert_eq!(status(&d), "");
@@ -77,11 +77,11 @@ fn verify_after_a_fix_round_counts_the_fix_commit_too() {
     let d = repo("verify-rounds");
     let fork = git_ops::head(&d).unwrap();
     write(&d, "src/a.rs", "v1");
-    assert!(verify_ticket(&d, &fork, &v(&["src/"]), &v(&["true"]), None).unwrap().passed);
+    assert!(verify_ticket(&d, &fork, &v(&["src/"]), &v(&["true"]), &[], None).unwrap().passed);
     // 수정 라운드: 수리 에이전트가 파일을 더 고친다.
     write(&d, "src/a.rs", "v2");
     write(&d, "src/c.rs", "c");
-    assert!(verify_ticket(&d, &fork, &v(&["src/"]), &v(&["true"]), None).unwrap().passed);
+    assert!(verify_ticket(&d, &fork, &v(&["src/"]), &v(&["true"]), &[], None).unwrap().passed);
     assert_eq!(git_ops::committed_paths(&d, &fork).unwrap(), vec!["src/a.rs", "src/c.rs"]);
     assert_eq!(std::fs::read_to_string(d.join("src/a.rs")).unwrap(), "v2");
 }
@@ -90,7 +90,7 @@ fn verify_after_a_fix_round_counts_the_fix_commit_too() {
 fn final_fix_commits_in_scope_change_and_cleans_artifacts() {
     let d = repo("fix-ok");
     let pre = git_ops::head(&d).unwrap();
-    let r = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["echo b > build.out"]), None, || {
+    let r = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["echo b > build.out"]), &[], None, || {
         write(&d, "src/a.rs", "fixed");
         Ok("ok".into())
     });
@@ -104,7 +104,7 @@ fn final_fix_commits_in_scope_change_and_cleans_artifacts() {
 fn final_fix_outside_allowed_paths_is_reverted() {
     let d = repo("fix-outside");
     let pre = git_ops::head(&d).unwrap();
-    let r = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["true"]), None, || {
+    let r = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["true"]), &[], None, || {
         write(&d, "src/a.rs", "ok");
         write(&d, "secrets/k.txt", "no");
         Ok(String::new())
@@ -119,20 +119,20 @@ fn final_fix_outside_allowed_paths_is_reverted() {
 fn final_fix_failures_revert_to_pre() {
     let d = repo("fix-fail");
     let pre = git_ops::head(&d).unwrap();
-    let verify_fail = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["exit 1"]), None, || {
+    let verify_fail = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["exit 1"]), &[], None, || {
         write(&d, "src/a.rs", "x");
         Ok(String::new())
     });
     assert!(verify_fail.unwrap_err().contains("검증 실패"));
     assert_eq!(git_ops::head(&d).unwrap(), pre);
     assert_eq!(status(&d), "");
-    let agent_fail = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["true"]), None, || {
+    let agent_fail = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["true"]), &[], None, || {
         write(&d, "src/half.rs", "half");
         Err("에이전트 종료".into())
     });
     assert_eq!(agent_fail, Err("에이전트 종료".to_string()));
     assert!(!d.join("src/half.rs").exists());
-    let noop = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["true"]), None, || Ok(String::new()));
+    let noop = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["true"]), &[], None, || Ok(String::new()));
     assert!(noop.unwrap_err().contains("변경도 만들지"));
 }
 
@@ -168,4 +168,66 @@ fn bootstrap_leftovers_are_not_a_split_violation() {
     assert!(!tree_changed_during(&before, &after_untouched));
     write(&d, "judge-wrote.txt", "x");
     assert!(tree_changed_during(&before, &git_ops::status_porcelain(&d).unwrap()));
+}
+
+fn outcome(command: &str, ok: bool) -> checks::CheckOutcome {
+    checks::CheckOutcome {
+        command: command.into(),
+        exit_code: if ok { 0 } else { 1 },
+        ok,
+        tail: "boom".into(),
+        timed_out: false,
+    }
+}
+
+#[test]
+fn baseline_failure_is_excluded_but_acceptance_still_enforced() {
+    let base = v(&["uv run pytest"]);
+    // 기준선에서도 실패한 저장소 명령은 판정에서 빠지고, 통과한 수용 명령이 있으면 통과한다.
+    let out = baseline_verdict(&[outcome("uv run pytest", false), outcome("true", true)], &base);
+    assert!(out.passed && out.summary.contains("기준선에서도 실패"), "{out:?}");
+    // 수용 명령이 실패하면 기준선과 무관하게 실패한다.
+    let out = baseline_verdict(&[outcome("uv run pytest", false), outcome("make acc", false)], &base);
+    assert!(!out.passed && out.summary.contains("make acc") && out.summary.contains("기준선에서도 실패"), "{out:?}");
+    // 기준선에 없던 명령이 실패하면 실패한다.
+    assert!(!baseline_verdict(&[outcome("cargo test", false)], &base).passed);
+}
+
+#[test]
+fn baseline_leaving_nothing_judgeable_passes_to_review() {
+    let out = baseline_verdict(&[outcome("uv run pytest", false)], &v(&["uv run pytest"]));
+    assert!(out.passed && out.summary.contains("판정 가능한 검증 명령이 없어 리뷰로 넘긴다"), "{out:?}");
+}
+
+#[test]
+fn verify_ticket_skips_baseline_failing_repo_check() {
+    let d = repo("verify-baseline");
+    write(&d, ".dojang/validate.toml", "test = \"exit 1\"\n");
+    sh(&d, &["add", "-A"]);
+    sh(&d, &["commit", "-q", "-m", "cfg"]);
+    let fork = git_ops::head(&d).unwrap();
+    write(&d, "src/a.rs", "x");
+    let strict = verify_ticket(&d, &fork, &v(&["src/"]), &v(&["true"]), &[], None).unwrap();
+    assert!(!strict.passed, "{strict:?}");
+    let lenient = verify_ticket(&d, &fork, &v(&["src/"]), &v(&["true"]), &v(&["exit 1"]), None).unwrap();
+    assert!(lenient.passed, "{lenient:?}");
+}
+
+#[test]
+fn final_fix_applies_the_same_baseline_exclusion() {
+    let d = repo("fix-baseline");
+    write(&d, ".dojang/validate.toml", "test = \"exit 1\"\n");
+    sh(&d, &["add", "-A"]);
+    sh(&d, &["commit", "-q", "-m", "cfg"]);
+    let pre = git_ops::head(&d).unwrap();
+    let strict = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["true"]), &[], None, || {
+        write(&d, "src/a.rs", "ok");
+        Ok(String::new())
+    });
+    assert!(strict.is_err(), "기준선이 없으면 실패한 저장소 명령이 판정된다");
+    let lenient = apply_final_fix(&d, &pre, &v(&["src/"]), &v(&["true"]), &v(&["exit 1"]), None, || {
+        write(&d, "src/a.rs", "ok");
+        Ok(String::new())
+    });
+    assert!(lenient.is_ok(), "{lenient:?}");
 }

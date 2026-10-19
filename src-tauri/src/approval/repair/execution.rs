@@ -14,7 +14,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         !session.commands.is_empty(),
-        "등록되거나 탐지된 검사 명령이 없습니다. .praxis/validate.toml을 설정하고 다시 준비하세요."
+        "등록되거나 탐지된 검사 명령이 없습니다. .dojang/validate.toml을 설정하고 다시 준비하세요."
     );
     let agent = task.agent.clone().unwrap_or_else(|| "claude".into());
     let mut failure = crate::approval::history(pool, task.id)

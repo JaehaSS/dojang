@@ -80,12 +80,12 @@ describe("ProjectTerminal", () => {
     act(() => mocks.input?.("must not execute\r"));
     expect(mocks.shellWrite).not.toHaveBeenCalled();
     await restartProjectShell(7);
-    expect(mocks.close).toHaveBeenCalledWith(7);
+    expect(mocks.close).toHaveBeenCalledWith(7, undefined);
     await act(async () => { root.render(<ProjectTerminal hidden={false} restart={1} onSession={onSession} onExit={onExit} onError={() => {}} />); });
     expect(mocks.open).toHaveBeenCalledTimes(2);
     expect(onExit).toHaveBeenLastCalledWith(false);
     act(() => mocks.input?.("pwd\r"));
-    expect(mocks.shellWrite).toHaveBeenCalledWith(7, "pwd\r");
+    expect(mocks.shellWrite).toHaveBeenCalledWith(7, "pwd\r", undefined);
   });
 
   it("unmount during listener registration cleans up the late subscription without spawning a shell", async () => {
@@ -97,6 +97,16 @@ describe("ProjectTerminal", () => {
     await act(async () => { finishListen(stop); });
     expect(stop).toHaveBeenCalledOnce();
     expect(mocks.open).not.toHaveBeenCalled();
+  });
+
+  it("shared editor shell requests keep the root that opened the terminal", async () => {
+    await act(async () => { root.render(<ProjectTerminal root="/repo/first" hidden={false} restart={0} onSession={() => {}} onExit={() => {}} onError={() => {}} />); });
+    expect(mocks.open).toHaveBeenCalledWith(80, 24, "/repo/first");
+    expect(mocks.snapshot).toHaveBeenCalledWith(7, "/repo/first");
+    act(() => mocks.input?.("pwd\r"));
+    expect(mocks.shellWrite).toHaveBeenCalledWith(7, "pwd\r", "/repo/first");
+    await restartProjectShell(7, "/repo/first");
+    expect(mocks.close).toHaveBeenCalledWith(7, "/repo/first");
   });
 
   it("reconciles queued output and exit with the snapshot before accepting live output", async () => {

@@ -210,6 +210,7 @@ fn subagent_model_observation_passes_through_the_guard_untouched() {
 fn completion_guard_uses_system_prompt_for_claude_and_prompt_prefix_for_codex() {
     assert!(TURN_COMPLETION_GUARD
         .contains("Never leave background processes or servers running after the turn."));
+    assert!(TURN_COMPLETION_GUARD.contains("Write every file path in replies as a full absolute path"));
 
     let claude = guarded_message(Vendor::Claude, "사용자 요청");
     assert_eq!(claude.as_ref(), "사용자 요청");

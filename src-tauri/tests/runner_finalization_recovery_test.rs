@@ -62,6 +62,30 @@ async fn recovery_completes_an_already_merged_approval_after_original_checkout_s
 }
 
 #[tokio::test]
+async fn recovery_finalizes_a_removed_legacy_worktree_from_its_stored_path() {
+    let mut fixture = fixture("legacy-removed").await;
+    let current = std::path::PathBuf::from(&fixture.task.worktree_path);
+    let legacy = fixture.repo.canonicalize().unwrap().join(".praxis/worktrees").join(current.file_name().unwrap());
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    git(&fixture.repo, &["worktree", "move", current.to_str().unwrap(), legacy.to_str().unwrap()]);
+    fixture.task.worktree_path = legacy.to_string_lossy().into_owned();
+    sqlx::query("UPDATE tasks SET worktree_path=? WHERE id=?")
+        .bind(&fixture.task.worktree_path)
+        .bind(fixture.task.id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let commit = prepare_committed(&fixture).await;
+    let task_worktree = task_worktree(&fixture);
+    task_worktree.merge_for_approval(&commit).unwrap();
+    task_worktree.cleanup_after_finalization().unwrap();
+    assert!(!legacy.exists());
+    assert_eq!(reconcile(&fixture, 2_000_000_004).await, 1);
+    assert_finished(&fixture).await;
+    cleanup(fixture);
+}
+
+#[tokio::test]
 async fn recovery_merges_saved_base_when_current_branch_already_contains_task_commit() {
     let fixture = fixture("head-only").await;
     let commit = prepare_committed(&fixture).await;

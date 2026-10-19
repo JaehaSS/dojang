@@ -6,7 +6,7 @@ import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
 
 // Real composer, queue owner, per-session drafts and styles; deterministic Runner transport.
-const directory = path.resolve('.praxis/verification/conversation-queue');
+const directory = path.resolve('.dojang/verification/conversation-queue');
 const fixture = path.join(directory, 'fixture');
 await mkdir(fixture, { recursive: true });
 await writeFile(path.join(fixture, 'index.html'), '<div id="root"></div><script type="module" src="./main.tsx"></script>');

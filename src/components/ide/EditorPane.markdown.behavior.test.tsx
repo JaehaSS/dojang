@@ -122,6 +122,20 @@ afterEach(() => {
 });
 
 describe("마크다운 프리뷰", () => {
+  it("loads a referenced image from the document directory without opening another tab", async () => {
+    const readFile = vi.fn(async () => ({
+      kind: "image" as const,
+      content: "data:image/png;base64,cG5n",
+      mtime: 1,
+    }));
+    const file = { ...FILE, content: "![도표](../assets/chart.png)" };
+    await render({ files: [file], readFile, rootPath: "/workspace/project" });
+
+    expect(readFile).toHaveBeenCalledWith("assets/chart.png");
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,cG5n");
+    expect(container.querySelector("img")?.alt).toBe("도표");
+  });
+
   it("renders an SSH Markdown document and keeps its source read-only", async () => {
     const file: OpenFile = { ...FILE, path: "/srv/reports/note.md", key: fileTabKey("/srv/reports/note.md"), readOnly: true };
     await render({ files: [file], activeKey: file.key, retainedPaths: [file.path] });

@@ -1,15 +1,19 @@
 import { useCallback, useRef, useState } from "react";
+import { copyText } from "../../lib/clipboard";
 import type { HostId } from "../../lib/transport";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   lspGoto,
   lspStatus,
+  lspSemanticTokens,
   openLocalFile,
   resolveAbsPath,
   type LspGotoKind,
   type LspStatusInfo,
   type LspTarget,
+  type SemanticTokens,
 } from "../../lib/ipc";
+import { projectEditorLspGoto, projectEditorLspStatus, projectEditorLspSemanticTokens } from "../../lib/project-editor-ipc";
 import { getTransport } from "../../lib/transport";
 
 /** ⌘B 착지 지점 — EditorPane이 대상 탭을 띄운 뒤 소비하고 null로 되돌린다. */
@@ -23,6 +27,7 @@ export type OpenTargetOutcome = "opened" | "external" | "failed";
 
 interface Options {
   taskId: number | null;
+  projectRoot?: string | null;
   /** 작업이 사는 호스트 — 언어 서버는 로컬에서만 뜬다. */
   host: HostId;
   onError: (message: string) => void;
@@ -54,6 +59,7 @@ export interface EditorActions {
     column: number;
   }) => Promise<LspTarget[]>;
   askLspStatus: (path: string) => Promise<LspStatusInfo>;
+  askSemanticTokens: (path: string, text: string) => Promise<SemanticTokens | null>;
   openLspTarget: (target: LspTarget) => Promise<OpenTargetOutcome>;
 }
 
@@ -64,13 +70,13 @@ export interface EditorActions {
  * 거의 갖지 않고 IPC로 나가며, 원격 연결에서는 통째로 비활성이 된다. 메인 창과 에디터 창이
  * 같은 것을 쓰도록 여기 모아 둔다.
  */
-export function useEditorActions({ taskId, host, onError, openFile }: Options): EditorActions {
+export function useEditorActions({ taskId, projectRoot = null, host, onError, openFile }: Options): EditorActions {
   const [revealTarget, setRevealTarget] = useState<RevealTarget | null>(null);
 
   const taskIdRef = useRef(taskId);
   taskIdRef.current = taskId;
-  const scopeRef = useRef({ host, taskId });
-  scopeRef.current = { host, taskId };
+  const scopeRef = useRef({ host, taskId, projectRoot });
+  scopeRef.current = { host, taskId, projectRoot };
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
   const openFileRef = useRef(openFile);
@@ -105,7 +111,7 @@ export function useEditorActions({ taskId, host, onError, openFile }: Options): 
     const id = taskIdRef.current;
     if (id == null) return;
     try {
-      await navigator.clipboard.writeText(await resolveAbsPath(id, path));
+      await copyText(await resolveAbsPath(id, path));
     } catch (e) {
       onErrorRef.current(String(e));
     }
@@ -120,9 +126,11 @@ export function useEditorActions({ taskId, host, onError, openFile }: Options): 
       line: number;
       column: number;
     }) => {
-      const id = taskIdRef.current;
-      if (id == null) return [];
-      return lspGoto(id, req.path, req.text, req.line, req.column, req.kind);
+      const scope = scopeRef.current;
+      if (getTransport(scope.host).kind !== "local") return [];
+      if (scope.projectRoot) return projectEditorLspGoto(scope.projectRoot, req.path, req.text, req.line, req.column, req.kind);
+      if (scope.taskId == null) return [];
+      return lspGoto(scope.taskId, req.path, req.text, req.line, req.column, req.kind);
     },
     [],
   );
@@ -130,9 +138,19 @@ export function useEditorActions({ taskId, host, onError, openFile }: Options): 
   /** 이 파일에서 정의 이동이 되는지 — 에디터의 상태 배지가 파일을 바꿀 때마다 물어본다.
    *  참조가 매 렌더 바뀌면 그 조회가 렌더마다 다시 도므로 고정해 둔다. */
   const askLspStatus = useCallback(async (path: string) => {
-    const id = taskIdRef.current;
-    if (id == null) return { available: false, server: null, detail: null };
-    return lspStatus(id, path);
+    const scope = scopeRef.current;
+    if (getTransport(scope.host).kind !== "local") return { available: false, server: null, detail: null };
+    if (scope.projectRoot) return projectEditorLspStatus(scope.projectRoot, path);
+    if (scope.taskId == null) return { available: false, server: null, detail: null };
+    return lspStatus(scope.taskId, path);
+  }, []);
+
+  const askSemanticTokens = useCallback(async (path: string, text: string) => {
+    const scope = scopeRef.current;
+    if (getTransport(scope.host).kind !== "local") return null;
+    if (scope.projectRoot) return projectEditorLspSemanticTokens(scope.projectRoot, path, text);
+    if (scope.taskId == null) return null;
+    return lspSemanticTokens(scope.taskId, path, text);
   }, []);
 
   const revealAt = useCallback(
@@ -149,6 +167,10 @@ export function useEditorActions({ taskId, host, onError, openFile }: Options): 
   const openLspTarget = useCallback(async (target: LspTarget) => {
     const scope = scopeRef.current;
     if (target.external || target.path == null) {
+      if (scope.projectRoot) {
+        onErrorRef.current(`프로젝트 밖의 코드 위치입니다: ${target.abs_path}`);
+        return "failed";
+      }
       if (scope.taskId == null) return "failed";
       if (getTransport(scope.host).kind !== "local") {
         onErrorRef.current("원격 작업에서는 열 수 없는 위치입니다");
@@ -165,7 +187,8 @@ export function useEditorActions({ taskId, host, onError, openFile }: Options): 
     if (!(await openFileRef.current(target.path))) return "failed";
     if (
       scope.host !== scopeRef.current.host ||
-      scope.taskId !== scopeRef.current.taskId
+      scope.taskId !== scopeRef.current.taskId ||
+      scope.projectRoot !== scopeRef.current.projectRoot
     )
       return "failed";
     return "opened";
@@ -180,6 +203,7 @@ export function useEditorActions({ taskId, host, onError, openFile }: Options): 
     copyAbsPath,
     gotoSymbol,
     askLspStatus,
+    askSemanticTokens,
     openLspTarget,
   };
 }

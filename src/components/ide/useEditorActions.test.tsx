@@ -9,6 +9,12 @@ const mocks = vi.hoisted(() => ({
   openPath: vi.fn(async () => { throw permissionError; }),
   openLocalFile: vi.fn(async () => undefined),
   resolveAbsPath: vi.fn(async (_id: number, path: string) => `/w/${path}`),
+  lspGoto: vi.fn(async () => []),
+  lspStatus: vi.fn(async () => ({ available: true, server: "jdtls", detail: null, phase: "idle" })),
+  semanticTokens: vi.fn(async () => null),
+  projectGoto: vi.fn(async () => []),
+  projectStatus: vi.fn(async () => ({ available: true, server: "jdtls", detail: null, phase: "analyzing" })),
+  projectTokens: vi.fn(async () => null),
 }));
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
@@ -16,10 +22,16 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
 }));
 vi.mock("../../lib/ipc", () => ({
-  lspGoto: vi.fn(),
-  lspStatus: vi.fn(),
+  lspGoto: mocks.lspGoto,
+  lspStatus: mocks.lspStatus,
+  lspSemanticTokens: mocks.semanticTokens,
   openLocalFile: mocks.openLocalFile,
   resolveAbsPath: mocks.resolveAbsPath,
+}));
+vi.mock("../../lib/project-editor-ipc", () => ({
+  projectEditorLspGoto: mocks.projectGoto,
+  projectEditorLspStatus: mocks.projectStatus,
+  projectEditorLspSemanticTokens: mocks.projectTokens,
 }));
 vi.mock("../../lib/transport", () => ({
   LOCAL_HOST: "local",
@@ -40,15 +52,17 @@ let root: Root | null = null;
 function Harness({
   host,
   taskId = 42,
+  projectRoot = null,
   onError,
   openFile = vi.fn(async () => true),
 }: {
   host: string;
   taskId?: number | null;
+  projectRoot?: string | null;
   onError: (message: string) => void;
   openFile?: (path: string) => Promise<boolean>;
 }) {
-  api = useEditorActions({ taskId, host, onError, openFile });
+  api = useEditorActions({ taskId, projectRoot, host, onError, openFile });
   return null;
 }
 
@@ -81,6 +95,45 @@ afterEach(async () => {
 });
 
 describe("useEditorActions", () => {
+  const query = { kind: "references" as const, path: "src/FepClient.java", text: "class FepClient {}", line: 1, column: 7 };
+
+  it("프로젝트 에디터의 탐색·상태·강조는 작업 ID 없이 지정 루트로 조회한다", async () => {
+    await render({ host: "local", taskId: null, projectRoot: "/repo/mirae", onError: vi.fn() });
+    await api?.gotoSymbol(query);
+    await api?.askLspStatus(query.path);
+    await api?.askSemanticTokens(query.path, query.text);
+    expect(mocks.projectGoto).toHaveBeenCalledWith("/repo/mirae", query.path, query.text, 1, 7, "references");
+    expect(mocks.projectStatus).toHaveBeenCalledWith("/repo/mirae", query.path);
+    expect(mocks.projectTokens).toHaveBeenCalledWith("/repo/mirae", query.path, query.text);
+    expect(mocks.lspGoto).not.toHaveBeenCalled();
+  });
+
+  it("루트 전환 뒤 같은 콜백은 현재 프로젝트를 조회한다", async () => {
+    await render({ host: "local", taskId: null, projectRoot: "/repo/one", onError: vi.fn() });
+    const goto = api!.gotoSymbol;
+    await render({ host: "local", taskId: null, projectRoot: "/repo/two", onError: vi.fn() });
+    await goto(query);
+    expect(mocks.projectGoto).toHaveBeenCalledWith("/repo/two", query.path, query.text, 1, 7, "references");
+  });
+
+  it("원격 작업에서는 로컬 분석 서버를 시작하지 않는다", async () => {
+    await render({ host: "remote", onError: vi.fn() });
+    await expect(api?.gotoSymbol(query)).resolves.toEqual([]);
+    await expect(api?.askSemanticTokens(query.path, query.text)).resolves.toBeNull();
+    expect((await api?.askLspStatus(query.path))?.available).toBe(false);
+    expect(mocks.lspGoto).not.toHaveBeenCalled();
+    expect(mocks.semanticTokens).not.toHaveBeenCalled();
+  });
+
+  it("탭 열기 중 프로젝트가 바뀌면 이전 이동을 폐기한다", async () => {
+    let finish!: (opened: boolean) => void;
+    const openFile = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+    await render({ host: "local", taskId: null, projectRoot: "/repo/one", onError: vi.fn(), openFile });
+    const pending = api?.openLspTarget({ path: query.path, abs_path: `/repo/one/${query.path}`, line: 1, column: 1, external: false });
+    await render({ host: "local", taskId: null, projectRoot: "/repo/two", onError: vi.fn(), openFile });
+    finish(true);
+    await expect(pending).resolves.toBe("failed");
+  });
   it("로컬 한글·공백 문서는 opener 플러그인 대신 코어 IPC로 연다", async () => {
     const onError = vi.fn();
     await render({ host: "local", onError });

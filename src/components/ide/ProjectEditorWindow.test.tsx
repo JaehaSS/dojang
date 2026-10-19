@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
 vi.mock("../../lib/project-editor-ipc", () => ({ projectEditorInfo: mocks.info, projectEditorTree: vi.fn(), projectEditorRead: vi.fn(), projectEditorWrite: vi.fn(), projectEditorResolvePath: vi.fn(), projectEditorOpenPath: vi.fn() }));
 vi.mock("../../lib/ipc", () => ({ fontSettingsGet: vi.fn(async () => ({ ui_family: "system", code_family: "mono", ui_size: 13, code_size: 13 })), editorSettingsGet: vi.fn(async () => ({ tree_font_size: 13, minimap: true, word_wrap: false, tab_size: 2 })) }));
 vi.mock("./useWorkspaceFiles", () => ({ useWorkspaceFiles: () => ({ tree: [], openFiles: [], activeKey: null, activeFile: null, refreshTree: mocks.refreshTree, openFile: vi.fn(), pinTab: vi.fn(), setActiveKey: vi.fn(), closeTab: vi.fn(), changeFile: vi.fn(), saveFile: vi.fn(), reloadFile: vi.fn(), flushDirty: mocks.flushDirty }) }));
-vi.mock("./EditorSplitView", () => ({ EditorSplitView: () => <div data-editor-split /> }));
+vi.mock("./EditorSplitView", () => ({ EditorSplitView: (props: { onGoto?: unknown; onSemanticTokens?: unknown; lspScopeKey?: string }) => <div data-editor-split data-lsp={String(!!props.onGoto)} data-semantic={String(!!props.onSemanticTokens)} data-scope={props.lspScopeKey} /> }));
 vi.mock("./FileTree", () => ({ FileTree: () => <div data-file-tree /> }));
 vi.mock("./icons", () => ({ Icon: () => null }));
 vi.mock("./ProjectTerminal", () => ({ ProjectTerminal: () => <div />, restartProjectShell: vi.fn() }));
@@ -39,6 +39,9 @@ describe("ProjectEditorWindow", () => {
     expect(mocks.refreshTree).toHaveBeenCalledOnce();
     expect(host.textContent).toContain("/repo");
     expect(host.querySelector("[data-editor-split]")).not.toBeNull();
+    expect(host.querySelector("[data-editor-split]")?.getAttribute("data-lsp")).toBe("true");
+    expect(host.querySelector("[data-editor-split]")?.getAttribute("data-semantic")).toBe("true");
+    expect(host.querySelector("[data-editor-split]")?.getAttribute("data-scope")).toBe("project:/repo");
   });
 
   it("toggles the project terminal from its header", async () => {

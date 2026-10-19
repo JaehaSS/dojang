@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import {
+  appActivity,
   insightCards,
   insightsCompute,
   lessonThemes,
   taskPatterns,
+  type AppActivity,
   type Insights,
   type RepoLessons,
   type SignalCard,
@@ -17,6 +19,7 @@ import { useExperimentalFeatures } from "../../lib/experimental-features";
 import { cacheReadRate } from "./insights/cache";
 import { CacheObservability } from "./insights/CacheObservability";
 import { AgentSkillPanel } from "./insights/AgentSkillPanel";
+import { AppActivityPanel } from "./insights/AppActivityPanel";
 import { AreaChart } from "./insights/AreaChart";
 import { DiscoveryCards } from "./insights/DiscoveryCards";
 import { Heatmap } from "./insights/Heatmap";
@@ -54,6 +57,7 @@ const RANGES: { v: InsightsRange; label: string }[] = [
 const SECTIONS = [
   { id: "discovery", label: "발견" },
   { id: "lessons", label: "교훈 주제" },
+  { id: "activity", label: "사용 시간" },
   { id: "evidence", label: "근거 자료" },
 ];
 
@@ -84,6 +88,8 @@ export function InsightsView({
   const [patterns, setPatterns] = useState<TaskPatterns | null>(null);
   const [cards, setCards] = useState<SignalCard[]>([]);
   const [lessons, setLessons] = useState<RepoLessons[]>([]);
+  const [activity, setActivity] = useState<AppActivity | null>(null);
+  const [activityFailed, setActivityFailed] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [active, setActive] = useState(SECTIONS[0].id);
   // 근거 자료 — 기본 접힘(설계 §4). 발견·교훈 주제가 먼저 읽히게 두고, 다시 세고 싶을 때만 편다.
@@ -143,6 +149,19 @@ export function InsightsView({
     lessonThemes(range, -new Date().getTimezoneOffset() * 60)
       .then((r) => alive && setLessons(r))
       .catch(() => alive && setLessons([]));
+    return () => {
+      alive = false;
+    };
+  }, [range]);
+
+  // 앱 사용 시간 — 앱 자체가 남긴 기록이라 트랜스크립트·작업 DB 집계와 독립이다.
+  useEffect(() => {
+    let alive = true;
+    setActivity(null);
+    setActivityFailed(false);
+    appActivity(range)
+      .then((a) => alive && setActivity(a))
+      .catch(() => alive && setActivityFailed(true));
     return () => {
       alive = false;
     };
@@ -262,6 +281,24 @@ export function InsightsView({
         <div id="lessons" className="scroll-mt-20">
           <LessonThemes repos={lessons} />
         </div>
+
+        {/* ── 사용 시간 ────────────────────────── */}
+        <section className="pt-12">
+          <SectionHeader
+            id="activity"
+            title="사용 시간"
+            hint={
+              activity?.since != null
+                ? `${new Date(activity.since * 1000).toLocaleDateString()}부터 기록`
+                : undefined
+            }
+          />
+          {activityFailed ? (
+            <div className="text-text-muted text-sm">사용 시간을 불러오지 못했습니다.</div>
+          ) : (
+            <AppActivityPanel data={activity} />
+          )}
+        </section>
 
         {err && <div className="text-status-failed text-sm mt-6 font-code">{err}</div>}
 

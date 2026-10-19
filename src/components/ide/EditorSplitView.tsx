@@ -1,3 +1,4 @@
+import { copyText } from "../../lib/clipboard";
 import {
   Fragment,
   useCallback,
@@ -52,6 +53,7 @@ import {
 import { TabContextMenu, type TabMenuAction } from "./TabContextMenu";
 import { fileTabKey, pathFromTabKey, type TabKey } from "../../lib/tab-key";
 import { fsRead, type LspTarget } from "../../lib/ipc";
+import { projectEditorRead } from "../../lib/project-editor-ipc";
 import type { HostId } from "../../lib/transport";
 import { ReferencesPanel } from "./ReferencesPanel";
 import { useEditorNavigation } from "./useEditorNavigation";
@@ -71,6 +73,7 @@ type PassThroughProps = Omit<
   | "onTabMenu"
   | "onLinkMenu"
   | "onOpenLink"
+  | "htmlAssetRoot"
 >;
 
 export interface EditorSplitViewProps extends PassThroughProps {
@@ -234,16 +237,25 @@ export function EditorSplitView({
     setActiveTool("references");
   }, []);
   const readReferencePreview = useCallback(async (target: LspTarget) => {
-    if (target.external || target.path == null || pane.taskId == null) return null;
+    if (target.external || target.path == null) return null;
     const open = files.find((file) => file.path === target.path && file.kind === "text");
     if (open) return open.content;
-    const file = await fsRead({ host, id: pane.taskId }, target.path);
+    const file = pane.taskId != null
+      ? await fsRead({ host, id: pane.taskId }, target.path)
+      : rootPath ? await projectEditorRead(target.path, rootPath) : null;
+    if (!file) return null;
     return file.kind === "text" ? file.content : null;
-  }, [files, host, pane.taskId]);
+  }, [files, host, pane.taskId, rootPath]);
+  const readHtmlAsset = useCallback(async (path: string) => {
+    if (pane.readHtmlAsset) return pane.readHtmlAsset(path);
+    if (pane.taskId == null) throw new Error("HTML 리소스를 읽을 워크스페이스가 없습니다");
+    return fsRead({ host, id: pane.taskId }, path);
+  }, [pane.readHtmlAsset, pane.taskId, host, rootPath]);
+  const navigationScope = `${host}:${pane.taskId}:${rootPath ?? ""}:${windowId}`;
   const sourceVersionsRef = useRef(new Map<string, number>());
-  const sourceVersion = useCallback((path: string) => sourceVersionsRef.current.get(`${host}:${pane.taskId}:${path}`) ?? 0, [host, pane.taskId]);
+  const sourceVersion = useCallback((path: string) => sourceVersionsRef.current.get(`${navigationScope}:${path}`) ?? 0, [navigationScope]);
   const navigation = useEditorNavigation({
-    identity: pane.taskId == null ? null : { host, taskId: pane.taskId, windowId },
+    identity: pane.taskId == null && !rootPath ? null : { host, taskId: pane.taskId, windowId, workspaceKey: rootPath ?? undefined },
     openTarget: async (target) => pane.onOpenTarget ? pane.onOpenTarget(target) : "failed",
     onError: onNavigationError,
   });
@@ -252,16 +264,16 @@ export function EditorSplitView({
     setDocumentLinkMenu(null);
     setReferences(null);
     setActiveTool(null);
-  }, [host, pane.taskId, windowId]);
+  }, [navigationScope]);
   useEffect(() => {
     if (sourceChangeRef == null) return;
     sourceChangeRef.current = (path) => {
-      const key = `${host}:${pane.taskId}:${path}`;
+      const key = `${navigationScope}:${path}`;
       sourceVersionsRef.current.set(key, sourceVersion(path) + 1);
       setReferences((current) => current?.sourcePath === path ? { ...current, stale: true } : current);
     };
     return () => { sourceChangeRef.current = () => undefined; };
-  }, [host, pane.taskId, sourceChangeRef, sourceVersion]);
+  }, [navigationScope, sourceChangeRef, sourceVersion]);
   const closeReferences = useCallback(() => {
     setActiveTool(null);
     hostRef.current?.querySelector<HTMLElement>('[data-focused="true"] .monaco-editor textarea')?.focus();
@@ -350,7 +362,7 @@ export function EditorSplitView({
 
   useEffect(() => {
     pendingPlacements.current.clear();
-  }, [host, pane.taskId, windowId]);
+  }, [navigationScope]);
 
   useEffect(() => {
     setDocumentLinkMenu((current) => {
@@ -411,7 +423,7 @@ export function EditorSplitView({
 
   /** 클립보드는 실패해도 조용히 넘어간다 — 권한이 없거나 창이 포커스를 잃은 사이의 거부는
    *  사용자가 손쓸 것이 없고, 오류 배너를 띄우면 정작 복사된 경우와 구분이 안 된다. */
-  const copy = (text: string) => void navigator.clipboard?.writeText(text).catch(() => undefined);
+  const copy = (text: string) => void copyText(text).catch(() => undefined);
 
   const openDocumentLinkMenu = useCallback(
     (groupId: string, sourceKey: TabKey, sourcePath: string, link: string, at: { x: number; y: number }) => {
@@ -917,6 +929,9 @@ export function EditorSplitView({
           >
             <EditorPane
               {...pane}
+              rootPath={rootPath}
+              htmlAssetRoot={rootPath}
+              readHtmlAsset={pane.readHtmlAsset || pane.taskId != null ? readHtmlAsset : undefined}
               files={group.keys.flatMap((k) => {
                 const file = byKey.get(k);
                 return file == null ? [] : [file];
@@ -951,7 +966,7 @@ export function EditorSplitView({
                 showReferences(targets, sourcePath, request, { ...origin, groupId: group.id })
               }
               sourceVersion={sourceVersion}
-              navigationScope={`${host}:${pane.taskId}:${windowId}`}
+              navigationScope={navigationScope}
               onNavigateTarget={(target, origin) => void navigation.navigate(target, { ...origin, groupId: group.id })}
               reveal={navigation.reveal == null ? pane.reveal : group.id === navigationGroupId ? navigation.reveal : null}
               onRevealed={(ack) => {

@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearConversationScrollMemory } from "./conversationScroll";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(),
@@ -12,7 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 
 import { ConversationView } from "./ConversationView";
 import { DEFAULT_TRANSLATE_SETTINGS, resetTranslateStateForTest } from "../../lib/translate";
-import { resetVocabStateForTest } from "../../lib/vocab";
+import { resetExpressionStateForTest } from "../../lib/expressions";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -32,8 +33,6 @@ function answer(command: string, args?: Record<string, unknown>): Promise<unknow
     if (direction === "en_to_ko_blocks") return Promise.resolve(JSON.stringify((JSON.parse(text) as string[]).map((b) => `번역: ${b}`)));
     return Promise.resolve(`번역: ${text}`);
   }
-  if (command === "vocab_save") return Promise.resolve({ id: 1 });
-  if (command === "vocab_mark_known") return Promise.resolve(null);
   return Promise.reject(new Error(command));
 }
 
@@ -54,7 +53,7 @@ const directions = () =>
   mocks.invoke.mock.calls.filter(([c]) => c === "translate_text").map(([, a]) => (a as { direction: string }).direction);
 
 beforeEach(() => {
-  resetVocabStateForTest();
+  resetExpressionStateForTest();
   mocks.invoke.mockImplementation(answer);
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -62,6 +61,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  clearConversationScrollMemory();
   await act(async () => root?.unmount());
   container?.remove();
   root = null;
@@ -70,6 +70,14 @@ afterEach(async () => {
 });
 
 describe("답변 번역의 공부할 표현", () => {
+  it("본문과 표현 목록은 브라우저 기본 노란 배경 없이 표시한다", async () => {
+    await renderReply();
+    expect(marks()).toHaveLength(4);
+    for (const mark of marks()) {
+      expect(getComputedStyle(mark).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+    }
+  });
+
   it("번역과 나란히 표현을 불러 원문에 밑줄을 긋되 코드 안은 긋지 않는다", async () => {
     await renderReply();
     expect(directions().sort()).toEqual(["en_expressions", "en_to_ko_blocks"]);
@@ -86,29 +94,15 @@ describe("답변 번역의 공부할 표현", () => {
     expect(list.textContent).toContain("carry forward");
   });
 
-  it("올리면 뜻 카드가 뜨고, 저장하면 예문과 함께 단어장에 들어간다", async () => {
+  it("올리면 뜻과 뉘앙스 카드가 뜨고, 카드에는 닫기 말고 다른 동작이 없다", async () => {
     await renderReply();
     const mark = inlineMarks()[0];
     await act(async () => mark.parentElement!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
     const card = container!.querySelector('[role="dialog"][aria-label="rule out 뜻"]')!;
     expect(card.textContent).toContain("배제하다");
     expect(card.textContent).toContain("가능성을 지울 때 쓴다.");
-
-    const save = [...card.querySelectorAll("button")].find((b) => b.textContent === "단어장에 저장")!;
-    await act(async () => save.click());
-    expect(mocks.invoke).toHaveBeenCalledWith("vocab_save", {
-      entry: { phrase: "rule out", meaning: "배제하다", note: "가능성을 지울 때 쓴다.", example: "We should rule out the cache first." },
-    });
-    expect(card.textContent).toContain("단어장에 저장됨");
-  });
-
-  it("알아요를 누르면 그 표현의 밑줄과 목록 칩이 사라진다", async () => {
-    await renderReply();
-    await act(async () => inlineMarks()[0].click());
-    const known = [...container!.querySelectorAll("button")].find((b) => b.textContent === "알아요")!;
-    await act(async () => known.click());
-    expect(mocks.invoke).toHaveBeenCalledWith("vocab_mark_known", { phrase: "rule out", meaning: "배제하다" });
-    expect(marks().map((m) => m.textContent)).toEqual(["carry forward", "carry forward"]);
+    // 단어장(저장·알아요)은 2026-10-06에 지웠다.
+    expect([...card.querySelectorAll("button")].map((b) => b.getAttribute("aria-label"))).toEqual(["카드 닫기"]);
   });
 
   it("설정에서 끄면 표현을 부르지 않는다", async () => {

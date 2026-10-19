@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { copyText } from "../../lib/clipboard";
 import qrcode from "qrcode-generator";
 import type { MobilePairing, MobileSession } from "../../lib/ipc";
 import type { RunnerTransport } from "../../lib/transport/runner";
@@ -272,7 +273,7 @@ export function MobilePairingCard({ transport }: Props) {
             </div>
             <button
               className="text-xs text-text-muted hover:text-text"
-              onClick={() => void navigator.clipboard?.writeText(pairing.code)}
+              onClick={() => void copyText(pairing.code).catch(() => undefined)}
             >
               코드 복사
             </button>

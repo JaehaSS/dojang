@@ -21,6 +21,41 @@ pub async fn project_editor_open<R: Runtime>(
     open_project(&app, &state, root, None).await
 }
 
+/// The main window may prepare a root before the shared editor finishes
+/// flushing the previous project. Preparing never creates or binds a window.
+#[tauri::command]
+pub fn editor_project_prepare<R: Runtime>(
+    state: State<'_, ProjectEditorState>,
+    window: WebviewWindow<R>,
+    root: String,
+) -> Result<ProjectEditorInfo, String> {
+    if window.label() != "main" {
+        return Err("공유 에디터 프로젝트는 메인 창에서만 준비할 수 있습니다".into());
+    }
+    let root = canonical_root(&root)?;
+    state.prepare_shared_root(root.clone());
+    Ok(ProjectEditorInfo {
+        root: display_root(&root),
+        label: super::SHARED_EDITOR_LABEL.into(),
+        launch: false,
+    })
+}
+
+/// The shared editor owns activation after it has flushed its frontend state.
+/// `None` clears its project while the window changes into a task session.
+#[tauri::command]
+pub fn editor_project_activate<R: Runtime>(
+    state: State<'_, ProjectEditorState>,
+    window: WebviewWindow<R>,
+    root: Option<String>,
+) -> Result<(), String> {
+    if window.label() != super::SHARED_EDITOR_LABEL {
+        return Err("공유 에디터 창에서만 프로젝트를 활성화할 수 있습니다".into());
+    }
+    state.activate_shared_root(root.as_deref())?;
+    Ok(())
+}
+
 /// 창고 정리 세션처럼 첫 셸을 특정 명령으로 띄워야 하는 호출자를 위한 진입.
 pub async fn open_with_launch<R: Runtime>(
     app: &AppHandle<R>,
@@ -136,8 +171,9 @@ pub fn project_editor_info<R: Runtime>(
 pub async fn project_editor_tree<R: Runtime>(
     state: State<'_, ProjectEditorState>,
     window: WebviewWindow<R>,
+    root: Option<String>,
 ) -> Result<Vec<crate::fsapi::FsNode>, String> {
-    let root = state.root_for_window(window.label())?;
+    let root = state.root_for_request(window.label(), root.as_deref())?;
     tauri::async_runtime::spawn_blocking(move || crate::fsapi::build_tree(&root))
         .await
         .map_err(|error| error.to_string())?
@@ -149,8 +185,9 @@ pub fn project_editor_read<R: Runtime>(
     state: State<'_, ProjectEditorState>,
     window: WebviewWindow<R>,
     path: String,
+    root: Option<String>,
 ) -> Result<crate::fsapi::FileContent, String> {
-    let root = state.root_for_window(window.label())?;
+    let root = state.root_for_request(window.label(), root.as_deref())?;
     crate::fsapi::read_file(&root, &path).map_err(|error| error.to_string())
 }
 
@@ -161,8 +198,9 @@ pub fn project_editor_write<R: Runtime>(
     path: String,
     content: String,
     expected_content: String,
+    root: Option<String>,
 ) -> Result<i64, String> {
-    let root = state.root_for_window(window.label())?;
+    let root = state.root_for_request(window.label(), root.as_deref())?;
     let _guard = state.write_guard.lock().unwrap();
     write_if_current(&root, &path, &content, &expected_content)
 }
@@ -188,8 +226,9 @@ pub fn project_editor_resolve_path<R: Runtime>(
     state: State<'_, ProjectEditorState>,
     window: WebviewWindow<R>,
     path: String,
+    root: Option<String>,
 ) -> Result<String, String> {
-    let root = state.root_for_window(window.label())?;
+    let root = state.root_for_request(window.label(), root.as_deref())?;
     if path.is_empty() {
         return Ok(display_root(&root));
     }

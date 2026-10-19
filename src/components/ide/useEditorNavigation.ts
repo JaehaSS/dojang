@@ -11,8 +11,9 @@ import {
 
 export interface EditorNavigationIdentity {
   host: string;
-  taskId: number;
+  taskId: number | null;
   windowId: string;
+  workspaceKey?: string;
 }
 export type OpenTargetOutcome = "opened" | "external" | "failed";
 export interface NavigationReveal extends NavigationLocation {
@@ -57,7 +58,7 @@ export function useEditorNavigation({
   const identityKey =
     identity == null
       ? ""
-      : `${identity.host}:${identity.taskId}:${identity.windowId}`;
+      : `${identity.host}:${identity.taskId}:${identity.windowId}:${identity.workspaceKey ?? ""}`;
   const identityKeyRef = useRef(identityKey);
   if (identityKeyRef.current !== identityKey) {
     identityKeyRef.current = identityKey;
@@ -82,7 +83,7 @@ export function useEditorNavigation({
       epochRef.current += 1;
       clearPending();
     };
-  }, [identity?.host, identity?.taskId, identity?.windowId, clearPending]);
+  }, [identity?.host, identity?.taskId, identity?.windowId, identity?.workspaceKey, clearPending]);
 
   const revealAfterOpen = useCallback(
     (

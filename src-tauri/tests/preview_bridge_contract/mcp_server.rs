@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use praxis_lib::preview_bridge::mcp::{
-    router, Command, ControlTokens, DispatchError, Dispatcher, McpState, Tools,
+    router, Command, ControlTokens, DispatchError, Dispatcher, McpState, NoReview, ReviewBridge,
+    ReviewCommand, Tools,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -46,6 +47,7 @@ fn state(dispatcher: Arc<FakeDispatch>) -> (Arc<McpState>, ControlTokens) {
         instance: INSTANCE.to_string(),
         tokens: tokens.clone(),
         dispatcher,
+        review: Arc::new(NoReview),
         tools: Tools::phase_f(),
     });
     (state, tokens)
@@ -616,7 +618,7 @@ async fn disconnected_request_still_drains_before_lease_can_release(){
     let lease=praxis_lib::preview_bridge::mcp::PreviewMcpLease::issue(&tokens,42,praxis_lib::convo::Vendor::Codex,"http://127.0.0.1:1/mcp/test",&dir).unwrap();
     let token=lease.injection().env.iter().find(|(key,_)|key=="PRAXIS_PREVIEW_TOKEN").unwrap().1.clone();
     let dispatcher=Arc::new(DelayedDispatch{started:Default::default(),release:Default::default()});
-    let state=Arc::new(McpState{instance:INSTANCE.into(),tokens:tokens.clone(),dispatcher:dispatcher.clone(),tools:Tools::phase_f()});
+    let state=Arc::new(McpState{instance:INSTANCE.into(),tokens:tokens.clone(),dispatcher:dispatcher.clone(),review:Arc::new(NoReview),tools:Tools::phase_f()});
     let app=router(state.clone());let request=post(INSTANCE,Some(&token),&snapshot_call());
     let caller=tokio::spawn(async move{app.oneshot(request).await});
     tokio::time::timeout(std::time::Duration::from_secs(2),dispatcher.started.notified()).await.unwrap();
@@ -627,4 +629,97 @@ async fn disconnected_request_still_drains_before_lease_can_release(){
     dispatcher.release.notify_one();
     tokio::task::spawn_blocking(move||assert!(lease.revoke_and_drain(std::time::Duration::from_secs(2)))).await.unwrap();
     assert_eq!(tokens.active_for_task(42),0);let _=std::fs::remove_dir_all(dir);
+}
+
+/// 리뷰 툴은 디스패처(웹뷰)로 가지 않고 `ReviewBridge`로 간다. 작성자는 토큰 라벨이다 —
+/// 벤더 이름으로 발급된 토큰이면 그 이름, 라벨 없이 발급된 토큰이면 `agent`.
+#[derive(Default)]
+struct FakeReview {
+    calls: Mutex<Vec<(i64, String, ReviewCommand)>>,
+}
+
+#[async_trait::async_trait]
+impl ReviewBridge for FakeReview {
+    async fn run(&self, task_id: i64, author: &str, cmd: ReviewCommand) -> Result<String, String> {
+        self.calls.lock().unwrap().push((task_id, author.to_string(), cmd.clone()));
+        match cmd {
+            ReviewCommand::Navigate { .. } => Err("path_not_in_diff: x".into()),
+            _ => Ok("added ann-1".into()),
+        }
+    }
+}
+
+fn review_state(
+    review: Arc<FakeReview>,
+    dispatcher: Arc<FakeDispatch>,
+) -> (Arc<McpState>, ControlTokens) {
+    let tokens = ControlTokens::default();
+    let state = Arc::new(McpState {
+        instance: INSTANCE.to_string(),
+        tokens: tokens.clone(),
+        dispatcher,
+        review,
+        tools: Tools::phase_f().with_review(),
+    });
+    (state, tokens)
+}
+
+#[tokio::test]
+async fn review_tools_route_to_the_bridge_with_the_token_label_as_author() {
+    let review = Arc::new(FakeReview::default());
+    let dispatcher = Arc::new(FakeDispatch::default());
+    let (state, tokens) = review_state(review.clone(), dispatcher.clone());
+    let token = tokens.issue_labeled(42, "spawn-1", "claude").unwrap();
+    let add = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":"review_comment_add","arguments":{"path":"src/a.ts","line":10,"body":"nil check"}}});
+
+    let (status, _, body) = send(state.clone(), post(INSTANCE, Some(&token), &add)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"]["content"][0]["text"], "added ann-1");
+    assert_eq!(body["result"].get("isError"), None);
+    let calls = review.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!((calls[0].0, calls[0].1.as_str()), (42, "claude"));
+    assert!(matches!(&calls[0].2, ReviewCommand::CommentAdd { path, line: 10, .. } if path == "src/a.ts"));
+    assert!(dispatcher.calls.lock().unwrap().is_empty(), "리뷰 툴이 웹뷰 디스패처로 새면 안 된다");
+}
+
+#[tokio::test]
+async fn review_bridge_failure_is_a_tool_error_result_and_bad_arguments_are_protocol_errors() {
+    let review = Arc::new(FakeReview::default());
+    let (state, tokens) = review_state(review.clone(), Arc::new(FakeDispatch::default()));
+    let token = tokens.issue(42, "spawn-1").unwrap();
+    let navigate = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+        "name":"review_navigate","arguments":{"path":"src/none.ts"}}});
+    let bad = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+        "name":"review_comment_add","arguments":{"path":"src/a.ts","line":0,"body":"x"}}});
+
+    let (_, _, failed) = send(state.clone(), post(INSTANCE, Some(&token), &navigate)).await;
+    let (_, _, invalid) = send(state, post(INSTANCE, Some(&token), &bad)).await;
+
+    assert_eq!(failed["result"]["isError"], true);
+    assert_eq!(failed["result"]["content"][0]["text"], "path_not_in_diff: x");
+    assert_eq!(review.calls.lock().unwrap()[0].1, "agent");
+    assert_eq!(invalid["error"]["code"], -32000);
+    assert_eq!(invalid["error"]["message"], "invalid_argument: line");
+    assert_eq!(review.calls.lock().unwrap().len(), 1, "인자 검증 실패는 브리지에 닿지 않는다");
+}
+
+#[tokio::test]
+async fn tools_list_appends_the_three_review_tools_when_enabled() {
+    let (state, tokens) = review_state(Arc::new(FakeReview::default()), Arc::new(FakeDispatch::default()));
+    let token = tokens.issue(42, "spawn-1").unwrap();
+    let list = json!({"jsonrpc":"2.0","id":5,"method":"tools/list"});
+
+    let (_, _, body) = send(state, post(INSTANCE, Some(&token), &list)).await;
+
+    let names: Vec<_> = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names.len(), 10);
+    assert_eq!(&names[7..], ["review_comment_add", "review_comment_list", "review_navigate"]);
 }

@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { storeDiffMode, storedDiffMode } from "../../lib/diff-mode";
 import { useDiffSession } from "../DiffSessionContext";
+import { resolveNavigationHunk } from "../use-review-events";
 import { DiffModeToggle, type DiffMode } from "../DiffPresentation";
 import { DiffBody, SHORTCUT_HINT } from "../DiffViewerLayout";
 import { nextFileIndex, nextHunkIndex, useDiffKeyboard } from "../use-diff-keyboard";
 
-/** `SplitDiff`의 `min-w-[720px]`와 같은 값 — 이보다 좁으면 오른쪽 열이 잘린다(설계 DR-6). */
-const MIN_SPLIT_WIDTH = 720;
-const NARROW_REASON = "본문이 좁아 통합 보기로 고정됩니다 (720px 이상 필요)";
+/** `SplitDiff`의 `min-w-[600px]`와 같은 값 — 이보다 좁으면 오른쪽 열이 잘린다(설계 DR-6). */
+const MIN_SPLIT_WIDTH = 600;
+const NARROW_REASON = "본문이 좁아 통합 보기로 고정됩니다 (600px 이상 필요)";
 
 /** 잘림은 창 폭이 아니라 본문 폭의 함수다. 관측 대상이 본문 그 자체인 이유다. */
 function useNarrowBody(ref: RefObject<HTMLElement | null>): boolean {
@@ -44,8 +45,17 @@ export function DiffTab({
   onClose?: () => void;
   onOpenPath?: (path: string) => void;
 }) {
-  const { data, partial, actions, retain, toggleViewed, openDiff, setActiveDiffPath } =
-    useDiffSession();
+  const {
+    data,
+    partial,
+    actions,
+    retain,
+    toggleViewed,
+    openDiff,
+    setActiveDiffPath,
+    navigation,
+    consumeNavigation,
+  } = useDiffSession();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [stored, setStored] = useState<DiffMode>(storedDiffMode);
   const narrow = useNarrowBody(scrollRef);
@@ -78,6 +88,20 @@ export function DiffTab({
       after.scrollTop = ratio * (after.scrollHeight - after.clientHeight);
     });
   };
+
+  // 에이전트의 `review_navigate`. 목표 hunk의 헤더가 그려진 뒤에만 스크롤하고, 그 다음에
+  // 지운다 — 탭을 막 연 참이면 첫 렌더에는 hunk가 아직 없다. 다른 파일의 목표는 건드리지 않는다.
+  // id가 화면과 어긋나면 줄 번호로 되찾고, 이 파일의 hunk가 그려졌는데도 못 찾으면 버린다 —
+  // 남겨 두면 범위를 바꾸는 순간 묵은 목표로 튄다.
+  useEffect(() => {
+    if (!navigation || navigation.path !== path) return;
+    const hunkId = resolveNavigationHunk(navigation, fileHunks);
+    const header = [...(scrollRef.current?.querySelectorAll<HTMLElement>("[data-hunk-id]") ?? [])]
+      .find((node) => node.dataset.hunkId === hunkId);
+    if (header) header.scrollIntoView({ block: "start" });
+    else if (fileHunks.length === 0 && data.files === null) return;
+    consumeNavigation();
+  }, [navigation, path, fileHunks, data.files, consumeNavigation]);
 
   // 두 렌더러 모두 hunk 헤더에 data-hunk-id를 단다. 좌표 계산은 nextHunkIndex가 맡는다.
   const jumpHunk = (delta: number) => {

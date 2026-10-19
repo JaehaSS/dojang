@@ -1,4 +1,4 @@
-//! Direct-mode checkout ownership across async requests and Praxis processes.
+//! Direct-mode checkout ownership across async requests and Dojang processes.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -40,43 +40,66 @@ impl DirectCheckoutLocks {
 }
 
 struct DirectCheckoutFileLock {
-    _file: File,
+    _files: Vec<File>,
 }
 
 impl DirectCheckoutFileLock {
     fn acquire(repo: &Path) -> anyhow::Result<Option<Self>> {
-        let Some(path) = direct_checkout_lock_path(repo)? else {
+        let Some(paths) = direct_checkout_lock_paths(repo)? else {
             return Ok(None);
         };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
+        let mut files = Vec::new();
+        for path in paths {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
 
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .mode(0o600)
-                .open(path)?;
-            file.lock_exclusive()?;
-            Ok(Some(Self { _file: file }))
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(path)?;
+                file.lock_exclusive()?;
+                files.push(file);
+            }
+            #[cfg(not(unix))]
+            {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(path)?;
+                file.lock_exclusive()?;
+                files.push(file);
+            }
         }
-        #[cfg(not(unix))]
-        {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(path)?;
-            file.lock_exclusive()?;
-            Ok(Some(Self { _file: file }))
-        }
+        Ok(Some(Self { _files: files }))
     }
 }
 
-fn direct_checkout_lock_path(repo: &Path) -> anyhow::Result<Option<PathBuf>> {
+pub(super) fn branch_lock_paths(common_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut paths = vec![common_dir.join("dojang-direct-branch.lock")];
+    let legacy = common_dir.join("praxis-direct-branch.lock");
+    match std::fs::symlink_metadata(&legacy) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "기존 브랜치 잠금 파일이 올바르지 않습니다"
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // This stable compatibility lock lives in Git metadata, never in `.praxis`.
+    // Create it as well so an older process starting later observes the same lock.
+    paths.push(legacy);
+    Ok(paths)
+}
+
+fn direct_checkout_lock_paths(repo: &Path) -> anyhow::Result<Option<Vec<PathBuf>>> {
     if !super::is_git_repository(repo) {
         return Ok(None);
     }
@@ -87,5 +110,5 @@ fn direct_checkout_lock_path(repo: &Path) -> anyhow::Result<Option<PathBuf>> {
     } else {
         repo.join(common_dir)
     };
-    Ok(Some(common_dir.join("praxis-direct-branch.lock")))
+    Ok(Some(branch_lock_paths(&common_dir)?))
 }

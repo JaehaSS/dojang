@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LOCAL_HOST } from "../../lib/transport";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { copyText } from "../../lib/clipboard";
 import {
   EDITOR_ASK_EVENT,
   EDITOR_AUTOSAVED_EVENT,
@@ -14,11 +16,16 @@ import {
   EDITOR_REVERTED_EVENT,
   EDITOR_SESSION_EVENT,
   EDITOR_STATUS_EVENT,
+  PROJECT_EDITOR_CLOSED_EVENT,
+  isProjectWorkspace,
   type EditorRevealPayload,
   type EditorNotificationPayload,
   type EditorSessionPayload,
   type EditorStatus,
+  type EditorWorkspacePayload,
 } from "../../lib/editor-window-events";
+import { editorProjectActivate, projectEditorTree, projectEditorRead, projectEditorWrite, projectEditorResolvePath, projectEditorOpenPath } from "../../lib/project-editor-ipc";
+import { saveProjectTabs } from "../../lib/project-editor-tabs";
 import {
   editorWindowFilesSave,
   editorWindowGeometrySave,
@@ -42,8 +49,11 @@ import { useTheme } from "../../lib/use-theme";
 import { EditorSplitView } from "./EditorSplitView";
 import { FileTree } from "./FileTree";
 import { useEditorActions } from "./useEditorActions";
-import { useWorkspaceFiles } from "./useWorkspaceFiles";
-import { fileTabKey } from "../../lib/tab-key";
+import { useWorkspaceFiles, type WorkspaceFileSource } from "./useWorkspaceFiles";
+import { asTabKey, fileTabKey, isDiffKey, pathFromTabKey } from "../../lib/tab-key";
+import { DiffSessionScope } from "../DiffSessionContext";
+import { ChangesList } from "./ChangesList";
+import type { TreeLens } from "./useSessionPanels";
 import { useTreeFileOps } from "./useTreeFileOps";
 import { ContextMenuShell } from "./ContextMenuShell";
 import { FilePromptDialog } from "./FilePromptDialog";
@@ -54,6 +64,7 @@ import { onKeyDown as shiftDown, onKeyUp as shiftUp, type ShiftTapState } from "
 import { Icon } from "./icons";
 import { ReplDock } from "./ReplDock";
 import { pandasOpenSnippet } from "../../lib/repl-snippets";
+import { ProjectTerminal, restartProjectShell } from "./ProjectTerminal";
 
 const STATUS_LABEL: Record<EditorStatus, string> = {
   idle: "대기",
@@ -110,7 +121,14 @@ function StatusBar({
  * 직후에는 그릴 것이 없고, `editor://ready`로 준비를 알린 뒤 메인 창이 보내 주는 세션을 기다린다.
  */
 export function EditorWindow() {
-  const [session, setSession] = useState<EditorSessionPayload | null>(null);
+  const [workspace, setWorkspace] = useState<EditorWorkspacePayload | null>(null);
+  const workspaceRef = useRef<EditorWorkspacePayload | null>(null);
+  workspaceRef.current = workspace;
+  const project = workspace && isProjectWorkspace(workspace) ? workspace : null;
+  const session = workspace && !isProjectWorkspace(workspace) ? workspace : null;
+  const workspaceKey = project ? `project:${project.root}` : session ? `task:${session.host}:${session.task_id}` : null;
+  const [switching, setSwitching] = useState(false);
+  const [restoredProject, setRestoredProject] = useState<string | null>(null);
   const [status, setStatus] = useState<EditorStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -123,10 +141,18 @@ export function EditorWindow() {
   /** 트리를 접을 수 있게 둔다 — 이 창은 통째로 에디터라 폭이 곧 코드 폭이다.
    *  접힌 자리에는 다시 펼 손잡이만 남는다(메인 창은 상단 툴바의 폴더 칩이 그 역할). */
   const [treeOpen, setTreeOpen] = useState(true);
+  /** 트리 열 렌즈 — 파일 트리인가 변경 목록인가(ADR 2026-10-08 결정 1). 세션이 바뀌면 파일로 돌아간다. */
+  const [treeLens, setTreeLens] = useState<TreeLens>("files");
   /** 열린 Quick Open의 시작 범위. null이면 닫혀 있다 — Shift 더블탭은 전체, ⌥F는 파일로 연다. */
   const [quickOpen, setQuickOpen] = useState<EditorSearchTab | null>(null);
   /** 하단 Python 콘솔(IPython) 도크. ⌃`로 여닫는다 — 메인 창의 터미널 도크와 같은 손동작. */
   const [replDock, setReplDock] = useState(false);
+  const [terminalStarted, setTerminalStarted] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalExited, setTerminalExited] = useState(false);
+  const [shellSession, setShellSession] = useState<number | null>(null);
+  const [terminalRestart, setTerminalRestart] = useState(0);
+  const restartingRef = useRef(false);
   const theme = useTheme();
 
   // 알림은 잠깐 떴다 사라진다. 타이머를 ref로 잡아 두어야 연속 첨부에서 앞 타이머가
@@ -142,19 +168,37 @@ export function EditorWindow() {
   // 창은 작업 목록을 갖지 않는다 — 좌표는 메인 창이 세션 페이로드로 실어 보낸 것을 쓴다.
   const task = session ? { host: session.host, id: session.task_id } : null;
   const workspaceSourceChangeRef = useRef<(path: string) => void>(() => undefined);
+  const source = useMemo<WorkspaceFileSource | null>(() => project == null ? null : {
+    key: `project:${project.root}`,
+    tree: () => projectEditorTree(project.root),
+    read: (path) => projectEditorRead(path, project.root),
+    write: (path, content, expected) => projectEditorWrite(path, content, expected, project.root),
+  }, [project?.root]);
   const files = useWorkspaceFiles({
     task,
+    source,
     onError: setError,
     onSourceChange: (path) => workspaceSourceChangeRef.current(path),
   });
   const actions = useEditorActions({
     taskId: session?.task_id ?? null,
+    projectRoot: project?.root,
     host: task?.host ?? LOCAL_HOST,
     onError: setError,
     openFile: files.openFile,
   });
+  const openPathExternal = useCallback((path: string) => project
+    ? projectEditorOpenPath(path, project.root).catch((cause) => setError(String(cause)))
+    : actions.openPathExternal(path), [project?.root, actions.openPathExternal]);
+  const revealPathInFinder = useCallback((path: string) => project
+    ? projectEditorResolvePath(path, project.root).then(revealItemInDir).catch((cause) => setError(String(cause)))
+    : actions.revealPathInFinder(path), [project?.root, actions.revealPathInFinder]);
+  const copyAbsPath = useCallback((path: string) => project
+    ? projectEditorResolvePath(path, project.root).then(copyText).catch((cause) => setError(String(cause)))
+    : actions.copyAbsPath(path), [project?.root, actions.copyAbsPath]);
 
-  /** 활성 **파일 탭**의 실경로. diff 탭이 활성이면 `null`이다 — 저쪽 창이 열 수 없다(F-12). */
+  /** 활성 **파일 탭**의 실경로. diff 탭이 활성이면 `null`이다 — 트리 선택·프로젝트 탭 저장이 본다.
+   *  세션 저장·팝인 페이로드는 이것을 쓰지 않는다: 탭 키를 그대로 넘긴다(ADR 2026-10-08 결정 5). */
   const activeFilePath =
     files.activeFile != null && files.activeFile.kind !== "diff" ? files.activeFile.path : null;
 
@@ -173,8 +217,8 @@ export function EditorWindow() {
     activePath: activeFilePath,
     closeTabsForPath: files.closeTabsForPath,
     onError: setError,
-    onRevealPath: (path) => void actions.revealPathInFinder(path),
-    onCopyAbsPath: (path) => void actions.copyAbsPath(path),
+    onRevealPath: (path) => void revealPathInFinder(path),
+    onCopyAbsPath: (path) => void copyAbsPath(path),
   });
 
   /**
@@ -221,6 +265,13 @@ export function EditorWindow() {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
+
+  useEffect(() => {
+    setTerminalStarted(false);
+    setTerminalOpen(false);
+    setTerminalExited(false);
+    setShellSession(null);
+  }, [project?.root]);
 
   /** 고른 것을 이 창에서 연다. 코드 히트는 LSP 점프와 같은 착지 경로를 쓴다. */
   const openFromQuickOpen = (item: RankedQuickOpenItem) => {
@@ -295,6 +346,11 @@ export function EditorWindow() {
     const onKey = (e: KeyboardEvent) => {
       if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.code !== "Backquote") return;
       e.preventDefault();
+      if (workspaceRef.current && isProjectWorkspace(workspaceRef.current)) {
+        setTerminalStarted(true);
+        setTerminalOpen((open) => !open);
+        return;
+      }
       setReplDock((open) => {
         if (open) replOpenedRef.current = false;
         return !open;
@@ -346,16 +402,20 @@ export function EditorWindow() {
   const flushRef = useRef(files.flushDirty);
   flushRef.current = files.flushDirty;
   const sessionRequestRef = useRef(0);
+  const transitionRef = useRef(Promise.resolve());
+  const closingRef = useRef<Promise<boolean> | null>(null);
   // 리스너는 한 번만 등록하므로(재등록하면 이벤트를 놓친다) 그 안에서 쓰는 콜백은 ref로
   // 최신을 잡아 둔다 — `flushRef`와 같은 이유. `reloadFile`이 여기 있는 것도 그래서다:
   // 직접 캡처하면 첫 렌더(세션 없음 → taskId null) 버전에 묶여 영영 아무것도 하지 않는다.
   const liveRef = useRef({
     openFile: files.openFile,
+    openDiff: files.openDiff,
     reloadFile: files.reloadFile,
     revealAt: actions.revealAt,
   });
   liveRef.current = {
     openFile: files.openFile,
+    openDiff: files.openDiff,
     reloadFile: files.reloadFile,
     revealAt: actions.revealAt,
   };
@@ -371,6 +431,11 @@ export function EditorWindow() {
     const current = sessionRef.current;
     if (!current || current.task_id !== payload.task_id || current.host !== payload.host) return;
     revealClaimedRef.current = true;
+    // 변경 목록의 행이 보낸 링크 — diff 탭은 읽을 파일이 없으니 바로 만들고 끝낸다.
+    if (payload.kind === "diff") {
+      liveRef.current.openDiff(payload.path, { preview: true });
+      return;
+    }
     // 열지 못한 파일(에이전트가 지운 경로 등)에 착지 지점을 걸면 소비되지 않고 남아,
     // 나중에 같은 경로를 열 때 커서가 난데없이 뛴다.
     if (!(await liveRef.current.openFile(payload.path))) return;
@@ -380,7 +445,7 @@ export function EditorWindow() {
   }, []);
 
   /** 남은 dirty를 저장한다. 저장하지 못하면 false — 세션을 갈아타지도, 창을 닫지도 않는다. */
-  const flushBeforeLeaving = useCallback(async (taskId: number): Promise<boolean> => {
+  const flushBeforeLeaving = useCallback(async (taskId: number | null): Promise<boolean> => {
     const result = await flushRef.current();
     if (!result.ok) {
       void emit(EDITOR_AUTOSAVE_BLOCKED_EVENT, {
@@ -398,7 +463,7 @@ export function EditorWindow() {
       void getCurrentWindow().setFocus().catch(() => {});
       return false;
     }
-    if (result.entries.length > 0) {
+    if (taskId != null && result.entries.length > 0) {
       void emit(EDITOR_AUTOSAVED_EVENT, { task_id: taskId, entries: result.entries }).catch(
         () => {},
       );
@@ -407,28 +472,35 @@ export function EditorWindow() {
   }, []);
 
   useEffect(() => {
-    const unSession = listen<EditorSessionPayload>(EDITOR_SESSION_EVENT, ({ payload }) => {
+    const unSession = listen<EditorWorkspacePayload>(EDITOR_SESSION_EVENT, ({ payload }) => {
       const request = ++sessionRequestRef.current;
-      const current = sessionRef.current;
       if (
         pendingRevealRef.current &&
-        (pendingRevealRef.current.task_id !== payload.task_id || pendingRevealRef.current.host !== payload.host)
+        (isProjectWorkspace(payload) || pendingRevealRef.current.task_id !== payload.task_id || pendingRevealRef.current.host !== payload.host)
       ) pendingRevealRef.current = null;
-      // 알림도 함께 비운다 — "세션 #42에 첨부됨"이 #77 상태바에 남으면 목적지를 오인한다.
-      if (!current || (current.task_id === payload.task_id && current.host === payload.host)) {
-        setSession(payload);
-        setError(null);
-        setNotice(null);
-        return;
-      }
-      // 워크트리가 바뀌면 지금 열린 파일들은 갈 곳이 없다. 나가기 전에 비운다.
-      void (async () => {
-        if (await flushBeforeLeaving(current.task_id) && request === sessionRequestRef.current) {
-          setSession(payload);
+      // 저장과 루트 배정을 직렬화한다. 전환 도중 온 오래된 요청은 다음 루트를 덮지 않는다.
+      transitionRef.current = transitionRef.current.then(async () => {
+        if (request !== sessionRequestRef.current) return;
+        const current = workspaceRef.current;
+        const same = current && (isProjectWorkspace(current)
+          ? isProjectWorkspace(payload) && current.root === payload.root
+          : !isProjectWorkspace(payload) && current.task_id === payload.task_id && current.host === payload.host);
+        setSwitching(true);
+        try {
+          if (current && !same && !(await flushBeforeLeaving(isProjectWorkspace(current) ? null : current.task_id))) return;
+          if (request !== sessionRequestRef.current) return;
+          await editorProjectActivate(isProjectWorkspace(payload) ? payload.root : null);
+          if (request !== sessionRequestRef.current) return;
+          workspaceRef.current = payload;
+          setWorkspace(payload);
           setError(null);
           setNotice(null);
+        } catch (cause) {
+          setError(String(cause));
+        } finally {
+          if (request === sessionRequestRef.current) setSwitching(false);
         }
-      })();
+      });
     });
     const unStatus = listen<EditorStatus>(EDITOR_STATUS_EVENT, ({ payload }) => setStatus(payload));
     // 메인 창 대화에서 클릭한 파일 링크. 창이 나가 있는 동안 링크는 전부 이리로 온다.
@@ -461,24 +533,30 @@ export function EditorWindow() {
   // 세션이 바뀌면 트리를 다시 읽고, 메인 창이 열어 두었던 파일을 이어받는다.
   // 워크트리가 달라지므로 이전 목록은 의미가 없다.
   useEffect(() => {
-    if (!session) return;
+    if (!workspace) return;
     let cancelled = false;
+    setRestoredProject(null);
+    setTreeLens("files");
     revealClaimedRef.current = false;
     files.refreshTree();
     void (async () => {
-      for (const path of session.open_paths) {
+      // 목록은 탭 키다 — `diff:<path>`는 읽을 파일 없이 바로 만들고, 파일 탭은 읽어서 연다.
+      for (const raw of workspace.open_paths) {
         if (cancelled) return;
-        await files.openFile(path);
+        const key = asTabKey(raw);
+        if (isDiffKey(key)) files.openDiff(pathFromTabKey(key), { preview: true });
+        else await files.openFile(key);
         if (cancelled) return;
       }
-      if (cancelled || sessionRef.current?.task_id !== session.task_id || sessionRef.current.host !== session.host) return;
+      if (cancelled) return;
       // 복원은 느리다(파일마다 읽기). 그 사이 링크가 활성 탭을 가져갔으면 되돌리지 않는다 —
       // 되돌리면 링크로 연 파일이 배경 탭으로만 남아 클릭이 안 먹은 것처럼 보인다.
-      if (session.active_path && !revealClaimedRef.current)
-        files.setActiveKey(fileTabKey(session.active_path));
+      if (workspace.active_path && !revealClaimedRef.current)
+        files.setActiveKey(asTabKey(workspace.active_path));
+      if (isProjectWorkspace(workspace)) setRestoredProject(workspace.root);
       // 이 세션을 기다리던 링크가 있으면 이제 연다.
       const pending = pendingRevealRef.current;
-      if (pending && pending.task_id === session.task_id && pending.host === session.host) {
+      if (session && pending && pending.task_id === session.task_id && pending.host === session.host) {
         pendingRevealRef.current = null;
         await applyReveal(pending);
       }
@@ -487,53 +565,96 @@ export function EditorWindow() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.host, session?.task_id]);
+  }, [workspaceKey]);
 
   // 열린 목록을 변경 시마다 남긴다. editor://closed는 정상 닫기에서만 오므로,
   // 크래시·강제 종료에서 목록을 지키는 것은 이 저장뿐이다.
-  // diff 탭은 남기지 않는다 — 복원은 경로로 파일을 여는 것이라 diff를 되살릴 수 없다.
-  const openPaths = files.openFiles
-    .filter((f) => f.kind !== "diff")
-    .map((f) => f.path)
-    .join("\n");
+  // 탭 키를 남긴다 — diff 탭도 `diff:<path>`로 돌아온다. 프로젝트 탭 저장만 실경로다(diff 없음).
+  const openPaths = files.openFiles.map((f) => f.key).join("\n");
+  const activeTabKey = files.activeKey ?? null;
   useEffect(() => {
+    if (project) {
+      if (restoredProject === project.root) saveProjectTabs(project.root,
+        files.openFiles.filter((file) => file.kind !== "diff").map((file) => file.path), activeFilePath);
+      return;
+    }
     if (!session || session.host !== LOCAL_HOST) return;
     void editorWindowFilesSave(
       session.task_id,
       openPaths ? openPaths.split("\n") : [],
-      activeFilePath,
+      activeTabKey,
     ).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.host, session?.task_id, openPaths, activeFilePath]);
+  }, [workspaceKey, restoredProject, openPaths, activeFilePath, activeTabKey, files.openFiles]);
 
   // 창을 닫으면 파일 목록과 함께 메인 창으로 돌아간다. 실제로 닫지 않고 숨기므로
   // (메인 창이 editor_window_hide를 부른다) 다음 팝아웃이 즉시 뜬다.
-  const closeStateRef = useRef({ session, openFiles: files.openFiles, activePath: activeFilePath });
-  closeStateRef.current = { session, openFiles: files.openFiles, activePath: activeFilePath };
+  const closeStateRef = useRef({ workspace, session, terminalStarted, openFiles: files.openFiles, activeKey: activeTabKey });
+  closeStateRef.current = { workspace, session, terminalStarted, openFiles: files.openFiles, activeKey: activeTabKey };
   const requestPopIn = useCallback(async (notification?: EditorNotificationPayload): Promise<boolean> => {
-    const current = closeStateRef.current;
-    if (!current.session) return false;
-    if (!(await flushBeforeLeaving(current.session.task_id))) return false;
-    // 팝인하면 이 창의 콘솔을 볼 자리가 없다 — 프로세스도 함께 닫는다.
-    if (current.session.host === LOCAL_HOST) {
-      void replClose(current.session.task_id).catch(() => {});
-      replTaskRef.current = null;
-      replOpenedRef.current = false;
-      pendingRunRef.current = [];
-      setReplDock(false);
-    }
-    try {
-      await emit(EDITOR_CLOSED_EVENT, {
-        task_id: current.session.task_id,
-        host: current.session.host,
-        open_paths: current.openFiles.filter((file) => file.kind !== "diff").map((file) => file.path),
-        active_path: current.activePath,
-        ...(notification ? { notification } : {}),
-      });
-      return true;
-    } catch (reason) {
-      setError(`코드 창을 접지 못했습니다: ${String(reason)}`);
-      return false;
+    if (closingRef.current) return closingRef.current;
+    const request = ++sessionRequestRef.current;
+    const closing = transitionRef.current.then(async (): Promise<boolean> => {
+      if (request !== sessionRequestRef.current) return false;
+      setSwitching(true);
+      const current = closeStateRef.current;
+      if (!current.workspace) {
+        try {
+          await editorProjectActivate(null);
+          if (request !== sessionRequestRef.current) return false;
+          await emit(EDITOR_GONE_EVENT);
+          return true;
+        } catch (cause) { setError(String(cause)); return false; }
+      }
+      if (current.workspace && isProjectWorkspace(current.workspace)) {
+        if (!(await flushBeforeLeaving(null))) return false;
+        if (request !== sessionRequestRef.current) return false;
+        if (current.terminalStarted && !window.confirm("실행 중인 프로젝트 셸을 종료하고 창을 닫을까요?")) return false;
+        try {
+          await editorProjectActivate(null);
+          if (request !== sessionRequestRef.current) return false;
+          await emit(EDITOR_CLOSED_EVENT, { kind: "project", root: current.workspace.root });
+          void emit(PROJECT_EDITOR_CLOSED_EVENT, current.workspace.root).catch(() => {});
+          workspaceRef.current = null;
+          setWorkspace(null);
+          return true;
+        } catch (cause) {
+          setError(`코드 창을 접지 못했습니다: ${String(cause)}`);
+          return false;
+        }
+      }
+      if (!current.session) return false;
+      if (!(await flushBeforeLeaving(current.session.task_id))) return false;
+      if (request !== sessionRequestRef.current) return false;
+      // 팝인하면 이 창의 콘솔을 볼 자리가 없다 — 프로세스도 함께 닫는다.
+      if (current.session.host === LOCAL_HOST) {
+        void replClose(current.session.task_id).catch(() => {});
+        replTaskRef.current = null;
+        replOpenedRef.current = false;
+        pendingRunRef.current = [];
+        setReplDock(false);
+      }
+      try {
+        await emit(EDITOR_CLOSED_EVENT, {
+          task_id: current.session.task_id,
+          host: current.session.host,
+          // 탭 키 — 메인 창이 diff 탭까지 되살린다(ADR 2026-10-08 결정 5).
+          open_paths: current.openFiles.map((file) => file.key),
+          active_path: current.activeKey,
+          ...(notification ? { notification } : {}),
+        });
+        return true;
+      } catch (reason) {
+        setError(`코드 창을 접지 못했습니다: ${String(reason)}`);
+        return false;
+      }
+    });
+    closingRef.current = closing;
+    transitionRef.current = closing.then(() => {});
+    try { return await closing; }
+    finally {
+      closingRef.current = null;
+      if (request === sessionRequestRef.current) setSwitching(false);
     }
   }, [flushBeforeLeaving]);
   useEffect(() => {
@@ -542,12 +663,6 @@ export function EditorWindow() {
       // 어느 경우든 실제로 닫지 않는다. preventDefault 없이 돌아가면 Tauri가 창을 destroy하고,
       // 부팅 때 한 번 만든 창이라 그 뒤 메인 창의 모든 호출이 "에디터 창을 찾을 수 없습니다"로 죽는다.
       e.preventDefault();
-      if (!closeStateRef.current.session) {
-        // 세션이 없으면 접을 목록도 없다. 메인 창에 사라졌다고 알려 팝아웃 상태를 풀게 한다 —
-        // 숨기는 것도 메인 창이 한다(팝인과 같은 경로).
-        void emit(EDITOR_GONE_EVENT).catch(() => {});
-        return;
-      }
       // 닫지 않고 팝인으로 돌린다. 저장하지 못하면 그대로 남는다 — 창이 사라진 뒤에는
       // 저장 못 한 변경이 있다는 것을 알릴 자리가 없다.
       void requestPopIn();
@@ -568,19 +683,38 @@ export function EditorWindow() {
     };
   }, [requestPopIn]);
 
-  if (!session) {
+  const restartShell = async () => {
+    if (!project || restartingRef.current) return;
+    restartingRef.current = true;
+    try {
+      await restartProjectShell(shellSession, project.root);
+      if (workspaceRef.current !== workspace) return;
+      setError(null);
+      setTerminalExited(false);
+      setTerminalRestart((value) => value + 1);
+    } catch (cause) { setError(String(cause)); }
+    finally { restartingRef.current = false; }
+  };
+
+  if (!workspace) {
     return (
       <div className="h-screen grid place-items-center text-sm text-text-muted">
-        세션을 기다리는 중…
+        {error ?? "세션을 기다리는 중…"}
       </div>
     );
   }
 
-  const lsp = session.supports_lsp;
+  const lsp = project != null || session?.supports_lsp === true;
 
   return (
     <div className="h-screen flex flex-col bg-base text-text">
-      <div className="flex-1 flex min-h-0">
+      {project && <header className="h-9 shrink-0 flex items-center gap-2 px-3 border-b border-border text-xs text-text-muted">
+        <Icon name="folder" size={14} /><span className="truncate">{project.root}</span>
+        <button className="ml-auto p-1 hover:text-text" aria-label={terminalOpen ? "터미널 닫기" : "터미널 열기"} aria-pressed={terminalOpen} onClick={() => { setTerminalStarted(true); setTerminalOpen((open) => !open); }}><Icon name="terminal" size={14} /></button>
+      </header>}
+      {/* diff 스냅샷·확인함은 세션당 하나다 — 변경 목록(트리 열)과 diff 탭(에디터)이 같은 값을 본다. */}
+      <DiffSessionScope task={task} openDiff={files.openDiff}>
+      <div className="flex-1 flex min-h-0" inert={switching} aria-busy={switching}>
         {!treeOpen && (
           <div className="w-8 shrink-0 border-r border-border flex flex-col items-center pt-1">
             <button
@@ -597,9 +731,32 @@ export function EditorWindow() {
             되돌아간다. 깊은 트리에서 그것은 접기를 쓰지 않게 만드는 이유가 된다. */}
         <div className={`w-64 shrink-0 flex-col border-r border-border ${treeOpen ? "flex" : "hidden"}`}>
           <div className="h-8 shrink-0 px-2 flex items-center gap-1 text-xs text-text-muted">
-            <span className="truncate">파일</span>
+            {/* 세션 창은 메인 창과 같은 렌즈 토글을 갖는다 — 변경 목록은 이 열의 둘째 얼굴이다.
+                프로젝트 창은 diff 세션이 없으므로 파일 트리뿐이다. */}
+            {session ? (
+              <div className="flex items-center gap-0.5 min-w-0" role="tablist" aria-label="트리 열 렌즈">
+                {([["files", "파일"], ["changes", "변경"]] as const).map(([lens, label]) => (
+                  <button
+                    key={lens}
+                    role="tab"
+                    aria-selected={treeLens === lens}
+                    aria-pressed={treeLens === lens}
+                    className={`h-6 px-1.5 rounded ${
+                      treeLens === lens ? "bg-raised text-text" : "hover:text-text"
+                    }`}
+                    onClick={() => setTreeLens(lens)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <span className="truncate">파일</span>
+            )}
+            <span className="ml-auto" />
+            {treeLens === "files" && (<>
             <button
-              className={`ml-auto p-1 ${
+              className={`p-1 ${
                 showHidden ? "text-primary-bright" : "hover:text-text"
               }`}
               onClick={() => setShowHidden((v) => !v)}
@@ -617,6 +774,7 @@ export function EditorWindow() {
             >
               <Icon name="refresh" size={13} />
             </button>
+            </>)}
             <button
               className="p-1 hover:text-text"
               onClick={() => setTreeOpen(false)}
@@ -626,6 +784,9 @@ export function EditorWindow() {
               <Icon name="x" size={13} />
             </button>
           </div>
+          {session && treeLens === "changes" ? (
+            <ChangesList />
+          ) : (
           <div className="flex flex-1 flex-col overflow-auto">
             <FileTree
               nodes={files.tree}
@@ -636,15 +797,17 @@ export function EditorWindow() {
               showHidden={showHidden}
             />
           </div>
+          )}
         </div>
 
         {/* Monaco는 퍼센트 높이 체인이라, 부모가 flex 컨테이너가 아니면 EditorPane의 flex-1이
             무효가 돼 0px로 붕괴한다(마크다운 프리뷰만 콘텐츠 높이로 살아남는다). */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <EditorSplitView
-            taskId={session.task_id}
+            taskId={session?.task_id ?? null}
+            readHtmlAsset={source?.read}
             host={task?.host ?? LOCAL_HOST}
-            rootPath={session.worktree_path}
+            rootPath={project?.root ?? session?.worktree_path ?? null}
             windowId="editor"
             sourceChangeRef={workspaceSourceChangeRef}
             // 이 창은 통째로 에디터다 — 단축키를 가려 받을 다른 면이 없다.
@@ -659,19 +822,24 @@ export function EditorWindow() {
             dark={theme.kind !== "light"}
             onSelect={files.setActiveKey}
             onClose={files.closeTab}
+            onBeforeClose={project ? (key) => {
+              const file = files.openFiles.find((item) => item.key === key);
+              return !file?.dirty || window.confirm(`${file.path}에 저장하지 않은 변경이 있습니다. 버리시겠습니까?`);
+            } : undefined}
             onOpenFile={files.openFile}
+            readFile={files.readFile}
             onChange={files.changeFile}
             onSave={(path, content) => void files.saveFile(path, content)}
             onReload={(path) => void files.reloadFile(path)}
-            onOpenPath={(path) => void actions.openPathExternal(path)}
-            onRevealPath={(path) => void actions.revealPathInFinder(path)}
-            onCopyAbsPath={(path) => void actions.copyAbsPath(path)}
+            onOpenPath={(path) => void openPathExternal(path)}
+            onRevealPath={(path) => void revealPathInFinder(path)}
+            onCopyAbsPath={(path) => void copyAbsPath(path)}
             onPinTab={files.pinTab}
-            supportsExternalPath={lsp}
+            supportsExternalPath={project != null || lsp}
             // 콘솔은 로컬 워크트리에서만 뜬다 — 원격은 PTY를 붙일 프로세스가 이쪽에 없다.
-            onRunSelection={session.host === LOCAL_HOST ? runInRepl : undefined}
+            onRunSelection={session?.host === LOCAL_HOST ? runInRepl : undefined}
             onOpenInRepl={
-              session.host === LOCAL_HOST && session.worktree_path
+              session?.host === LOCAL_HOST && session.worktree_path
                 ? (path) => runInRepl(pandasOpenSnippet(session.worktree_path ?? "", path))
                 : undefined
             }
@@ -680,11 +848,13 @@ export function EditorWindow() {
             editorSettings={editorSettings}
             onGoto={lsp ? actions.gotoSymbol : undefined}
             onLspStatus={lsp ? actions.askLspStatus : undefined}
+            onSemanticTokens={lsp ? actions.askSemanticTokens : undefined}
+            lspScopeKey={workspaceKey ?? undefined}
             onOpenTarget={actions.openLspTarget}
             reveal={actions.revealTarget}
             onRevealed={() => actions.setRevealTarget(null)}
             onNavigationError={setError}
-            onAttachCapture={(record) => {
+            onAttachCapture={session ? (record) => {
               // 메인·팝아웃의 seq가 둘 다 0부터라 id가 겹칠 수 있다 — 팝아웃 몫에 w 스코프를 섞는다.
               const scoped = { ...record, id: scopeLocalCaptureId(record.id) };
               void emit(EDITOR_CAPTURE_EVENT, scoped)
@@ -692,18 +862,23 @@ export function EditorWindow() {
                 // 화면 어디에도 보이지 않으므로, 어디로 갔는지는 이 문구가 말해야 한다.
                 .then(() => showNotice(`세션 #${record.task_id}에 첨부됨 ✓`))
                 .catch((e) => setError(String(e)));
-            }}
+            } : undefined}
             askBusy={status === "busy"}
-            onAsk={(input) => {
+            onAsk={session ? (input) => {
               const payload = buildAskPayload({ taskId: session.task_id, ...input });
               if (!payload) return;
               void emit(EDITOR_ASK_EVENT, payload).catch((e) => setError(String(e)));
-            }}
+            } : undefined}
           />
+          {project && terminalStarted && <section className={`h-64 shrink-0 border-t border-border flex flex-col ${terminalOpen ? "" : "hidden"}`}>
+            <div className="h-8 px-3 flex items-center gap-2 text-xs text-text-muted">터미널{terminalExited && <button className="ml-auto text-primary-bright" onClick={() => void restartShell()}>재시작</button>}</div>
+            <ProjectTerminal key={project.root} root={project.root} hidden={!terminalOpen} restart={terminalRestart} onSession={setShellSession} onExit={setTerminalExited} onError={setError} />
+          </section>}
         </div>
       </div>
+      </DiffSessionScope>
 
-      {replDock && (
+      {session && replDock && (
         <ReplDock
           taskId={session.task_id}
           available={session.host === LOCAL_HOST}
@@ -714,7 +889,7 @@ export function EditorWindow() {
           onClose={closeReplDock}
         />
       )}
-      <StatusBar session={session} status={status} error={error} notice={notice} />
+      {session ? <StatusBar session={session} status={status} error={error} notice={notice} /> : error && <div className="shrink-0 border-t border-border px-3 py-1 text-xs text-danger" role="alert">{error}</div>}
       <ContextMenuShell
         at={treeOps.menu}
         ariaLabel={treeOps.menu?.node ? `${treeOps.menu.node.name} 조작` : "워크트리 루트 조작"}
@@ -727,10 +902,10 @@ export function EditorWindow() {
       <QuickOpen
         open={quickOpen != null}
         initialEditorTab={quickOpen ?? "all"}
-        scopes={["file", "code"]}
+        scopes={project ? ["file"] : ["file", "code"]}
         editorSearch={{
-          scopeLabel: `${session.branch ?? "현재 워크트리"} · ${session.host} · 세션 #${session.task_id}`,
-          contentAvailable: session.host === LOCAL_HOST,
+          scopeLabel: project?.root ?? `${session?.branch ?? "현재 워크트리"} · ${session?.host} · 세션 #${session?.task_id}`,
+          contentAvailable: session?.host === LOCAL_HOST,
         }}
         files={workspaceFiles}
         // 스킬은 이 창에서 열 수 없다 — 빈 문자열이면 조회 자체를 생략한다.

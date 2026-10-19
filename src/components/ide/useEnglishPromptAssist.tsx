@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { hasHangul, studyExpressionsOn, translateText, useTranslateSettings } from "../../lib/translate";
-import { ExpressionList, HighlightedText, useExpressions, useVisibleExpressions } from "./ExpressionStudy";
+import { ExpressionList, HighlightedText, useExpressions } from "./ExpressionStudy";
 
 /** 입력창 ⌘J — 한글 IME 중에는 `e.key`가 자모로 오므로 물리 키(`e.code`)로 본다. */
 export const isPromptAssistShortcut = (e: { metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; code: string }) =>
@@ -109,7 +109,7 @@ export function EnglishPromptAssistPanel({ state, onDismiss }: { state: PromptAs
   // 영어 결과가 나오면 공부할 표현을 따로 짚는다. 바꿔 넣기 결과는 입력창 안이라 밑줄을 못 그으니 목록으로만 보인다.
   const english = state.kind === "suggestion" || state.kind === "replaced" ? state.english : null;
   const study = studyExpressionsOn(useTranslateSettings());
-  const expressions = useVisibleExpressions(useExpressions(english, study));
+  const expressions = useExpressions(english, study);
   if (state.kind === "idle") return null;
   const close = (
     <button
@@ -150,7 +150,7 @@ export function EnglishPromptAssistPanel({ state, onDismiss }: { state: PromptAs
           <div className="select-text whitespace-pre-wrap break-words text-sm text-text">
             <HighlightedText text={state.english} expressions={expressions} />
           </div>
-          <ExpressionList expressions={expressions} context={state.english} />
+          <ExpressionList expressions={expressions} />
         </div>
         {close}
       </div>
@@ -165,7 +165,7 @@ export function EnglishPromptAssistPanel({ state, onDismiss }: { state: PromptAs
         </summary>
         <div className="mt-1 whitespace-pre-wrap break-words text-text">{state.source}</div>
       </details>
-      <ExpressionList expressions={expressions} context={state.english} />
+      <ExpressionList expressions={expressions} />
     </div>
   );
 }

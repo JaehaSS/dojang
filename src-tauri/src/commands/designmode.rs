@@ -21,6 +21,30 @@ mod activation;
 pub use activation::*;
 
 const DESIGNMODE_CAPTURE_SCHEME: &str = "praxis-designmode";
+const DESIGNMODE_INSPECT_ACTION: &str = "inspect";
+const DESIGNMODE_EDIT_ACTION: &str = "edit";
+const MAX_CANVAS_EDIT_NAVIGATION: usize = 8 * 1024;
+
+#[derive(Clone)]
+struct CanvasSurface {
+    generation: u64,
+    label: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesignCanvasSelectionPayload {
+    task_id: i64,
+    selection: crate::design_canvas::selection::DesignCanvasSelection,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesignCanvasEditPayload {
+    task_id: i64,
+    surface: String,
+    request: crate::design_canvas::apply::DesignCanvasEditRequest,
+}
 
 /// 프리뷰 창·웹뷰 라벨 — **같은 작업이라도 열 때마다 새 라벨을 쓴다.**
 ///
@@ -289,6 +313,7 @@ fn intercept_capture_navigation(
     bridge: &crate::preview_bridge::PreviewBridge,
     task_id: i64,
     worktree_path: &Path,
+    canvas_surface: Option<&CanvasSurface>,
     url: &tauri::Url,
 ) -> bool {
     if url.scheme() != DESIGNMODE_CAPTURE_SCHEME {
@@ -302,6 +327,68 @@ fn intercept_capture_navigation(
     else {
         return false;
     };
+    if url.path() == DESIGNMODE_INSPECT_ACTION {
+        let Some(surface) = canvas_surface else {
+            return false;
+        };
+        let Ok(selection) = serde_json::from_str::<
+            crate::design_canvas::selection::DesignCanvasSelection,
+        >(&encoded) else {
+            return false;
+        };
+        let Ok(selection) =
+            crate::design_canvas::selection::validate_selection(worktree_path, selection)
+        else {
+            return false;
+        };
+        if active_canvas_webview(app, task_id, surface).is_none() {
+            return false;
+        }
+        let _ = app.emit(
+            "design-canvas://selection",
+            DesignCanvasSelectionPayload {
+                task_id,
+                selection: selection.clone(),
+            },
+        );
+        // emit 이후에도 현재 표면을 다시 확인한다. 늦은 custom scheme navigation이 새
+        // generation의 Design Canvas DOM에 ACK를 주입하면 안 된다.
+        if let Some(webview) = active_canvas_webview(app, task_id, surface) {
+            if let Ok(detail) = serde_json::to_string(&selection) {
+                let _ = webview.eval(format!(
+                    "window.dispatchEvent(new CustomEvent('dojang:design-selection',{{detail:{detail}}}));"
+                ));
+            }
+        }
+        return false;
+    }
+    if url.path() == DESIGNMODE_EDIT_ACTION {
+        if encoded.len() > MAX_CANVAS_EDIT_NAVIGATION {
+            return false;
+        }
+        let Some(surface) = canvas_surface else {
+            return false;
+        };
+        let Ok(request) =
+            serde_json::from_str::<crate::design_canvas::apply::DesignCanvasEditRequest>(&encoded)
+        else {
+            return false;
+        };
+        if !crate::design_canvas::apply::request_is_bounded(&request)
+            || active_canvas_webview(app, task_id, surface).is_none()
+        {
+            return false;
+        }
+        let _ = app.emit(
+            "design-canvas://edit-request",
+            DesignCanvasEditPayload {
+                task_id,
+                surface: canvas_surface_token(surface.generation, &surface.label),
+                request,
+            },
+        );
+        return false;
+    }
     let Ok(capture) = serde_json::from_str::<designmode::ElementCapture>(&encoded) else {
         return false; // 실패해도 조용히 무시 — 사용자가 다시 클릭해 재시도할 수 있다.
     };
@@ -325,6 +412,90 @@ fn intercept_capture_navigation(
         }
     });
     false
+}
+
+fn active_canvas_webview(
+    app: &AppHandle,
+    task_id: i64,
+    surface: &CanvasSurface,
+) -> Option<tauri::Webview> {
+    let state = app.state::<AppState>();
+    let handle = state
+        .designmode_webviews
+        .lock()
+        .ok()?
+        .get(&task_id)?
+        .clone();
+    if handle.generation != surface.generation || handle.webview.label() != surface.label {
+        return None;
+    }
+    let url = handle.webview.url().ok()?;
+    state
+        .design_canvas
+        .is_active_canvas_url(task_id, &url)
+        .then_some(handle.webview)
+}
+
+/// generation과 webview label을 모두 포함하는 Canvas 표면 토큰이다. 닫힌 표면의 늦은
+/// navigation이 같은 task의 새 표면에 쓰기 요청을 전달하지 못하게 한다.
+pub fn canvas_surface_token(generation: u64, label: &str) -> String {
+    format!("{generation}:{label}")
+}
+
+pub fn canvas_surface_is_current(state: &AppState, task_id: i64, token: &str) -> bool {
+    let Some(handle) = state
+        .designmode_webviews
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&task_id)
+        .cloned()
+    else {
+        return false;
+    };
+    if token != canvas_surface_token(handle.generation, handle.webview.label()) {
+        return false;
+    }
+    let Ok(url) = handle.webview.url() else {
+        return false;
+    };
+    state.design_canvas.is_active_canvas_url(task_id, &url)
+}
+
+/// 응답은 메인 웹뷰가 아니라 요청을 낸 Canvas 웹뷰에 넣는다. 토큰을 다시 확인한 뒤 eval하므로
+/// 이전 generation의 느린 명령이 새 Canvas의 pending request를 해제할 수 없다.
+pub fn dispatch_canvas_edit_result(
+    state: &AppState,
+    task_id: i64,
+    token: &str,
+    result: &crate::design_canvas::apply::DesignCanvasEditResult,
+) -> bool {
+    let Some(handle) = state
+        .designmode_webviews
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&task_id)
+        .cloned()
+    else {
+        return false;
+    };
+    if token != canvas_surface_token(handle.generation, handle.webview.label()) {
+        return false;
+    }
+    let Ok(url) = handle.webview.url() else {
+        return false;
+    };
+    if !state.design_canvas.is_active_canvas_url(task_id, &url) {
+        return false;
+    }
+    let Ok(detail) = serde_json::to_string(result) else {
+        return false;
+    };
+    handle
+        .webview
+        .eval(format!(
+            "window.dispatchEvent(new CustomEvent('dojang:design-edit-result',{{detail:{detail}}}));"
+        ))
+        .is_ok()
 }
 
 /// URL policy is centralized: reject https, username userinfo, a missing port(), and any host
@@ -466,6 +637,18 @@ fn create_preview(
     let generation = opening.generation;
     let label = designmode_label(id, generation);
     let bridge_label = label.clone();
+    let canvas_surface = state
+        .design_canvas
+        .is_active_canvas_url(id, &parsed)
+        .then(|| CanvasSurface {
+            generation,
+            label: label.clone(),
+        });
+    let initialization_script = if canvas_surface.is_some() {
+        designmode::DESIGN_CANVAS_INIT_JS
+    } else {
+        designmode::PREVIEW_INIT_JS
+    };
     let (webview, toolbar, toolbar_height, container) = match mode {
         designmode::PreviewMode::Window => {
             let nav_app = app.clone();
@@ -503,10 +686,20 @@ fn create_preview(
                 label.clone(),
                 tauri::WebviewUrl::External(parsed),
             )
-            .initialization_script(designmode::PREVIEW_INIT_JS)
+            .initialization_script(initialization_script)
             .on_page_load(activation::page_loaded)
-            .on_navigation(move |nav_url| {
-                intercept_capture_navigation(&nav_app, &nav_bridge, id, &worktree_path, nav_url)
+            .on_navigation({
+                let canvas_surface = canvas_surface.clone();
+                move |nav_url| {
+                    intercept_capture_navigation(
+                        &nav_app,
+                        &nav_bridge,
+                        id,
+                        &worktree_path,
+                        canvas_surface.as_ref(),
+                        nav_url,
+                    )
+                }
             });
             let page_toolbar_height = window_toolbar_height(&toolbar_height);
             let page = match window.add_child(
@@ -583,16 +776,20 @@ fn create_preview(
             let window = app.get_window("main").ok_or("메인 창을 찾을 수 없습니다")?;
             let builder =
                 tauri::webview::WebviewBuilder::new(label, tauri::WebviewUrl::External(parsed))
-                    .initialization_script(designmode::PREVIEW_INIT_JS)
+                    .initialization_script(initialization_script)
                     .on_page_load(activation::page_loaded)
-                    .on_navigation(move |nav_url| {
-                        intercept_capture_navigation(
-                            &nav_app,
-                            &nav_bridge,
-                            id,
-                            &worktree_path,
-                            nav_url,
-                        )
+                    .on_navigation({
+                        let canvas_surface = canvas_surface.clone();
+                        move |nav_url| {
+                            intercept_capture_navigation(
+                                &nav_app,
+                                &nav_bridge,
+                                id,
+                                &worktree_path,
+                                canvas_surface.as_ref(),
+                                nav_url,
+                            )
+                        }
                     });
             let bounds = native_child_bounds(&window, bounds);
             let page = window

@@ -11,6 +11,7 @@ const onOpen = vi.fn();
 const onClose = vi.fn();
 const onTogglePopOut = vi.fn();
 const onToggleTerminal = vi.fn();
+const onToggleChanges = vi.fn();
 
 type Overrides = Partial<Parameters<typeof WorkspacePaneButtons>[0]>;
 
@@ -23,7 +24,7 @@ const render = async (props: Overrides = {}) => {
       <WorkspacePaneButtons
         open={false}
         active="file"
-        diffCount={null}
+        changes={{ on: false, count: null, onToggle: onToggleChanges }}
         previewAvailable
         onOpen={onOpen}
         onClose={onClose}
@@ -56,6 +57,7 @@ beforeEach(() => {
   onClose.mockClear();
   onTogglePopOut.mockClear();
   onToggleTerminal.mockClear();
+  onToggleChanges.mockClear();
 });
 
 afterEach(async () => {
@@ -65,9 +67,16 @@ afterEach(async () => {
 });
 
 describe("WorkspacePaneButtons", () => {
-  it("파일·프리뷰·Diff·에디터 창·터미널을 각각의 버튼으로 낸다", async () => {
+  it("로컬 작업에서 Design을 열 수 있고 원격에서는 버튼을 숨긴다", async () => {
+    await render({ designAvailable: true });
+    await click("Design");
+    expect(onOpen).toHaveBeenCalledWith("design");
+    await render({ designAvailable: true, previewAvailable: false });
+    expect(button("Design")).toBeUndefined();
+  });
+  it("파일·프리뷰·변경·에디터 창·터미널을 각각의 버튼으로 낸다", async () => {
     await render();
-    expect(button("Diff")).toBeTruthy();
+    expect(button("변경")).toBeTruthy();
     expect(button("파일 보기")).toBeTruthy();
     expect(button("프리뷰")).toBeTruthy();
     expect(button("에디터를 새 창으로")).toBeTruthy();
@@ -76,9 +85,18 @@ describe("WorkspacePaneButtons", () => {
     expect(button("파일 트리")).toBeUndefined();
   });
 
-  it("Diff는 오른쪽 코드 열 칩이다", async () => {
-    await render();
-    expect(button("Diff")).toBeTruthy();
+  it("변경 칩은 코드 열 탭이 아니라 트리 렌즈 손잡이다 — 누르면 onToggle만 부른다", async () => {
+    await render({ open: true, active: "file" });
+    await click("변경");
+    expect(onToggleChanges).toHaveBeenCalledTimes(1);
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("변경 렌즈가 켜져 있으면 변경 칩만 눌림이다", async () => {
+    await render({ open: false, active: "file", changes: { on: true, count: 2, onToggle: onToggleChanges } });
+    expect(button("변경")?.getAttribute("aria-pressed")).toBe("true");
+    expect(button("파일 보기")?.getAttribute("aria-pressed")).toBe("false");
   });
 
   it("닫힌 열에서 버튼을 누르면 그 탭으로 연다", async () => {
@@ -88,16 +106,9 @@ describe("WorkspacePaneButtons", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("Diff 칩은 코드 열의 Diff 탭을 연다", async () => {
-    await render({ open: true, active: "file" });
-    await click("Diff");
-    expect(onOpen).toHaveBeenCalledWith("diff");
-    expect(onClose).not.toHaveBeenCalled();
-  });
-
-  it("변경 파일 수를 Diff 배지로 보인다", async () => {
-    await render({ diffCount: 4 });
-    expect(button("Diff")?.textContent).toContain("4");
+  it("변경 파일 수를 변경 배지로 보인다", async () => {
+    await render({ changes: { on: false, count: 4, onToggle: onToggleChanges } });
+    expect(button("변경")?.textContent).toContain("4");
   });
 
   it("열려 있어도 다른 탭 버튼은 닫지 않고 그 탭으로 옮긴다", async () => {
@@ -155,9 +166,9 @@ describe("WorkspacePaneButtons", () => {
     expect(button("에디터를 새 창으로")?.textContent).not.toContain("에디터 창");
   });
 
-  it("팝아웃 칩은 코드 열 묶음 안 Diff 바로 다음이다", async () => {
+  it("팝아웃 칩은 코드 열 묶음 안 변경 바로 다음이다", async () => {
     await render();
-    expect(button("Diff")?.nextElementSibling).toBe(button("에디터를 새 창으로"));
+    expect(button("변경")?.nextElementSibling).toBe(button("에디터를 새 창으로"));
   });
 
   it("나가 있으면 눌림 상태로 그 창을 앞으로 부른다", async () => {
@@ -211,7 +222,7 @@ describe("WorkspacePaneButtons", () => {
   it("라벨 모드에서는 목적지 이름을 그대로 보여준다", async () => {
     await render({ showLabels: true });
     expect(button("파일 보기")?.textContent).toContain("파일");
-    expect(button("Diff")?.textContent).toContain("Diff");
+    expect(button("변경")?.textContent).toContain("변경");
     expect(button("프리뷰")?.textContent).toContain("프리뷰");
     expect(button("터미널")?.textContent).toContain("터미널");
   });

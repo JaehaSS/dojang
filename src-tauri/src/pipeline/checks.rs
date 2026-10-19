@@ -45,11 +45,35 @@ pub fn run_shell(
     }
 }
 
+/// 저장소 verify 사양(build·test)만 실행한다. 기준선 측정용이며 수용 명령은 포함하지 않는다.
+/// build가 실패해도 test는 계속 돌려 기준선에서 실패하는 명령 전체를 얻는다.
+pub fn run_repo_checks(worktree: &Path, registrar: Option<&SharedProcessRegistrar>) -> Vec<CheckOutcome> {
+    let spec = crate::verify::detect_spec(worktree);
+    let timeout = if spec.timeout_secs == 0 { 600 } else { spec.timeout_secs };
+    [spec.build.as_deref(), spec.test.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|c| !c.trim().is_empty())
+        .map(|cmd| run_shell(worktree, cmd, timeout, registrar))
+        .collect()
+}
+
 /// verify 사양의 build → test, 이어서 수용 명령을 실행한다. build가 실패하면 수용 명령은 건너뛴다(결과에 없음).
 /// 사양에 build·test가 모두 없으면 수용 명령만 실행한다. 타임아웃은 사양 `timeout_secs`(0이면 기본 600초).
 pub fn run_ticket_checks(
     worktree: &Path,
     acceptance_commands: &[String],
+    registrar: Option<&SharedProcessRegistrar>,
+) -> Vec<CheckOutcome> {
+    run_ticket_checks_with_baseline(worktree, acceptance_commands, &[], registrar)
+}
+
+/// `run_ticket_checks`와 같되, 기준선에서도 실패한 저장소 명령(`baseline_failed`)이 build에서 실패해도
+/// 수용 명령을 건너뛰지 않는다(수용 명령은 항상 강제).
+pub fn run_ticket_checks_with_baseline(
+    worktree: &Path,
+    acceptance_commands: &[String],
+    baseline_failed: &[String],
     registrar: Option<&SharedProcessRegistrar>,
 ) -> Vec<CheckOutcome> {
     let spec = crate::verify::detect_spec(worktree);
@@ -59,7 +83,7 @@ pub fn run_ticket_checks(
     for (i, cmd) in [spec.build.as_deref(), spec.test.as_deref()].into_iter().enumerate() {
         let Some(cmd) = cmd.filter(|c| !c.trim().is_empty()) else { continue };
         let r = run_shell(worktree, cmd, timeout, registrar);
-        if i == 0 && !r.ok {
+        if i == 0 && !r.ok && !baseline_failed.iter().any(|b| b == cmd) {
             build_failed = true;
         }
         out.push(r);
@@ -70,6 +94,11 @@ pub fn run_ticket_checks(
         }
     }
     out
+}
+
+/// 기준선에서도 실패했고 지금도 실패한 저장소 명령인가(판정 제외 대상). 수용 명령은 호출자가 baseline에 넣지 않는다.
+pub fn is_baseline_excluded(o: &CheckOutcome, baseline_failed: &[String]) -> bool {
+    !o.ok && baseline_failed.iter().any(|b| b == &o.command)
 }
 
 /// 모두 통과했는가. 결과가 비어 있으면 통과로 보지 않는다(미설정을 통과로 위장 금지).

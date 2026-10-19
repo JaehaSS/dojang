@@ -93,13 +93,14 @@ afterEach(async () => {
 });
 
 describe("세션 방식 — 설정 단위", () => {
-  it("홈 컴포저에는 작업별 터미널 선택이 없고, 설정이 터미널이면 대화 선택 대신 표시만 둔다", async () => {
-    expect([...interactionSelect()!.options].map((o) => o.value)).toEqual(["off", "questions", "approvals"]);
+  it("홈 컴포저에는 세션 방식 선택이 없고, 설정이 터미널이면 표시만 둔다", async () => {
+    expect(interactionSelect()).toBeNull();
     await act(async () => setSessionStyle("terminal"));
     expect(interactionSelect()).toBeNull();
     expect(container.textContent).toContain("터미널 세션");
     await act(async () => setSessionStyle("conversation"));
-    expect(interactionSelect()).not.toBeNull();
+    expect(interactionSelect()).toBeNull();
+    expect(container.textContent).not.toContain("터미널 세션");
   });
 
   it("단일 터미널 작업에는 앱 컴포저가 없고, 읽기 전용 앙상블 PTY에는 있다", async () => {

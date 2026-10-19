@@ -17,6 +17,8 @@ import { useXtermTheme } from "../TerminalView";
 import { disposeTerminal, disposeWebgl, tryLoadWebgl } from "../../lib/xterm-webgl";
 
 interface Props {
+  /** 공용 에디터에서는 늦은 요청을 원래 프로젝트에 한정한다. */
+  root?: string;
   hidden: boolean;
   restart: number;
   onSession: (session: number | null) => void;
@@ -25,7 +27,7 @@ interface Props {
 }
 
 /** Root-bound PTY. It stays mounted while hidden so the xterm buffer and shell survive a toggle. */
-export function ProjectTerminal({ hidden, restart, onSession, onExit, onError }: Props) {
+export function ProjectTerminal({ root, hidden, restart, onSession, onExit, onError }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const theme = useXtermTheme();
@@ -77,7 +79,7 @@ export function ProjectTerminal({ hidden, restart, onSession, onExit, onError }:
         unExit = await listen<ProjectShellExit>("project-shell://exit", ({ payload }) => receiveExit(payload));
         if (disposed) { stop(); return; }
         try { fit.fit(); } catch { /* next resize supplies dimensions */ }
-        const opened = await projectShellOpen(term.cols, term.rows);
+        const opened = await projectShellOpen(term.cols, term.rows, root);
         if (disposed) {
           // The native window owns this PTY. Destroyed cleans it up; a view
           // remount may already be attaching to the same session.
@@ -87,7 +89,7 @@ export function ProjectTerminal({ hidden, restart, onSession, onExit, onError }:
         token = opened.session;
         setSession(token);
         onSession(token);
-        const snapshot = await projectShellSnapshot(token);
+        const snapshot = await projectShellSnapshot(token, root);
         if (disposed || snapshot.session !== token) return;
         if (snapshot.data) write(snapshot.data);
         lastSequence = snapshot.sequence;
@@ -111,11 +113,11 @@ export function ProjectTerminal({ hidden, restart, onSession, onExit, onError }:
       }
     };
     void start();
-    const input = term.onData((data) => { if (writable && !disposed && token != null) void projectShellWrite(token, data).catch((error) => onError(String(error))); });
+    const input = term.onData((data) => { if (writable && !disposed && token != null) void projectShellWrite(token, data, root).catch((error) => { if (!disposed) onError(String(error)); }); });
     const resize = () => {
       try {
         fit.fit();
-        if (writable && !disposed && token != null) void projectShellResize(token, term.cols, term.rows).catch((error) => onError(String(error)));
+        if (writable && !disposed && token != null) void projectShellResize(token, term.cols, term.rows, root).catch((error) => { if (!disposed) onError(String(error)); });
       } catch { /* hidden terminal has no layout */ }
     };
     const observer = new ResizeObserver(resize);
@@ -126,7 +128,7 @@ export function ProjectTerminal({ hidden, restart, onSession, onExit, onError }:
       termRef.current = null;
       onSession(null);
     };
-  }, [restart]);
+  }, [restart, root]);
 
   useEffect(() => { if (termRef.current) termRef.current.options.theme = theme; }, [theme]);
   useEffect(() => { if (!hidden) window.dispatchEvent(new Event("resize")); }, [hidden]);
@@ -134,6 +136,6 @@ export function ProjectTerminal({ hidden, restart, onSession, onExit, onError }:
   return <div ref={(node) => { hostRef.current = node; }} data-project-shell={session ?? undefined} className={`flex-1 min-h-0 bg-bg ${hidden ? "hidden" : ""}`} />;
 }
 
-export async function restartProjectShell(session: number | null): Promise<void> {
-  if (session != null) await projectShellClose(session);
+export async function restartProjectShell(session: number | null, root?: string): Promise<void> {
+  if (session != null) await projectShellClose(session, root);
 }

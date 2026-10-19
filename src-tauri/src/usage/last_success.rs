@@ -95,6 +95,7 @@ mod tests {
                 window_minutes: Some(300),
             }),
             weekly: None,
+            quota_groups: Vec::new(),
             source: Some("statusline".into()),
             updated_at: Some(observed_at),
         }

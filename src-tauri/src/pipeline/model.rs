@@ -49,13 +49,77 @@ pub struct TicketDraft {
     pub covers: Vec<String>,
 }
 
+/// 분할 심판의 1차 판정. `split`만 스펙·티켓을 낸다. 나머지는 사용자에게 돌아가는 intake 게이트다 —
+/// 브레인스토밍·질문·슬래시 명령처럼 구현 요청이 아닌 목표를 억지로 티켓으로 만들던 것을 막는다(원장 #599).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SplitDecision {
+    #[default]
+    Split,
+    /// 의도가 불분명해 질문이 필요하다. `questions`를 사용자에게 보인다.
+    Clarify,
+    /// 이 저장소의 파이프라인으로는 수행할 수 없다. `reason`을 보인다.
+    Decline,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SplitOutput {
+    #[serde(default)]
+    pub decision: SplitDecision,
+    /// clarify일 때 사용자에게 물을 질문(1–3개).
+    #[serde(default)]
+    pub questions: Vec<String>,
+    /// clarify·decline의 사유 한두 문장.
+    #[serde(default)]
+    pub reason: String,
     #[serde(default)]
     pub spec: Spec,
     #[serde(default)]
     pub tickets: Vec<TicketDraft>,
 }
+
+/// 실행에 저장되는 intake 결과(`pipeline_runs.clarification_json`). 사용자가 답하면 지워진다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Clarification {
+    pub decision: SplitDecision,
+    #[serde(default)]
+    pub questions: Vec<String>,
+    #[serde(default)]
+    pub reason: String,
+}
+
+impl Clarification {
+    /// split이 아닌 판정만 Clarification이 된다. 질문·사유는 다듬어 담는다.
+    pub fn from_output(out: &SplitOutput) -> Option<Self> {
+        if out.decision == SplitDecision::Split {
+            return None;
+        }
+        Some(Self {
+            decision: out.decision,
+            questions: out.questions.iter().map(|q| q.trim().to_string()).filter(|q| !q.is_empty()).take(3).collect(),
+            reason: out.reason.trim().to_string(),
+        })
+    }
+
+    /// 사용자 답변을 다음 분할 프롬프트의 피드백으로 바꾼다. 질문을 같이 넣어야 심판이 무엇에 대한 답인지 안다.
+    pub fn feedback_for_answer(&self, answer: &str) -> String {
+        let mut s = String::from("사용자가 이전 질문에 답했다. 다시 질문하지 말고 이 답변대로 분할하라.\n");
+        if !self.questions.is_empty() {
+            s.push_str("이전 질문:\n");
+            for q in &self.questions {
+                s.push_str(&format!("- {q}\n"));
+            }
+        } else if !self.reason.is_empty() {
+            s.push_str(&format!("이전 판정 사유: {}\n", self.reason));
+        }
+        s.push_str("사용자 답변:\n");
+        s.push_str(answer.trim());
+        s
+    }
+}
+
+/// 사용자가 질문에 답하지 않고 그대로 진행할 때 쓰는 고정 답변. 프런트의 `PROCEED_ANYWAY_ANSWER`와 같은 문구다.
+pub const PROCEED_ANYWAY_ANSWER: &str = "질문에 답하지 않고 그대로 진행한다. 목표를 가장 자연스러운 구현 요청으로 해석해 분할하라.";
 
 /// 벤더 id 정규화. `gemini`는 `agy`의 별칭이다.
 pub fn normalize_vendor(v: &str) -> String {
@@ -73,6 +137,21 @@ pub fn validate_split(
     max_tickets: usize,
 ) -> Result<(), Vec<String>> {
     let mut errs: Vec<String> = Vec::new();
+    match out.decision {
+        SplitDecision::Clarify => {
+            if out.questions.iter().all(|q| q.trim().is_empty()) {
+                errs.push("decision이 clarify인데 questions가 비어 있다".into());
+            }
+            return if errs.is_empty() { Ok(()) } else { Err(errs) };
+        }
+        SplitDecision::Decline => {
+            if out.reason.trim().is_empty() {
+                errs.push("decision이 decline인데 reason이 비어 있다".into());
+            }
+            return if errs.is_empty() { Ok(()) } else { Err(errs) };
+        }
+        SplitDecision::Split => {}
+    }
     if out.spec.requirements.is_empty() {
         errs.push("요구사항이 하나도 없다".into());
     }

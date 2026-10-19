@@ -10,7 +10,6 @@ export type View =
   | "workspace"
   | "ensemble"
   | "insights"
-  | "vocab"
   | "pipeline"
   | "settings";
 
@@ -27,6 +26,10 @@ interface Props extends SessionTaskNavigationProps {
    * 예전 회고 신선도 점(`retroUnread`, #565에서 회고와 함께 폐기)과 같은 자리다.
    */
   insightsUnread?: number;
+  /** 사용자 조치가 필요한 파이프라인 실행 수 — 파이프라인 항목에 건수 배지로 보인다. */
+  pipelineAttention?: number;
+  /** 조치는 필요 없지만 자동으로 도는 파이프라인 실행이 있는가. */
+  pipelineActive?: boolean;
   /** 응답하지 않은 호스트 — 목록은 나머지로 그리되 빠진 이유를 남긴다. */
   hostFailures?: HostFailure[];
   /**
@@ -50,7 +53,6 @@ interface Props extends SessionTaskNavigationProps {
 
 const QUICK: { v: View; icon: IconName; label: string }[] = [
   { v: "insights", icon: "chart", label: "인사이트" },
-  { v: "vocab", icon: "book", label: "단어장" },
   { v: "pipeline", icon: "branch", label: "파이프라인" },
 ];
 
@@ -77,6 +79,8 @@ function persistOrchViewsOpen(open: boolean): void {
 export function Sidebar({
   view,
   insightsUnread = 0,
+  pipelineAttention = 0,
+  pipelineActive = false,
   onNewTask,
   onQuickLink,
   browsingHost,
@@ -208,6 +212,22 @@ export function Sidebar({
                       className="ml-auto w-1.5 h-1.5 rounded-full bg-primary-bright shrink-0"
                       title={`읽지 않은 발견 카드 ${insightsUnread}건`}
                       aria-label={`읽지 않은 발견 카드 ${insightsUnread}건`}
+                    />
+                  )}
+                  {q.v === "pipeline" && pipelineAttention > 0 && (
+                    <span
+                      className="ml-auto min-w-4 shrink-0 rounded-full bg-status-awaiting px-1 text-center text-xs text-bg"
+                      title={`조치 필요 ${pipelineAttention}건`}
+                      aria-label={`조치 필요 ${pipelineAttention}건`}
+                    >
+                      {pipelineAttention}
+                    </span>
+                  )}
+                  {q.v === "pipeline" && pipelineAttention === 0 && pipelineActive && (
+                    <span
+                      className="ml-auto w-1.5 h-1.5 rounded-full bg-status-running shrink-0 animate-pulse"
+                      title="파이프라인 자동 진행 중"
+                      aria-label="파이프라인 자동 진행 중"
                     />
                   )}
                 </button>

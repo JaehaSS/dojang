@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { copyText } from "../lib/clipboard";
 import {
   skillsList,
   skillsRead,
@@ -130,7 +131,7 @@ function OrphanBanner({ orphans }: { orphans: SkillMeta[] }) {
         <button
           className="shrink-0 h-7 px-2 rounded border border-border text-text-secondary hover:text-text hover:border-border-strong"
           onClick={() => {
-            void navigator.clipboard?.writeText(paths);
+            void copyText(paths).catch(() => undefined);
             setCopied(true);
             window.setTimeout(() => setCopied(false), 1500);
           }}

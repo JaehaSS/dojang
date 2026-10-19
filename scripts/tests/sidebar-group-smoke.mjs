@@ -5,7 +5,7 @@ import { chromium } from 'playwright';
 import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
 
-const directory = path.resolve('.praxis/verification/sidebar-group-smoke');
+const directory = path.resolve('.dojang/verification/sidebar-group-smoke');
 const fixture = path.join(directory, 'ui-fixture');
 const screenshot = path.join(directory, 'nested.png');
 await mkdir(fixture, { recursive: true });

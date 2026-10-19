@@ -3,6 +3,7 @@ import type { SubagentThread } from "../../lib/activity";
 import type { ConvoItem } from "./ConversationView";
 import { Icon } from "./icons";
 import { Markdown } from "./Markdown";
+import { ToolOutput } from "./ToolOutput";
 
 interface Props {
   thread: SubagentThread<ConvoItem>;
@@ -22,9 +23,17 @@ interface StatusPresentation {
 function statusFor(thread: SubagentThread<ConvoItem>, parentBusy: boolean): StatusPresentation {
   if (thread.state === "failed") return { mark: "×", color: "text-status-failed", label: "실패" };
   if (thread.state === "done") return { mark: "✓", color: "text-status-done", label: "완료" };
+  if (thread.state === "stopped") return { mark: "○", color: "text-status-awaiting", label: "중단됨" };
+  // Codex의 unknown은 부모 턴 종료를 근거로 중단이라고 추정하지 않는다. 기록이 충분하지 않아
+  // 완료를 확인하지 못한 상태와 명시적인 중단은 사용자가 구분할 수 있어야 한다.
+  if (thread.state === "unknown") return { mark: "?", color: "text-text-muted", label: "완료 확인 불가" };
+  if (thread.vendor === "codex") return { mark: "→", color: "text-primary-bright", label: "작업 중" };
   if (!parentBusy) return { mark: "○", color: "text-status-awaiting", label: "중단됨" };
   return { mark: "→", color: "text-primary-bright", label: "작업 중" };
 }
+
+const detailsUnavailable = (thread: SubagentThread<ConvoItem>) =>
+  thread.vendor === "codex" && thread.observationStatus != null && thread.observationStatus !== "available";
 
 function TranscriptItem({
   item,
@@ -38,6 +47,7 @@ function TranscriptItem({
   if (item.role === "text") {
     return <Markdown text={item.text} onOpenLink={onOpenLink} onLinkMenu={onLinkMenu} />;
   }
+  if (item.role === "tool_output") return <ToolOutput contents={item.contents} onOpenLink={onOpenLink} />;
   if (item.role === "tool") {
     return (
       <div className="flex items-center gap-1.5 font-code text-text-muted">
@@ -112,9 +122,14 @@ export function SubagentCard({
       {expanded && (
         <div id={contentId} className="border-t border-border">
           <div className="max-h-80 space-y-2 overflow-y-auto overflow-x-hidden px-3 py-2.5 text-text-secondary">
+            {thread.items.length > 0 && detailsUnavailable(thread) && (
+              <div className="text-text-muted">일부 상세 기록을 확인할 수 없습니다.</div>
+            )}
             {thread.items.length === 0 ? (
               <div className="text-text-muted">
-                {thread.state === "running" && parentBusy
+                {detailsUnavailable(thread)
+                  ? "상세 기록을 확인할 수 없습니다."
+                  : thread.state === "running" && (thread.vendor === "codex" || parentBusy)
                   ? "서브 에이전트 응답을 기다리는 중…"
                   : "기록된 상세 응답이 없습니다."}
               </div>

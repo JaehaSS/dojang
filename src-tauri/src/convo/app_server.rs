@@ -18,6 +18,23 @@ use std::time::{Duration, Instant};
 const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(50);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Use the same seconds/provenance contract as session-log observations.
+fn context_usage_event(params: &Value) -> ConvoEvent {
+    let tokens = params["tokenUsage"]["last"]["totalTokens"].as_i64();
+    let window = params["tokenUsage"]["modelContextWindow"].as_i64();
+    match (tokens, window) {
+        (Some(tokens), Some(window)) if tokens > 0 && window > 0 => ConvoEvent::ContextUsage {
+            context_tokens: tokens,
+            context_window: Some(window),
+            observed_at: Some(crate::now()),
+            source: Some("app_server".into()),
+            valid: Some(true),
+        },
+        _ => super::context_observation::invalid_event("app_server"),
+    }
+}
+
 pub const SUPPORTED_VERSION: &str = "codex-cli 0.157.1";
 pub const TOOL_INSTRUCTIONS: &str = "For questions to the user, call praxis_ui.ask_user with kind=clarification, 1-3 questions (id, question, options with id/label/description, allow_free_text, is_secret=false). Ask only ordinary clarifications. Never ask for secrets or tool execution approvals. Do not call request_user_input or request_user_input_async. The tool waits for the user's reply; continue only work that does not depend on that reply. Do not treat the answer as a permission grant. All children and commands must finish within this turn.";
 const EXPANDED_TOOL_INSTRUCTIONS: &str = "Dojang supports Codex native user input and approval requests. Use the native request_user_input tool for questions when available; the praxis_ui.ask_user dynamic tool is also available for ordinary clarifications only. Never request passwords or credentials in a question. Ordinary answers do not grant execution permissions; use the provider's explicit approval flow. Native nonblocking questions can be answered while independent work continues. Computer Use, browser, Code Mode and installed connector tools are available according to this account, environment and user configuration. Use their actual capabilities and report unavailable tools. Finish all commands, Code Mode cells and delegated work within the current turn; wait for yielded cells before ending. The user can interrupt from Dojang at any time.";
@@ -456,6 +473,7 @@ impl Events {
             });
             if !contents.is_empty() {
                 emit(ConvoEvent::ToolOutput {
+                    parent_id: None,
                     tool_use_id: call.to_string(),
                     contents,
                 });
@@ -1151,6 +1169,7 @@ pub fn run(
                             let contents = super::tool_output::for_item(item);
                             if !contents.is_empty() {
                                 on_event(ConvoEvent::ToolOutput {
+                                    parent_id: None,
                                     tool_use_id: id,
                                     contents,
                                 });
@@ -1191,15 +1210,7 @@ pub fn run(
                     events.out_tokens = p["tokenUsage"]["last"]["outputTokens"]
                         .as_i64()
                         .unwrap_or(0);
-                    on_event(ConvoEvent::ContextUsage {
-                        context_tokens: p["tokenUsage"]["last"]["totalTokens"]
-                            .as_i64()
-                            .unwrap_or(0),
-                        context_window: p["tokenUsage"]["modelContextWindow"].as_i64(),
-                        observed_at: Some(chrono::Utc::now().timestamp_millis()),
-                        source: Some("app_server".into()),
-                        valid: Some(true),
-                    });
+                    on_event(context_usage_event(&p));
                 }
                 _ => {}
             }
@@ -1379,7 +1390,7 @@ pub fn run_selected(
     images: &[String],
     session_name: Option<&str>,
     mcp: Option<&PreviewMcpLease>,
-    on_spawn: impl FnOnce(u32),
+    on_spawn: impl FnMut(u32),
     on_event: impl FnMut(ConvoEvent),
 ) -> Result<TurnOutcome, String> {
     let Some(ctx) = ctx else {

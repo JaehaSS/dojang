@@ -23,6 +23,7 @@ const renderSidebar = (
   activeState: Task["state"] = "Running",
   awaitingKind: Task["awaiting_kind"] = null,
   insightsUnread = 0,
+  pipeline: { pipelineAttention?: number; pipelineActive?: boolean } = {},
 ): string =>
   renderToStaticMarkup(
     <Sidebar
@@ -30,6 +31,7 @@ const renderSidebar = (
       onPickBrowsingHost={() => {}}
       view="home"
       insightsUnread={insightsUnread}
+      {...pipeline}
       onNewTask={() => {}}
       onQuickLink={() => {}}
       collapsed={collapsed}
@@ -218,5 +220,24 @@ describe("Sidebar 최근 세션", () => {
   // fixture의 updated_at은 epoch 3초 — 창 밖이므로 섹션 자체가 없다(결정 2).
   it("1시간 안에 갱신된 작업이 없으면 섹션을 그리지 않는다", () => {
     expect(renderSidebar()).not.toContain("최근 세션");
+  });
+});
+
+describe("Sidebar 파이프라인 배지", () => {
+  it("조치 필요 건수를 접근 가능한 라벨과 함께 보인다", () => {
+    const html = renderSidebar(false, "Running", null, 0, { pipelineAttention: 2 });
+    expect(html).toContain('aria-label="조치 필요 2건"');
+  });
+
+  it("조치 필요가 없고 자동 진행 중이면 진행 표시만 보인다", () => {
+    const html = renderSidebar(false, "Running", null, 0, { pipelineActive: true });
+    expect(html).not.toContain("조치 필요");
+    expect(html).toContain('aria-label="파이프라인 자동 진행 중"');
+  });
+
+  it("아무것도 없으면 배지가 없다", () => {
+    const html = renderSidebar();
+    expect(html).not.toContain("조치 필요");
+    expect(html).not.toContain("파이프라인 자동 진행 중");
   });
 });

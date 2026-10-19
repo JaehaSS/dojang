@@ -1,4 +1,4 @@
-//! worktree 환경 부트스트랩 — `.worktreeinclude` 복사와 `.praxis-env-setup.sh` 실행.
+//! worktree 환경 부트스트랩 — `.worktreeinclude` 복사와 `.dojang-env-setup.sh` 실행.
 //!
 //! 새 worktree는 tracked 파일만 체크아웃한다. `.env`·로컬 인증서처럼 git이 무시하는
 //! 파일은 원본에 남아 에이전트가 반쪽 환경에서 일하게 된다. 이 모듈이 그 간극을 메운다.
@@ -16,7 +16,8 @@ use std::path::Path;
 pub const INCLUDE_FILE: &str = ".worktreeinclude";
 
 /// worktree 최초 생성 직후 1회 실행하는 셋업 훅.
-pub const SETUP_SCRIPT: &str = ".praxis-env-setup.sh";
+pub const SETUP_SCRIPT: &str = ".dojang-env-setup.sh";
+const LEGACY_SETUP_SCRIPT: &str = ".praxis-env-setup.sh";
 
 /// 후보 상한 — 이보다 많으면 매칭을 시도하지 않고 전사에 남긴다.
 /// `node_modules`가 통째로 후보에 드는 저장소를 방어한다.
@@ -106,12 +107,12 @@ fn copy_included(source: &Path, target: &Path, include_path: &Path, transcript: 
 
     for rel in candidates {
         let from = source.join(&rel);
-        // Praxis는 worktree를 `<repo>/.praxis/worktrees/<slug>` 에 만든다 — target이
+        // Dojang은 worktree를 `<repo>/.dojang/worktrees/<slug>` 에 만든다 — target이
         // source의 하위다. 방금 만든 worktree와 다른 작업의 worktree가 그대로 후보에
         // 드는데, gitignore 패턴은 앵커링이 없으면 임의 깊이에 매치되므로(`certs/`가
-        // `.praxis/worktrees/x/certs/`에도 걸린다) 자기 자신을 복사하게 된다.
-        // `.praxis`는 앱 내부 상태라 어차피 사용자가 의도할 대상이 아니다.
-        if rel.starts_with(".praxis/") || from.starts_with(target) {
+        // `.dojang/worktrees/x/certs/`에도 걸린다) 자기 자신을 복사하게 된다.
+        // 앱 내부 상태는 기존 경로를 포함해 복사하지 않는다.
+        if crate::project_paths::is_internal_path(&rel) || from.starts_with(target) {
             continue;
         }
         // Whitelist(`!`)와 None은 둘 다 복사 대상이 아니다.
@@ -161,22 +162,25 @@ fn copy_included(source: &Path, target: &Path, include_path: &Path, transcript: 
 ///
 /// `sh <script>`로 부른다 — 실행 권한이 없어도 동작한다. git이 실행 비트를 잃는 일이 흔하다.
 fn run_setup_script(target: &Path, transcript: &mut Transcript) {
-    let script = target.join(SETUP_SCRIPT);
-    if !script.is_file() {
+    let Some(script_name) = [SETUP_SCRIPT, LEGACY_SETUP_SCRIPT]
+        .into_iter()
+        .find(|name| target.join(name).is_file())
+    else {
         return;
-    }
+    };
+    let script = target.join(script_name);
     let output = std::process::Command::new(posix_shell())
         .arg(&script)
         .current_dir(target)
         .output();
     transcript.setup_script = Some(match output {
-        Ok(out) if out.status.success() => format!("{SETUP_SCRIPT} 실행을 마쳤습니다"),
+        Ok(out) if out.status.success() => format!("{script_name} 실행을 마쳤습니다"),
         Ok(out) => format!(
-            "{SETUP_SCRIPT} 가 실패했습니다(코드 {:?}) — 작업은 계속합니다: {}",
+            "{script_name} 가 실패했습니다(코드 {:?}) — 작업은 계속합니다: {}",
             out.status.code(),
             String::from_utf8_lossy(&out.stderr).trim()
         ),
-        Err(error) => format!("{SETUP_SCRIPT} 를 실행하지 못했습니다: {error}"),
+        Err(error) => format!("{script_name} 를 실행하지 못했습니다: {error}"),
     });
 }
 
@@ -392,17 +396,18 @@ mod tests {
 
     #[test]
     fn nested_worktree_is_not_a_copy_candidate() {
-        // Praxis 는 worktree 를 `<repo>/.praxis/worktrees/<slug>` 에 만든다.
+        // Dojang은 worktree를 `<repo>/.dojang/worktrees/<slug>`에 만든다.
         // 앵커링 없는 패턴(`certs/`)은 임의 깊이에 매치되므로, 방어가 없으면
         // 새 worktree 와 다른 작업의 worktree 안 파일을 자기 자신에게 복사한다.
-        let (source, _) = fixture("nested-wt", ".praxis/\ncerts/\n", "certs/\n");
-        let target = source.join(".praxis/worktrees/current");
+        let (source, _) = fixture("nested-wt", ".dojang/\n.praxis/\ncerts/\n", "certs/\n");
+        let target = source.join(".dojang/worktrees/current");
         std::fs::create_dir_all(&target).unwrap();
         write(&source.join("certs/real.pem"), "REAL");
         write(
-            &source.join(".praxis/worktrees/other/certs/stale.pem"),
+            &source.join(".dojang/worktrees/other/certs/stale.pem"),
             "STALE",
         );
+        write(&source.join(".praxis/worktrees/legacy/certs/old.pem"), "OLD");
         write(&target.join("certs/self.pem"), "SELF");
 
         let transcript = run(&source, &target);
@@ -413,10 +418,25 @@ mod tests {
             "원본의 certs 만 복사해야 한다: {transcript:?}"
         );
         assert!(
-            !target.join(".praxis").exists(),
-            "worktree 안에 .praxis 를 만들면 안 된다: {transcript:?}"
+            !target.join(".dojang").exists() && !target.join(".praxis").exists(),
+            "worktree 안에 내부 디렉터리를 복사하면 안 된다: {transcript:?}"
         );
         std::fs::remove_dir_all(&source).ok();
+    }
+
+    #[test]
+    fn setup_prefers_dojang_and_still_runs_a_legacy_only_hook() {
+        let (source, target) = fixture("setup-names", "", "");
+        write(&target.join(LEGACY_SETUP_SCRIPT), "printf legacy > hook-result.txt\n");
+        let legacy = run(&source, &target);
+        assert_eq!(std::fs::read_to_string(target.join("hook-result.txt")).unwrap(), "legacy");
+        assert!(legacy.setup_script.unwrap().contains(LEGACY_SETUP_SCRIPT));
+        write(&target.join(SETUP_SCRIPT), "printf dojang > hook-result.txt\n");
+        let current = run(&source, &target);
+        assert_eq!(std::fs::read_to_string(target.join("hook-result.txt")).unwrap(), "dojang");
+        assert!(current.setup_script.unwrap().contains(SETUP_SCRIPT));
+        std::fs::remove_dir_all(source).ok();
+        std::fs::remove_dir_all(target).ok();
     }
 
     #[test]

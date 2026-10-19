@@ -51,6 +51,15 @@ export interface RunRow {
   last_error: string | null;
   created_at: number;
   updated_at: number;
+  /** 분할 심판이 clarify·decline을 내고 사용자 답변을 기다리는 동안의 `Clarification` JSON. */
+  clarification_json: string | null;
+}
+
+/** `pipeline::model::Clarification` — 분할 전에 사용자에게 되돌아온 질문(clarify) 또는 수행 불가 사유(decline). */
+export interface Clarification {
+  decision: "clarify" | "decline";
+  questions: string[];
+  reason: string;
 }
 
 export interface TicketRow {
@@ -71,6 +80,8 @@ export interface TicketRow {
   reassigned: number;
   last_error: string | null;
   updated_at: number;
+  /** 에이전트를 새로 띄울 때마다 오르는 세대(재시도·재배정). 백엔드 `TicketRow.gen`. */
+  gen?: number;
 }
 
 export interface StepRow {
@@ -110,6 +121,16 @@ export interface PipelineDetail {
 export interface VendorAvailability {
   vendor: string;
   available: boolean;
+  /** 사용 불가 사유(예: "PATH에 없음", "할당량 소진: ..."). 가용이면 null. */
+  reason?: string | null;
+}
+
+/** `pipeline_list` 항목 — 실행 행에 티켓 집계와 진행 중 단계가 붙는다. */
+export interface RunListItem extends RunRow {
+  tickets_total: number;
+  tickets_integrated: number;
+  tickets_escalated: number;
+  active_step_kind: string | null;
 }
 
 /** `pipeline::model::TicketDraft`. */
@@ -164,7 +185,7 @@ export interface Synthesis {
 export const pipelineVendors = () => invoke<VendorAvailability[]>("pipeline_vendors");
 export const pipelineStart = (repo: string, baseBranch: string, goal: string) =>
   invoke<RunRow>("pipeline_start", { repo, baseBranch, goal });
-export const pipelineList = (repo?: string) => invoke<RunRow[]>("pipeline_list", { repo });
+export const pipelineList = (repo?: string) => invoke<RunListItem[]>("pipeline_list", { repo });
 export const pipelineGet = (runId: number) => invoke<PipelineDetail>("pipeline_get", { runId });
 export const pipelineUpdateTickets = (runId: number, expectedRevision: number, tickets: TicketDraft[]) =>
   invoke<RunRow>("pipeline_update_tickets", { runId, expectedRevision, tickets });
@@ -177,6 +198,8 @@ export const pipelineRetryTicket = (runId: number, ticketId: number, vendor?: st
 export const pipelineSkipTicket = (runId: number, ticketId: number) =>
   invoke<RunRow>("pipeline_skip_ticket", { runId, ticketId });
 export const pipelineResume = (runId: number) => invoke<RunRow>("pipeline_resume", { runId });
+export const pipelineAnswerClarification = (runId: number, answer: string) =>
+  invoke<RunRow>("pipeline_answer_clarification", { runId, answer });
 export const pipelineCancel = (runId: number) => invoke<RunRow>("pipeline_cancel", { runId });
 
 // --- 라벨 ---
@@ -220,6 +243,7 @@ export const vendorLabel = (vendor: string | null | undefined): string =>
   vendor ? (VENDOR_LABEL[vendor] ?? vendor) : "-";
 
 export const STEP_KIND_LABEL: Record<string, string> = {
+  baseline: "기준선 검증",
   split: "분할",
   plan_review: "계획 리뷰",
   plan_fix: "계획 수정",
@@ -261,6 +285,16 @@ export const hasEscalation = (tickets: Pick<TicketRow, "state">[]): boolean =>
 
 export const canResume = (run: Pick<RunRow, "state">) => run.state === "paused";
 
+/** 분할 심판의 질문·거절에 답할 수 있는가 — Drafting에서 멈췄고 질문이 남아 있을 때. */
+export const canAnswerClarification = (run: Pick<RunRow, "state" | "paused_from" | "clarification_json">): boolean =>
+  run.state === "paused" && run.paused_from === "drafting" && !!run.clarification_json;
+
+/** 질문에 답하지 않고 그대로 분할시킬 때 보내는 고정 답변. 백엔드 `model::PROCEED_ANYWAY_ANSWER`와 같은 문구다. */
+export const PROCEED_ANYWAY_ANSWER = "질문에 답하지 않고 그대로 진행한다. 목표를 가장 자연스러운 구현 요청으로 해석해 분할하라.";
+
+/** 목표가 슬래시 명령으로 시작하면 파이프라인은 그 명령을 전개하지 못한다 — 시작 전에 알려 준다. */
+export const isSlashCommandGoal = (goal: string): boolean => /^\s*\/[A-Za-z0-9_-]+/.test(goal);
+
 /** 취소는 비종결 상태에서만 허용된다(백엔드 계약). */
 export const canCancel = (run: Pick<RunRow, "state">) => !isTerminalRun(run);
 
@@ -299,6 +333,16 @@ export function parseSpec(specJson: string | null | undefined): Spec | null {
     goal: raw.goal ?? "",
     requirements: Array.isArray(raw.requirements) ? raw.requirements : [],
     out_of_scope: Array.isArray(raw.out_of_scope) ? raw.out_of_scope : [],
+  };
+}
+
+export function parseClarification(json: string | null | undefined): Clarification | null {
+  const raw = parseJson<Partial<Clarification> | null>(json, null);
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    decision: raw.decision === "decline" ? "decline" : "clarify",
+    questions: Array.isArray(raw.questions) ? raw.questions.filter((q): q is string => typeof q === "string" && q.trim() !== "") : [],
+    reason: typeof raw.reason === "string" ? raw.reason : "",
   };
 }
 
@@ -428,6 +472,27 @@ export function stepDurationSecs(step: Pick<StepRow, "started_at" | "finished_at
   return Math.max(0, Math.round(d));
 }
 
+/** 단계 종류별 시간 예산(초). 드라이버 상수와 같다 — 진행 카드가 "경과/예산"을 보일 때 쓴다. */
+export const STEP_BUDGET_SECS: Record<string, number> = {
+  baseline: 600,
+  split: 600,
+  plan_review: 420,
+  ticket_review: 300,
+  final_review: 600,
+};
+
+/** 아직 끝나지 않은 가장 최근 단계. 없으면 null. */
+export function runningStep(steps: StepRow[]): StepRow | null {
+  const running = steps.filter((s) => s.status === "running");
+  return running.length === 0 ? null : running.reduce((a, b) => (b.started_at > a.started_at ? b : a));
+}
+
+/** 단계 시작 뒤 경과 시간(초). 시각 단위는 epoch 초이며, 밀리초 값이 오면 보정한다. */
+export function elapsedSecs(step: Pick<StepRow, "started_at">, nowMs = Date.now()): number {
+  const started = step.started_at > 1e12 ? step.started_at : step.started_at * 1000;
+  return Math.max(0, Math.round((nowMs - started) / 1000));
+}
+
 export function formatDuration(secs: number | null): string {
   if (secs == null) return "-";
   if (secs < 60) return `${secs}초`;
@@ -440,3 +505,91 @@ export const boundOutput = (text: string | null | undefined, limit = STEP_OUTPUT
   if (!text) return "";
   return text.length > limit ? `${text.slice(0, limit)}\n… (${text.length - limit}자 생략)` : text;
 };
+
+// --- 목록 요약·주의 필요 판정 ---
+
+const ATTENTION_RUN_STATES: readonly string[] = ["awaiting_plan_approval", "awaiting_merge_approval", "paused"];
+
+/** 사용자가 손대야 진행되는 실행인가 — 계획·머지 승인 대기, 일시정지(질문·에스컬레이션 포함), 에스컬레이션 티켓. */
+export const needsAttention = (run: Pick<RunListItem, "state"> & Partial<Pick<RunListItem, "tickets_escalated">>): boolean =>
+  ATTENTION_RUN_STATES.includes(run.state) || (!TERMINAL_RUN_STATES.includes(run.state) && (run.tickets_escalated ?? 0) > 0);
+
+export const attentionCount = (runs: Parameters<typeof needsAttention>[0][]): number => runs.filter(needsAttention).length;
+
+/** 종결되지 않았고 사용자 조치도 필요 없는, 자동으로 도는 실행. */
+export const isAutoRunning = (run: Parameters<typeof needsAttention>[0]): boolean =>
+  !TERMINAL_RUN_STATES.includes(run.state) && !needsAttention(run);
+
+export interface RunGroups<T> {
+  attention: T[];
+  active: T[];
+  finished: T[];
+}
+
+/** 조치 필요 / 진행 중 / 종료로 가른다. 각 묶음은 최근 갱신순. */
+export function groupRuns<T extends Parameters<typeof needsAttention>[0] & Pick<RunRow, "updated_at">>(runs: T[]): RunGroups<T> {
+  const out: RunGroups<T> = { attention: [], active: [], finished: [] };
+  for (const r of [...runs].sort((a, b) => b.updated_at - a.updated_at)) {
+    if (TERMINAL_RUN_STATES.includes(r.state)) out.finished.push(r);
+    else if (needsAttention(r)) out.attention.push(r);
+    else out.active.push(r);
+  }
+  return out;
+}
+
+/** 경로의 마지막 구성요소. */
+export const repoBasename = (repo: string): string => repo.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || repo;
+
+/** 통합 진행률(0–100). 티켓이 없으면 0. */
+export const integratedPercent = (total: number, integrated: number): number =>
+  total <= 0 ? 0 : Math.max(0, Math.min(100, Math.round((integrated / total) * 100)));
+
+/** 상대 시각. 시각 단위는 epoch 초이며 밀리초 값이 오면 보정한다. */
+export function relativeTime(at: number, nowMs = Date.now()): string {
+  const ms = at > 1e12 ? at : at * 1000;
+  const secs = Math.max(0, Math.round((nowMs - ms) / 1000));
+  if (secs < 60) return "방금";
+  const m = Math.floor(secs / 60);
+  if (m < 60) return `${m}분 전`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}시간 전`;
+  return `${Math.floor(h / 24)}일 전`;
+}
+
+/** 지금 사용자가 할 일 한 줄. */
+export function nextActionHint(run: Pick<RunRow, "state" | "paused_from" | "clarification_json">, escalated: number): string {
+  if (run.state === "awaiting_plan_approval") return "계획 승인 필요";
+  if (run.state === "awaiting_merge_approval") return "머지 승인 필요";
+  if (run.state === "paused") {
+    if (canAnswerClarification(run)) return "분할 전 질문에 답변 필요";
+    if (escalated > 0) return `티켓 ${escalated}건 에스컬레이션 확인 필요`;
+    return "일시정지 — 사유 확인 후 해제 필요";
+  }
+  if (escalated > 0 && !TERMINAL_RUN_STATES.includes(run.state)) return `티켓 ${escalated}건 에스컬레이션 확인 필요`;
+  if (run.state === "done") return "완료 — 조치 불필요";
+  if (run.state === "cancelled") return "취소됨 — 조치 불필요";
+  if (run.state === "failed") return "실패 — 오류를 확인하세요";
+  return "자동 진행 중 — 조치 불필요";
+}
+
+/** `baseline` 단계 출력 — 기준선(base 브랜치)에서 이미 실패하는 검사. */
+export interface BaselineResult {
+  failed_commands: string[];
+  summary: string;
+}
+
+export function parseBaseline(output: string | null | undefined): BaselineResult | null {
+  const raw = parseJson<Partial<BaselineResult> | null>(output, null);
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    failed_commands: Array.isArray(raw.failed_commands) ? raw.failed_commands.filter((c): c is string => typeof c === "string") : [],
+    summary: typeof raw.summary === "string" ? raw.summary : "",
+  };
+}
+
+/** 가장 최근 baseline 단계의 실패 명령 결과. 없거나 실패 명령이 비어 있으면 null. */
+export function baselineFailure(steps: StepRow[]): BaselineResult | null {
+  const last = steps.filter((s) => s.kind === "baseline" && s.output).reduce<StepRow | null>((a, b) => (!a || b.started_at >= a.started_at ? b : a), null);
+  const parsed = last ? parseBaseline(last.output) : null;
+  return parsed && parsed.failed_commands.length > 0 ? parsed : null;
+}

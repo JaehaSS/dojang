@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { copyText } from "../../lib/clipboard";
 import { Icon } from "./icons";
 
 /** 코드 블록 우상단 복사 버튼.
@@ -16,12 +17,8 @@ export function CodeCopyButton({ text }: { text: string }) {
   if (!text) return null;
 
   const copy = async () => {
-    // clipboard가 없는 컨텍스트(비보안 오리진 등)에서 `?.`로 넘기면 undefined를 await 해
-    // 실패가 성공으로 보인다 — 존재를 먼저 확인한다.
-    const clipboard = navigator.clipboard;
-    if (!clipboard) return;
     try {
-      await clipboard.writeText(text);
+      await copyText(text);
     } catch {
       return; // 복사되지 않았으면 복사됐다고 말하지 않는다
     }

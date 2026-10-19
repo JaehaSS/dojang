@@ -4,7 +4,9 @@
 //! 붙는지는 여기서 확인한다:
 //!   cargo test --test lspclient_smoke_test -- --ignored --nocapture
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use praxis_lib::lspclient::{GotoKind, LspPool};
 
@@ -133,4 +135,182 @@ async fn references_finds_call_sites() {
             .all(|t| t.line != line || t.path.as_deref() != Some(rel)),
         "includeDeclaration=false 이므로 선언 자신은 빠져야 한다: {targets:?}",
     );
+}
+
+/// 대표 Gradle fixture를 읽기만 하며 jdtls의 import JVM 분리와 실제 탐색 결과를 확인한다.
+/// 실행 래퍼가 `DOJANG_LSP_JAVA_ROOT`, `XDG_CACHE_HOME`, `GRADLE_USER_HOME`을 모두
+/// disposable 경로로 공급한다. 원본 프로젝트를 직접 지정해 실행하지 않는다.
+#[tokio::test]
+#[ignore = "DOJANG_LSP_JAVA_ROOT·DOJANG_LSP_JAVA_PATH의 disposable Java fixture와 jdtls 필요"]
+async fn java_navigation_definition_references_and_semantic_tokens() {
+    let root =
+        PathBuf::from(std::env::var("DOJANG_LSP_JAVA_ROOT").expect("DOJANG_LSP_JAVA_ROOT 필요"));
+    let requested =
+        std::env::var("DOJANG_LSP_JAVA_PATH").expect("DOJANG_LSP_JAVA_PATH 필요");
+    let rel = if root.join(&requested).is_file() {
+        requested
+    } else {
+        requested
+            .strip_prefix("mirae/")
+            .unwrap_or(&requested)
+            .to_string()
+    };
+    let text = std::fs::read_to_string(root.join(&rel)).expect("FepClient fixture 읽기");
+    let pool = LspPool::default();
+    let result: Result<(), String> = async {
+        let (type_line, type_column) = locate(&text, "private final FepApi fepApi;", "FepApi");
+        let began = Instant::now();
+        let type_targets = pool
+            .goto(
+                91,
+                &root,
+                &rel,
+                &text,
+                type_line,
+                type_column,
+                GotoKind::Definition,
+            )
+            .await?;
+        println!(
+            "FepApi definition {:?} in {:?}",
+            began.elapsed(),
+            type_targets
+        );
+        let fep_api = type_targets
+            .iter()
+            .find(|target| target.abs_path.ends_with("FepApi.java"))
+            .ok_or_else(|| format!("FepApi.java 정의를 찾지 못했습니다: {type_targets:?}"))?;
+        let fep_api_text = std::fs::read_to_string(&fep_api.abs_path)
+            .map_err(|error| format!("FepApi 소스를 읽지 못했습니다: {error}"))?;
+        let expected_type_line = locate(&fep_api_text, "interface FepApi", "FepApi").0;
+        if fep_api.line != expected_type_line {
+            return Err(format!(
+                "FepApi 정의 줄이 다릅니다: 기대 {expected_type_line}, 실제 {}",
+                fep_api.line
+            ));
+        }
+
+        let (method_line, method_column) = locate(
+            &text,
+            "ClaimCountResponseDto response = fepApi.countClaims(",
+            "countClaims",
+        );
+        let method_targets = pool
+            .goto(
+                91,
+                &root,
+                &rel,
+                &text,
+                method_line,
+                method_column,
+                GotoKind::Definition,
+            )
+            .await?;
+        println!("countClaims definition {method_targets:?}");
+        let count_claims = method_targets
+            .iter()
+            .find(|target| target.abs_path == fep_api.abs_path)
+            .ok_or_else(|| format!("countClaims 정의를 찾지 못했습니다: {method_targets:?}"))?;
+        let expected_method_line = locate(
+            &fep_api_text,
+            "ClaimCountResponseDto countClaims",
+            "countClaims",
+        )
+        .0;
+        if count_claims.line != expected_method_line {
+            return Err(format!(
+                "countClaims 정의 줄이 다릅니다: 기대 {expected_method_line}, 실제 {}",
+                count_claims.line
+            ));
+        }
+
+        let (refs_line, refs_column) = locate(&text, "public class FepClient", "FepClient");
+        let began = Instant::now();
+        let references = pool
+            .goto(
+                91,
+                &root,
+                &rel,
+                &text,
+                refs_line,
+                refs_column,
+                GotoKind::References,
+            )
+            .await?;
+        println!("FepClient references {:?}: {references:?}", began.elapsed());
+        if references.len() < 7 {
+            return Err(format!(
+                "FepClient 사용처가 7건보다 적습니다: {references:?}"
+            ));
+        }
+        let unique = references
+            .iter()
+            .map(|target| format!("{}:{}:{}", target.abs_path, target.line, target.column))
+            .collect::<HashSet<_>>();
+        if unique.len() != references.len()
+            || references.iter().any(|target| {
+                target.path.as_deref() == Some(rel.as_str()) && target.line == refs_line
+            })
+        {
+            return Err(format!(
+                "사용처가 선언을 포함하거나 중복됩니다: {references:?}"
+            ));
+        }
+        for expected in [
+            "ClaimExternalService.java",
+            "StatisticsService.java",
+            "ContextTest.java",
+        ] {
+            if !references
+                .iter()
+                .any(|target| target.abs_path.ends_with(expected))
+            {
+                return Err(format!(
+                    "{expected} 사용처를 찾지 못했습니다: {references:?}"
+                ));
+            }
+        }
+
+        let tokens = pool.semantic_tokens(91, &root, &rel, &text).await?;
+        if tokens
+            .as_ref()
+            .map_or(true, |tokens| tokens.data.is_empty())
+        {
+            return Err("jdtls 의미 토큰이 비었습니다".into());
+        }
+        let status = pool.status_for(91, &root, &rel).await;
+        if status.phase != "ready" {
+            return Err(format!(
+                "Java import 준비 상태가 ready가 아닙니다: {status:?}"
+            ));
+        }
+
+        // 같은 scope를 재시작해도 disk cache를 다시 쓰며 탐색 결과를 보존해야 한다.
+        pool.shutdown_task(91).await;
+        let began = Instant::now();
+        let warm_references = pool
+            .goto(
+                91,
+                &root,
+                &rel,
+                &text,
+                refs_line,
+                refs_column,
+                GotoKind::References,
+            )
+            .await?;
+        println!(
+            "FepClient warm references {:?}: {warm_references:?}",
+            began.elapsed()
+        );
+        if warm_references.len() < 7 {
+            return Err(format!(
+                "warm restart 뒤 FepClient 사용처가 7건보다 적습니다: {warm_references:?}"
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    pool.shutdown_all().await;
+    result.expect("Java LSP 실제 탐색 검증 실패");
 }

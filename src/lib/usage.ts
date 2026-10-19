@@ -64,8 +64,18 @@ export function summarize(v: VendorUsage): { text: string; tone: "value" | "mute
     return { text: label[v.status] ?? "알 수 없음", tone: "muted" };
   }
   const parts: string[] = [];
-  if (v.five_hour) parts.push(`${Math.round(remaining(v.five_hour))}%`);
-  if (v.weekly) parts.push(`주 ${Math.round(remaining(v.weekly))}%`);
+  if (v.five_hour) {
+    parts.push(`${v.quota_groups?.length ? "Gemini " : ""}${Math.round(remaining(v.five_hour))}%`);
+  }
+  if (v.weekly) {
+    parts.push(`${!v.five_hour && v.quota_groups?.length ? "Gemini " : ""}주 ${Math.round(remaining(v.weekly))}%`);
+  }
+  if (parts.length === 0 && v.quota_groups?.length) {
+    for (const group of v.quota_groups) {
+      const windows = [group.five_hour, group.weekly].filter((w): w is UsageWindow => w != null);
+      if (windows.length) parts.push(`${group.label} ${Math.round(Math.min(...windows.map(remaining)))}%`);
+    }
+  }
   if (parts.length === 0) return { text: "데이터 없음", tone: "muted" };
   return { text: parts.join(" · "), tone: v.status === "stale" ? "muted" : "value" };
 }
@@ -179,6 +189,8 @@ export function weeklyTitle(c: WeeklyCell): string {
 
 /** 값의 출처를 사람이 읽는 문구로. */
 export function sourceLabel(source: string | null): string | null {
+  if (source === "antigravity-oauth") return "Antigravity 사용량 API";
+  if (source === "antigravity-local") return "Antigravity 앱";
   if (source === "session-log") return "세션 로그";
   if (source === "statusline") return "statusline 브리지";
   if (source === "oauth") return "사용량 API";

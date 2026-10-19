@@ -20,6 +20,7 @@ import {
   previewBoundsFromRect,
 } from "../../lib/designmode/layout";
 import type { DesignBoundingRect } from "../../lib/designmode/types";
+import { enqueueDesignTransition, waitForDesignTransition } from "../../lib/design-canvas/lifecycle";
 import { EditorCaptureButton } from "./EditorCaptureButton";
 import { PreviewWorkbenchStrip } from "./PreviewWorkbenchStrip";
 import type { PreviewWorkbenchState } from "../../lib/preview-workbench/types";
@@ -97,6 +98,8 @@ export const PreviewTab = memo(function PreviewTab({
   const nativeRevision = useRef(0);
   const onChangedRef = useRef(onPreviewChanged);
   onChangedRef.current = onPreviewChanged;
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   // 구독 후 조회해 마운트 전에 열린 창과 놓친 이벤트도 복원한다.
   useEffect(() => {
@@ -104,6 +107,8 @@ export const PreviewTab = memo(function PreviewTab({
     const refresh = async () => {
       const revision = ++nativeRevision.current;
       try {
+        await waitForDesignTransition(taskId);
+        if (disposed) return;
         const preview = await designmodeState(taskId);
         if (disposed || revision !== nativeRevision.current) return;
         setLoaded(preview !== null);
@@ -131,7 +136,8 @@ export const PreviewTab = memo(function PreviewTab({
     return container ? previewBoundsFromRect(container.getBoundingClientRect()) : null;
   }, []);
 
-  const openPreview = async (target: string): Promise<void> => {
+  const openPreview = async (target: string): Promise<void> => enqueueDesignTransition(taskId, async () => {
+    if (!activeRef.current || !containerRef.current) return;
     const nextUrl = target.trim();
     const bounds = readBounds();
     if (!bounds || !nextUrl) return;
@@ -153,7 +159,7 @@ export const PreviewTab = memo(function PreviewTab({
     } catch (cause) {
       setError(String(cause));
     }
-  };
+  });
 
   // 네이티브 자식 웹뷰는 z-index와 무관하게 항상 메인 웹뷰의 DOM 위에 그려진다 — 사이드패널
   // 오버레이(도구 피커 등)가 열린 동안은 숨겨야 그 아래로 잘리지 않는다.
@@ -169,14 +175,14 @@ export const PreviewTab = memo(function PreviewTab({
   useEffect(() => {
     let cancelled = false;
     if (managesWebview && !showWebview) {
-      void designmodeHide(taskId).catch(() => {});
+      void enqueueDesignTransition(taskId, () => designmodeHide(taskId)).catch(() => {});
       return;
     }
     if (!managesWebview && !active) return;
     const bounds = readBounds();
     if (!bounds) return;
     boundsRef.current = bounds;
-    void designmodeShow(taskId, bounds)
+    void enqueueDesignTransition(taskId, async () => { if (!cancelled) await designmodeShow(taskId, bounds); })
       .catch((cause) => {
         if (!cancelled) setError(String(cause));
       });
@@ -188,7 +194,7 @@ export const PreviewTab = memo(function PreviewTab({
   // 작업 전환으로 컴포넌트가 사라져도 WebView는 닫지 않고 숨긴다. 명시적 탭 닫기만 파괴한다.
   useEffect(() => {
     if (!managesWebview) return;
-    return () => void designmodeHide(taskId).catch(() => {});
+    return () => { void enqueueDesignTransition(taskId, () => designmodeHide(taskId)).catch(() => {}); };
   }, [managesWebview, taskId]);
 
   // 리사이즈/스크롤 burst를 한 프레임으로 합치고 동일 bounds는 네이티브 IPC로 보내지 않는다.
@@ -199,11 +205,14 @@ export const PreviewTab = memo(function PreviewTab({
     // 창 모드에서는 네이티브가 no-op이지만, 매 프레임 무의미한 IPC를 쏘지 않도록 여기서 끊는다.
     if (!container || !managesWebview || !showWebview || !loaded) return;
     let timer: number | undefined;
+    let disposed = false;
     const sync = () => {
       const bounds = previewBoundsFromRect(container.getBoundingClientRect());
       if (!bounds || !previewBoundsChanged(boundsRef.current, bounds)) return;
       boundsRef.current = bounds;
-      void designmodeSetBounds(taskId, bounds).catch(() => {});
+      void enqueueDesignTransition(taskId, async () => {
+        if (!disposed) await designmodeSetBounds(taskId, bounds);
+      }).catch(() => {});
     };
     const scheduleSync = () => {
       if (timer != null) return;
@@ -218,6 +227,7 @@ export const PreviewTab = memo(function PreviewTab({
     window.addEventListener("scroll", scheduleSync, true);
     sync();
     return () => {
+      disposed = true;
       if (timer != null) clearTimeout(timer);
       ro.disconnect();
       window.removeEventListener("resize", scheduleSync);
@@ -273,7 +283,8 @@ export const PreviewTab = memo(function PreviewTab({
 
   // 모드 전환은 웹뷰 재생성이라 페이지 상태가 날아간다(Tauri에 reparent API가 없다).
   // 이미 떠 있는 프리뷰가 있으면 그 사실을 알리고, 확인받은 뒤에만 바꾼다.
-  const toggleMode = async (): Promise<void> => {
+  const toggleMode = async (): Promise<void> => enqueueDesignTransition(taskId, async () => {
+    if (!activeRef.current || !containerRef.current) return;
     const next: PreviewMode = mode === "window" ? "inline" : "window";
     if (loaded && !window.confirm("프리뷰를 다시 불러옵니다. 페이지에 입력하던 내용은 사라집니다.")) {
       return;
@@ -295,12 +306,14 @@ export const PreviewTab = memo(function PreviewTab({
     setSelecting(false);
     lastModeByTask.set(taskId, next);
     setMode(next);
-  };
+  });
 
   const toggleSelecting = () => {
     const next = !selecting;
     setSelecting(next);
-    designmodeSetSelectionMode(taskId, next).catch((e) => setError(String(e)));
+    void enqueueDesignTransition(taskId, async () => {
+      if (activeRef.current && containerRef.current) await designmodeSetSelectionMode(taskId, next);
+    }).catch((e) => setError(String(e)));
   };
 
   return (

@@ -98,6 +98,14 @@ export function channelHandleVisible(input: {
 }
 
 /**
+ * 재열기 핸들의 이름. 접힌 동안 온 알아둘 것 카드는 핸들의 숫자로만 알리므로, 화면 낭독기도
+ * 그 숫자를 들어야 한다.
+ */
+export function channelHandleLabel(unread: number): string {
+  return unread > 0 ? `작업정보 열기 · 안 읽은 알아둘 것 ${unread}장` : "작업정보 열기";
+}
+
+/**
  * 헤더 소환 칩(파일·Diff·프리뷰·터미널)이 라벨을 보여 주는 중앙 잔여 하한.
  *
  * 라벨 4개는 아이콘 온리 대비 행을 약 190px 늘린다. 채널이 떠서 액션 줄이 320px

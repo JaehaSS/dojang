@@ -25,7 +25,8 @@ const IGNORE: &[&str] = &[
     "node_modules",
     "target",
     "dist",
-    ".praxis",
+    crate::project_paths::DIR,
+    crate::project_paths::LEGACY_DIR,
     ".DS_Store",
 ];
 
@@ -391,6 +392,9 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        for dir in crate::project_paths::DIRS {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
         std::fs::write(root.join("z.txt"), "z").unwrap();
         std::fs::write(root.join("src/a.rs"), "a").unwrap();
         let tree = build_tree(&root).unwrap();

@@ -14,6 +14,7 @@ use std::time::SystemTime;
 use serde::Serialize;
 
 mod agent_skills;
+pub mod app_activity;
 mod cards;
 pub mod dismissals;
 mod lessons;
@@ -29,6 +30,7 @@ pub use lessons::{
     LedgerEntry, RepoLessons, RepoProjection, SubjectCount,
 };
 pub use outcomes::{compute_outcomes, OutcomeInsights};
+pub use app_activity::{compute_app_activity, AppActivity};
 pub use patterns::{compute_patterns, TaskPatterns};
 
 /// 모델 한 종에 대한 사용량 집계.
@@ -448,7 +450,7 @@ fn split_segments(path: &str) -> Vec<&str> {
     path.split(['/', '\\']).filter(|s| !s.is_empty()).collect()
 }
 
-/// `<repo>/.praxis/worktrees/<name>/…` → `<repo>`. 그 패턴이 없으면 원본 그대로.
+/// `<repo>/.dojang/worktrees/<name>/…` (기존 경로도 인식) → `<repo>`. 그 패턴이 없으면 원본 그대로.
 fn strip_worktree_suffix(cwd: &str) -> &str {
     let bytes = cwd.as_bytes();
     let mut segs: Vec<(usize, usize)> = Vec::new();
@@ -462,7 +464,7 @@ fn strip_worktree_suffix(cwd: &str) -> &str {
         }
     }
     for w in segs.windows(2) {
-        if &cwd[w[0].0..w[0].1] != ".praxis" || &cwd[w[1].0..w[1].1] != "worktrees" {
+        if !crate::project_paths::DIRS.contains(&&cwd[w[0].0..w[0].1]) || &cwd[w[1].0..w[1].1] != "worktrees" {
             continue;
         }
         let head = &cwd[..w[0].0];
@@ -1473,6 +1475,14 @@ mod tests {
     #[test]
     fn normalize_repo_root_folds_worktree_path() {
         let never = |_: &Path| false;
+        assert_eq!(
+            normalize_repo_root("/home/me/app/.dojang/worktrees/wt-1/src", &never),
+            "/home/me/app"
+        );
+        assert_eq!(
+            normalize_repo_root("C:\\work\\app\\.dojang\\worktrees\\wt-1\\src", &never),
+            "C:\\work\\app"
+        );
         assert_eq!(
             normalize_repo_root("/home/me/app/.praxis/worktrees/wt-1/src", &never),
             "/home/me/app"

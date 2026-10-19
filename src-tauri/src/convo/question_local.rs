@@ -245,7 +245,7 @@ pub fn run(
     images: &[String],
     session_name: Option<&str>,
     mcp: Option<&PreviewMcpLease>,
-    on_spawn: impl FnOnce(u32),
+    mut on_spawn: impl FnMut(u32),
     mut on_event: impl FnMut(ConvoEvent),
 ) -> Result<TurnOutcome, String> {
     let execution = ctx.control.execution.clone();

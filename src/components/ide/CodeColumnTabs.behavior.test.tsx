@@ -121,7 +121,7 @@ describe("CodeColumnTabs", () => {
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
 
     try {
-      await render({ active: "diff", onClose, diff: <div>변경 목록</div> });
+      await render({ active: "preview", onClose, preview: <div>프리뷰</div> });
 
       expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
     } finally {

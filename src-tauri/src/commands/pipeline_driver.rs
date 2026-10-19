@@ -17,12 +17,12 @@ use crate::multireview::{self};
 use crate::orchestrator::{CreateTaskParams, TaskDraft, TaskOrigin, TaskService};
 use crate::pipeline::db as pdb;
 use crate::pipeline::db::{RunRow, StepStart, TicketRow};
-use crate::pipeline::model::{self, Spec, SplitOutput, MAX_TICKETS};
+use crate::pipeline::model::{self, Clarification, Spec, SplitOutput, MAX_TICKETS};
 use crate::pipeline::plan::{self, Action, RunCtx, TicketCtx};
 use crate::pipeline::review_run::{self, ReviewerFn};
 use crate::pipeline::state::{RunState, TicketState};
 use crate::pipeline::steps::{self, IntegrationRecovery, VerifyOutput};
-use crate::pipeline::{checks, git_ops, prompts, registry, split};
+use crate::pipeline::{checks, git_ops, prompts, registry, split, vendor_health};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
@@ -38,6 +38,8 @@ const STARTUP_DELAY: Duration = Duration::from_secs(5);
 /// 틱 하나에서 한 실행이 연달아 수행할 수 있는 동작 수의 상한(무한 루프 방어).
 const MAX_ACTIONS_PER_TICK: usize = 60;
 const SPLIT_TIMEOUT_SECS: u64 = 600;
+/// 계획 리뷰는 콘텐츠가 길어(스펙+티켓 20KB대) 도구 없는 agy가 200초 넘게 걸린 적이 있다. 티켓 리뷰보다 길게 둔다.
+const PLAN_REVIEW_TIMEOUT_SECS: u64 = 420;
 const REVIEW_TIMEOUT_SECS: u64 = 300;
 const FINAL_REVIEW_TIMEOUT_SECS: u64 = 600;
 const CHANGED_EVENT: &str = "pipeline://changed";
@@ -52,14 +54,35 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 
 /// 앱이 쓸 수 있는 벤더(PATH에 CLI가 있는 것). 순서는 claude, codex, agy로 고정이다.
 pub(crate) fn available_vendors() -> Vec<String> {
+    vendor_statuses().into_iter().filter(|(_, reason)| reason.is_none()).map(|(v, _)| v).collect()
+}
+
+/// 벤더별 사용 불가 사유. `None`이면 사용 가능, `PATH에 없음` 또는 `할당량 소진: <사유>`.
+pub(crate) fn vendor_statuses() -> Vec<(String, Option<String>)> {
     ["claude", "codex", "agy"]
         .into_iter()
-        .filter(|v| crate::reviewer::on_path(v))
-        .map(String::from)
+        .map(|v| {
+            let reason = if !crate::reviewer::on_path(v) {
+                Some("PATH에 없음".to_string())
+            } else {
+                vendor_health::exhausted_reason(v).map(|r| format!("할당량 소진: {r}"))
+            };
+            (v.to_string(), reason)
+        })
         .collect()
 }
 
-pub(crate) fn emit_changed(app: &AppHandle, run_id: i64) {
+/// 소진된 벤더가 있으면 사유 문구에 덧붙일 ` (agy: 할당량 소진)` 꼴 설명. 없으면 빈 문자열.
+fn exhausted_note() -> String {
+    let names: Vec<String> = ["claude", "codex", "agy"]
+        .into_iter()
+        .filter(|v| vendor_health::exhausted_reason(v).is_some())
+        .map(|v| format!("{v}: 할당량 소진"))
+        .collect();
+    if names.is_empty() { String::new() } else { format!(" ({})", names.join(", ")) }
+}
+
+pub(crate) fn emit_changed<R: tauri::Runtime>(app: &AppHandle<R>, run_id: i64) {
     let _ = app.emit(CHANGED_EVENT, run_id);
 }
 
@@ -394,6 +417,11 @@ async fn fanout_review(
     let r2 = runner.clone();
     let (prompt, _nonce, reviews) =
         blocking(move || review_run::run_parallel_reviews(kind, &f, &c, &vendors, timeout, r2)).await?;
+    for r in reviews.iter().filter(|r| !r.ok) {
+        if let Some(err) = r.error.as_deref().filter(|e| vendor_health::is_quota_error(e)) {
+            vendor_health::mark_exhausted(&r.vendor, err);
+        }
+    }
     let ok_count = reviews.iter().filter(|r| r.ok).count();
     if ok_count < 2 {
         let errs: Vec<String> = reviews
@@ -516,6 +544,10 @@ async fn do_split(cx: &Cx, run: &RunRow) -> R<Outcome> {
         let step_id = match begin(cx, None, "split", Some(review_run::JUDGE_VENDOR), token, &prompt).await? {
             Step::Cached(row) => {
                 if let Some(out) = row.output.as_deref().and_then(|o| serde_json::from_str::<SplitOutput>(o).ok()) {
+                    // 단계는 기록됐는데 그 뒤(멈춤·commit_split) 전에 죽었다. 같은 판정을 다시 적용한다.
+                    if let Some(c) = Clarification::from_output(&out) {
+                        return hold_for_clarification(cx, &c).await;
+                    }
                     result = Some(out);
                     break;
                 }
@@ -571,6 +603,10 @@ async fn do_split(cx: &Cx, run: &RunRow) -> R<Outcome> {
         match model::validate_split(&out, &refs, MAX_TICKETS) {
             Ok(()) => {
                 finish(cx, step_id, true, &serde_json::to_string(&out).map_err(e2s)?).await?;
+                // 심판이 구현 요청이 아니라고 봤다. 티켓을 만들지 않고 사용자에게 돌아간다.
+                if let Some(c) = Clarification::from_output(&out) {
+                    return hold_for_clarification(cx, &c).await;
+                }
                 result = Some(out);
                 break;
             }
@@ -586,6 +622,21 @@ async fn do_split(cx: &Cx, run: &RunRow) -> R<Outcome> {
     };
     let spec_json = serde_json::to_string(&out.spec).map_err(e2s)?;
     pdb::commit_split(&cx.pool, run.id, &spec_json, &out.tickets, now()).await.map_err(e2s)?;
+    Ok(Outcome::Progress)
+}
+
+/// clarify·decline: 질문·사유를 실행에 남기고 Drafting에서 멈춘다. 사용자는 `pipeline_answer_clarification`으로
+/// 답하거나 취소한다. 단순 "일시정지 해제"로는 같은 질문을 다시 받는다(피드백이 없으므로).
+async fn hold_for_clarification(cx: &Cx, c: &Clarification) -> R<Outcome> {
+    let reason = match c.decision {
+        model::SplitDecision::Decline => format!(
+            "분할 심판이 이 목표를 파이프라인으로 수행할 수 없다고 판단했습니다: {}",
+            if c.reason.is_empty() { "(사유 없음)" } else { c.reason.as_str() }
+        ),
+        _ => format!("분할 전에 목표를 확인할 질문이 {}건 있습니다. 답변하면 분할을 이어 갑니다.", c.questions.len()),
+    };
+    let json = serde_json::to_string(c).map_err(e2s)?;
+    pdb::set_run_clarification(&cx.pool, cx.run_id, &json, &reason, now()).await.map_err(e2s)?;
     Ok(Outcome::Progress)
 }
 
@@ -634,7 +685,7 @@ fn plan_text(run: &RunRow, tickets: &[TicketRow]) -> R<String> {
         .map(|j| serde_json::from_str(j).map_err(e2s))
         .transpose()?
         .unwrap_or_default();
-    let out = SplitOutput { spec, tickets: tickets.iter().map(prompts::draft_from_row).collect() };
+    let out = SplitOutput { spec, tickets: tickets.iter().map(prompts::draft_from_row).collect(), ..Default::default() };
     Ok(split::render_spec_text(&out))
 }
 
@@ -650,7 +701,7 @@ async fn do_plan_review(cx: &Cx, run: &RunRow) -> R<Outcome> {
         Step::Cached(row) => return plan_review_decision(cx, run, parse_outcome(&row)).await,
         Step::Run(id) => id,
     };
-    match fanout_review(cx, run, ReviewKind::Plan, "plan_review", &focus, &text, REVIEW_TIMEOUT_SECS).await? {
+    match fanout_review(cx, run, ReviewKind::Plan, "plan_review", &focus, &text, PLAN_REVIEW_TIMEOUT_SECS).await? {
         Err(reason) => {
             finish(cx, step_id, false, &reason).await?;
             pause(cx, RunState::PlanReview, &reason).await
@@ -695,20 +746,64 @@ fn goal_contract_for(t: &TicketRow) -> Option<GoalContract> {
     gc.validate().ok().map(|_| gc)
 }
 
+/// 기준선 단계 출력 — 티켓 변경 없이 통합 worktree에서 저장소 검증을 돌렸을 때 실패한 명령.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct BaselineOutput {
+    failed_commands: Vec<String>,
+    #[serde(default)]
+    summary: String,
+}
+
+/// 실행당 한 번 저장소 검증(build·test, 수용 명령 제외)을 통합 worktree에서 돌려 기준선 실패 명령을 얻는다.
+/// 단계 키가 고정(`baseline`, token 0)이라 이후에는 캐시를 재사용한다. 단계 자체는 명령이 실패해도 성공으로 기록한다.
+/// 기준선 단계 도입 전에 시작해 이미 Executing인 실행은 다음 호출 시점의 통합 worktree를 그대로 쓴다(근사치:
+/// 이미 통합된 티켓 변경이 섞였을 수 있으나, 실패가 환경 문제인지 가리는 용도로는 충분하다).
+async fn ensure_baseline(cx: &Cx, run: &RunRow) -> R<Vec<String>> {
+    let Some(path) = run.integration_path.clone() else { return Ok(Vec::new()) };
+    let step_id = match begin(cx, None, "baseline", None, 0, "저장소 검증 기준선").await? {
+        Step::Cached(row) => {
+            let out: BaselineOutput = row.output.as_deref().and_then(|o| serde_json::from_str(o).ok()).unwrap_or_default();
+            return Ok(out.failed_commands);
+        }
+        Step::Run(id) => id,
+    };
+    let reg = cx.registrar.clone();
+    let outcomes = blocking(move || checks::run_repo_checks(Path::new(&path), Some(&reg))).await?;
+    let failed: Vec<&checks::CheckOutcome> = outcomes.iter().filter(|o| !o.ok).collect();
+    let out = BaselineOutput {
+        failed_commands: failed.iter().map(|o| o.command.clone()).collect(),
+        summary: if failed.is_empty() { String::new() } else { checks::failure_summary(&outcomes) },
+    };
+    finish(cx, step_id, true, &serde_json::to_string(&out).map_err(e2s)?).await?;
+    Ok(out.failed_commands)
+}
+
 async fn spawn_tickets(cx: &Cx, run: &RunRow, ids: Vec<i64>) -> R<Outcome> {
     let spec: Spec = run.spec_json.as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
     let (Some(branch), Some(path)) = (run.integration_branch.clone(), run.integration_path.clone()) else {
         return Err("통합 worktree가 없습니다".into());
     };
+    // 첫 티켓을 띄우기 전에 기준선을 잰다(이미 있으면 캐시).
+    ensure_baseline(cx, run).await?;
     let mut spawned = 0;
     for id in ids {
         if cx.reg.is_cancelled() {
             break;
         }
-        let t = cx.ticket(id).await?;
+        let mut t = cx.ticket(id).await?;
         let state = t.ticket_state();
         if !matches!(state, Some(TicketState::Pending | TicketState::Running)) {
             continue;
+        }
+        // 할당량이 소진된 벤더의 티켓은 띄우기 전에 다른 벤더로 옮긴다(재배정 표시·시도 횟수는 그대로).
+        if vendor_health::exhausted_reason(&model::normalize_vendor(&t.vendor)).is_some() {
+            let avail = available_vendors();
+            let refs: Vec<&str> = avail.iter().map(String::as_str).collect();
+            let counts = HashMap::new();
+            if let Some(nv) = model::pick_reassign_vendor(&t.vendor, &refs, &counts) {
+                pdb::set_ticket_vendor(&cx.pool, t.id, &nv, t.reassigned != 0, t.attempt as u32, now()).await.map_err(e2s)?;
+                t = cx.ticket(id).await?;
+            }
         }
         // 이전 시도가 남긴 작업이 있으면 먼저 치운다(spawn 중 죽은 경우).
         if let Some(old) = t.task_id {
@@ -791,7 +886,7 @@ async fn ticket_dir(cx: &Cx, t: &TicketRow) -> Option<TicketDir> {
     path.is_dir().then_some(TicketDir { path, branch: task.branch })
 }
 
-async fn verify(cx: &Cx, _run: &RunRow, id: i64) -> R<Outcome> {
+async fn verify(cx: &Cx, run: &RunRow, id: i64) -> R<Outcome> {
     let t = cx.ticket(id).await?;
     let step_id = match begin(cx, Some(&t), "verify", None, token(&t), "허용 경로 검사와 검증 명령").await? {
         Step::Cached(row) => {
@@ -800,11 +895,13 @@ async fn verify(cx: &Cx, _run: &RunRow, id: i64) -> R<Outcome> {
         }
         Step::Run(id) => id,
     };
+    // 기준선에서도 실패하는 저장소 명령은 티켓 탓이 아니므로 판정에서 뺀다(기준선 단계가 없던 옛 실행은 여기서 처음 잰다).
+    let baseline = ensure_baseline(cx, run).await?;
     let out = match (ticket_dir(cx, &t).await, t.spawn_head.clone()) {
         (Some(dir), Some(fork)) => {
             let (allowed, acceptance, reg) = (t.allowed_paths(), t.acceptance(), cx.registrar.clone());
             // 에이전트 작업을 커밋한 뒤 커밋된 diff로 경로를 판정하고, 검증 산출물은 마지막에 버린다.
-            blocking(move || steps::verify_ticket(&dir.path, &fork, &allowed, &acceptance, Some(&reg)))
+            blocking(move || steps::verify_ticket(&dir.path, &fork, &allowed, &acceptance, &baseline, Some(&reg)))
                 .await?
                 .unwrap_or_else(|e| VerifyOutput { passed: false, summary: format!("검증을 수행하지 못했습니다: {e}") })
         }
@@ -892,6 +989,9 @@ async fn review_ticket(cx: &Cx, run: &RunRow, id: i64) -> R<Outcome> {
         let (prompt, vr) =
             blocking(move || review_run::single_review(ReviewKind::Ticket, &f, &c, &r, REVIEW_TIMEOUT_SECS, runner)).await?;
         if !vr.ok {
+            if let Some(err) = vr.error.as_deref().filter(|e| vendor_health::is_quota_error(e)) {
+                vendor_health::mark_exhausted(&reviewer, err);
+            }
             finish(cx, step_id, false, vr.error.as_deref().unwrap_or("리뷰 실패")).await?;
             tried.push(reviewer);
             continue;
@@ -955,6 +1055,8 @@ async fn fix_ticket(cx: &Cx, _run: &RunRow, id: i64) -> R<Outcome> {
                 Step::Cached(_) => None,
                 Step::Run(sid) => Some(sid),
             };
+            // 수정 에이전트가 할당량 오류로 죽으면 같은 벤더 재시도는 무의미하다. 한도를 채워 재배정·에스컬레이션으로 보낸다.
+            let mut quota_hit = false;
             if let Some(sid) = step_id {
                 let result = match ticket_dir(cx, &t).await {
                     Some(dir) => {
@@ -966,6 +1068,10 @@ async fn fix_ticket(cx: &Cx, _run: &RunRow, id: i64) -> R<Outcome> {
                 match &result {
                     Ok(out) => finish(cx, sid, true, &clip(out, 4000)).await?,
                     Err(e) => {
+                        if vendor_health::is_quota_error(e) {
+                            vendor_health::mark_exhausted(&model::normalize_vendor(&t.vendor), e);
+                            quota_hit = true;
+                        }
                         finish(cx, sid, false, e).await?;
                         pdb::set_ticket_error(&cx.pool, t.id, Some(&format!("{problem}\n수정 에이전트 오류: {e}")), now())
                             .await
@@ -973,7 +1079,9 @@ async fn fix_ticket(cx: &Cx, _run: &RunRow, id: i64) -> R<Outcome> {
                     }
                 }
             }
-            pdb::set_ticket_attempt(&cx.pool, t.id, t.attempt.max(0) as u32 + 1, now()).await.map_err(e2s)?;
+            let next_attempt =
+                if quota_hit { model::MAX_SAME_VENDOR_FIXES } else { t.attempt.max(0) as u32 + 1 };
+            pdb::set_ticket_attempt(&cx.pool, t.id, next_attempt, now()).await.map_err(e2s)?;
             pdb::set_ticket_state(&cx.pool, t.id, TicketState::Fixing, TicketState::Verifying, now())
                 .await
                 .map_err(e2s)?;
@@ -988,7 +1096,8 @@ async fn fix_ticket(cx: &Cx, _run: &RunRow, id: i64) -> R<Outcome> {
                 *counts.entry(model::normalize_vendor(&o.vendor)).or_insert(0) += 1;
             }
             let Some(new_vendor) = model::pick_reassign_vendor(&t.vendor, &refs, &counts) else {
-                return escalate(cx, &t, TicketState::Fixing, "재배정할 다른 벤더가 없습니다").await;
+                let reason = format!("재배정할 다른 벤더가 없습니다{}", exhausted_note());
+                return escalate(cx, &t, TicketState::Fixing, &reason).await;
             };
             if let Ok(Step::Run(sid)) = begin(cx, Some(&t), "ticket_fix", Some(&new_vendor), token(&t), "벤더 재배정").await {
                 finish(cx, sid, true, &format!("재배정: {} -> {new_vendor}", t.vendor)).await?;
@@ -1006,7 +1115,11 @@ async fn fix_ticket(cx: &Cx, _run: &RunRow, id: i64) -> R<Outcome> {
             Ok(Outcome::Progress)
         }
         model::FixDecision::Escalate => {
-            let reason = format!("자동 수정 한도 초과: {}", clip(t.last_error.as_deref().unwrap_or(""), 600));
+            let reason = format!(
+                "자동 수정 한도 초과{}: {}",
+                exhausted_note(),
+                clip(t.last_error.as_deref().unwrap_or(""), 600)
+            );
             escalate(cx, &t, TicketState::Fixing, &reason).await
         }
     }
@@ -1114,6 +1227,8 @@ async fn integrate(cx: &Cx, run: &RunRow, id: i64) -> R<Outcome> {
     // 통합으로 바뀐 경로는 이미 통합된 티켓과 이 티켓의 허용 경로 합집합 안에 있어야 한다.
     let all = pdb::list_tickets(&cx.pool, run.id).await.map_err(e2s)?;
     let allowed = union_paths(&all, |o| o.id == t.id || o.state == TicketState::Integrated.as_str());
+    // 기준선에서도 실패하는 저장소 명령은 티켓 검증과 같은 규칙으로 판정에서 뺀다. 빼지 않으면 모든 통합이 에스컬레이션된다.
+    let baseline = ensure_baseline(cx, run).await?;
     let (i, p, acceptance, reg) = (integration.clone(), pre.clone(), t.acceptance(), cx.registrar.clone());
     let verdict = blocking(move || -> Result<(), String> {
         let changed = git_ops::changed_paths(&i, &p).map_err(e2s)?;
@@ -1121,13 +1236,9 @@ async fn integrate(cx: &Cx, run: &RunRow, id: i64) -> R<Outcome> {
         if !outside.is_empty() {
             return Err(format!("통합 결과가 허용 경로 밖을 변경했습니다: {}", outside.join(", ")));
         }
-        let outcomes = checks::run_ticket_checks(&i, &acceptance, Some(&reg));
-        if !checks::checks_passed(&outcomes) {
-            return Err(if outcomes.is_empty() {
-                "통합 뒤 실행할 검증 명령이 없습니다".to_string()
-            } else {
-                format!("통합 뒤 검증 실패:\n{}", checks::failure_summary(&outcomes))
-            });
+        let checked = steps::run_checks_with_baseline(&i, &acceptance, &baseline, Some(&reg));
+        if !checked.passed {
+            return Err(format!("통합 뒤 검증 실패:\n{}", checked.summary));
         }
         // 검증이 남긴 추적되지 않는 산출물을 지워 다음 통합의 변경 경로 검사를 깨끗하게 한다.
         let head = git_ops::head(&i).map_err(e2s)?;
@@ -1253,9 +1364,10 @@ async fn final_decision(
         v
     };
     let allowed = union_paths(tickets, |t| t.state == TicketState::Integrated.as_str());
+    let baseline = ensure_baseline(cx, run).await?;
     let (i, reg) = (integration.to_path_buf(), cx.registrar.clone());
     let result = blocking(move || {
-        steps::apply_final_fix(&i, &pre, &allowed, &acceptance, Some(&reg), || {
+        steps::apply_final_fix(&i, &pre, &allowed, &acceptance, &baseline, Some(&reg), || {
             crate::reviewer::run_repair_agent(&i, "claude", None, None, &prompt, &reg)
         })
     })

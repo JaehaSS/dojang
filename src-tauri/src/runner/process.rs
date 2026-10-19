@@ -462,7 +462,7 @@ fn consume_conversation_events(
                             .unwrap_or_else(|error| error.into_inner()) = text.clone();
                     }
                 }
-                crate::convo::ConvoEvent::ToolUse { .. } => {
+                crate::convo::ConvoEvent::ToolUse { parent_id: None, .. } => {
                     tool_seen_callback.store(true, Ordering::Relaxed)
                 }
                 // 서브 에이전트 텍스트(parent_id)는 사용자에게 던진 말이 아니다.

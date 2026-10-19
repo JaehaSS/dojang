@@ -57,6 +57,23 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 describe('docs:project — docs/lessons.json', () => {
+  it('날짜 파일명의 연도를 원장 번호로 해석하지 않는다', () => {
+    write(
+      'docs/memory/2026-10-08-editor-dev-merge.md',
+      ['### #3 · 2026-10-08 · 병합 (Small)', '', '- **subject**: a/b', '- **status**: done', ''].join('\n'),
+    )
+    run()
+    expect(readLessonsJson().entries.map((e) => e.number)).toEqual([3, 2, 1])
+  })
+
+  it('기존 번호 파일명과 본문 번호의 불일치를 계속 거부한다', () => {
+    write(
+      'docs/memory/0003-mismatch.md',
+      ['### #4 · 2026-10-08 · 불일치 (Small)', '', '- **subject**: a/b', '- **status**: done', ''].join('\n'),
+    )
+    expect(() => run()).toThrow('파일명 번호(0003)와 본문 번호(#4)가 다릅니다')
+  })
+
   it('스키마 1, 번호 내림차순, lesson·abandoned를 배열 전체로 낸다', () => {
     run()
     const out = readLessonsJson()

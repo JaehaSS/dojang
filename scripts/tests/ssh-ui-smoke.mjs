@@ -6,7 +6,7 @@ import react from '@vitejs/plugin-react';
 import { chromium } from 'playwright';
 
 // Actual React components with a mocked native boundary. This is not a real SSH test.
-const directory = path.resolve('.praxis/verification/ssh-session-workflow');
+const directory = path.resolve('.dojang/verification/ssh-session-workflow');
 const fixture = path.join(directory, 'ui-fixture');
 await mkdir(fixture, { recursive: true });
 await writeFile(path.join(fixture, 'index.html'), '<div id="root"></div><script type="module" src="./main.tsx"></script>');

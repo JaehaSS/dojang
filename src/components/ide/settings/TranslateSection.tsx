@@ -44,7 +44,7 @@ export function TranslateSection() {
       </SettingRow>
       <SettingRow
         title="공부할 표현 짚기"
-        hint="⌘J 영어 제안과 답변 번역에서 표현 3~5개에 밑줄을 긋습니다. 올리면 뜻이 보이고 단어장에 저장할 수 있습니다. 켜 두면 결과마다 호출이 하나 더 듭니다."
+        hint="⌘J 영어 제안과 답변 번역에서 표현 3~5개에 밑줄을 긋습니다. 올리면 뜻이 보입니다. 켜 두면 결과마다 호출이 하나 더 듭니다."
       >
         <Switch on={studyExpressionsOn(settings)} onClick={() => save({ study_expressions: !studyExpressionsOn(settings) })} />
       </SettingRow>

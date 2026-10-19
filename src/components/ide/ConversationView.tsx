@@ -2,6 +2,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useReducer, useRef, useS
 import type { SubagentThread } from "../../lib/activity";
 import {
   captureScrollAnchor,
+  conversationScrollMemory,
+  conversationWindowMemory,
   isConversationNearBottom,
   restoreScrollAnchor,
   type ConversationScrollAnchor,
@@ -16,7 +18,7 @@ import { useQuizGate } from "../../lib/use-quiz-gate";
 import { InsightCard } from "../InsightCard";
 import { QuizPanel } from "../QuizPanel";
 import { QuizReviewPanel } from "../QuizReviewPanel";
-import type { ToolOutputContent } from "../../lib/ipc";
+import type { DebateSpeaker, ToolOutputContent } from "../../lib/ipc";
 import { normalizeToolOutputContents } from "../../lib/tool-output-media";
 import { ToolOutput } from "./ToolOutput";
 
@@ -26,14 +28,25 @@ import { ToolOutput } from "./ToolOutput";
 export type ConvoItem =
   | { role: "user"; text: string; expandedText?: string; inherited?: boolean }
   | { role: "interaction"; interactionId: string; inherited?: boolean }
-  | { role: "text"; text: string; streamId?: string; complete?: boolean; parentId?: string; inherited?: boolean }
+  | { role: "text"; text: string; streamId?: string; complete?: boolean; parentId?: string; sourceKey?: string; inherited?: boolean }
   | { role: "tool"; name: string; summary: string; toolId?: string; parentId?: string; inherited?: boolean }
   | { role: "tool_result"; summary: string; is_error: boolean; toolUseId?: string; parentId?: string; inherited?: boolean }
   | { role: "tool_output"; contents: ToolOutputContent[]; toolUseId: string; parentId?: string; inherited?: boolean }
   /** 서브 에이전트 실행 모델 관측 — 렌더용이 아니라 카드 헤더 칩의 원천이다. */
   | { role: "subagent_model"; parentId: string; model: string; inherited?: boolean }
+  /** Codex 자식 세션 상태 — 인라인 카드의 앵커이며 도구 호출을 꾸며내지 않는다. */
+  | {
+      role: "subagent_state";
+      subagentId: string;
+      parentId?: string;
+      title: string;
+      state: "running" | "done" | "failed" | "stopped" | "unknown";
+      model: string | null;
+      observationStatus: "available" | "missing" | "unreadable" | "unsupported" | "limited";
+      inherited?: boolean;
+    }
   | { role: "meta"; cost: number; turns: number; tokensIn: number; tokensOut: number; inherited?: boolean }
-  | { role: "error"; text: string; inherited?: boolean }
+  | { role: "error"; text: string; parentId?: string; sourceKey?: string; inherited?: boolean }
   /** 의도적 컨텍스트 절단 지점 · 이어받기 경계 · 이력 절단 안내가 공유하는 구분선. */
   | { role: "divider"; text: string; inherited?: boolean };
 
@@ -41,12 +54,19 @@ export type ConvoItem =
  *  하나로 통일하는 느슨한 구조 타입. eventToItems는 `id`를 안 쓴다. 새 kind 추가 시 여기 + ipc ConvoEvent 갱신. */
 export type ConvoEventLike = {
   kind: string;
+  /** UI-only pending input, replaced by its durable event rather than counted twice. */
+  optimistic?: boolean;
+  speaker?: DebateSpeaker;
   item_id?: string;
   interaction_id?: string;
   complete?: boolean;
   text?: string;
   name?: string;
   summary?: string;
+  /** 툴 결과 원문 문자 수. 요약문 길이로 대체하지 않는다. */
+  result_chars?: number | null;
+  /** 앱이 마지막 요청에 추가한 입력의 바이트 계측. */
+  prompt_metrics?: unknown;
   is_error?: boolean;
   cost_usd?: number;
   num_turns?: number;
@@ -62,13 +82,27 @@ export type ConvoEventLike = {
   requested?: string;
   resolved?: string;
   /** subagent_model — 서브 에이전트가 실제로 돈 모델. 서브 카드 헤더 칩이 소비. */
-  model?: string;
+  model?: string | null;
+  /** Codex child-session metadata and messages. */
+  vendor?: "codex";
+  root_thread_id?: string;
+  parent_thread_id?: string;
+  child_thread_id?: string;
+  execution_id?: string;
+  child_turn_id?: string | null;
+  source_key?: string;
+  title?: string | null;
+  nickname?: string | null;
+  agent_role?: string | null;
+  state?: "running" | "done" | "failed" | "stopped" | "unknown";
+  observation_source?: "session_log" | "stream";
+  observation_status?: "available" | "missing" | "unreadable" | "unsupported" | "limited";
   /** debate_ended — 토론이 끝난 이유. 구분선 문구만 가른다. */
   reason?: string;
   /** 서브 에이전트 상관관계 — tool_use의 id, tool_result의 대응 id, 소속 부모(Task) id. */
   tool_id?: string;
   tool_use_id?: string;
-  parent_id?: string;
+  parent_id?: string | null;
   contents?: ToolOutputContent[];
   /** 이어받기 체인에서 원본 작업(들)로부터 물려받은 이벤트인가 — `commands.rs::inherited_convo_history`가 박는다.
    *  현재 작업 id로 실행하면 엉뚱한 워크트리를 건드리므로, 이 이벤트에 걸린 파괴적/작업 귀속 동작은 잠가야 한다. */
@@ -112,6 +146,14 @@ export const eventToItems = (
   // 승계분 표시는 어느 kind든 공통이라 매핑 본문과 분리한다 — 분기마다 inherited를 챙기면
   // 하나만 빠뜨려도 그 role은 조용히 원본 작업 것처럼 보인다(잠금 대상 판별의 근거를 잃는다).
   const items = mapConvoEvent(ev, index, all);
+  if (index != null && all && (ev.kind === "tool_use" || ev.kind === "tool_result")) {
+    const toolId = ev.kind === "tool_use" ? ev.tool_id : ev.tool_use_id;
+    if (ev.parent_id?.startsWith("codex:") && toolId?.startsWith("codex-tool:")) {
+      const first = all.findIndex(candidate => candidate.kind === ev.kind && candidate.parent_id === ev.parent_id &&
+        (ev.kind === "tool_use" ? candidate.tool_id : candidate.tool_use_id) === toolId);
+      if (first !== index) return [];
+    }
+  }
   return ev.inherited ? items.map((it) => ({ ...it, inherited: true })) : items;
 };
 
@@ -163,7 +205,55 @@ const mapConvoEvent = (
     case "text_update":
       return [{role: "text", text: ev.text ?? "", streamId: ev.item_id, complete: ev.complete}];
     case "text":
-      return [{ role: "text", text: ev.text ?? "", parentId: ev.parent_id }];
+      return [{ role: "text", text: ev.text ?? "", parentId: ev.parent_id ?? undefined }];
+    case "subagent_message": {
+      if (!ev.parent_id || !ev.source_key) return [];
+      // 저장 이력과 실시간 수집이 같은 source를 되풀이할 수 있다. 같은 문자열 여부가 아니라
+      // 원본 source key만으로 하나를 남긴다. 다른 turn의 같은 문자열은 source key가 달라 남는다.
+      if (
+        index != null &&
+        all?.some((prior, priorIndex) =>
+          priorIndex < index &&
+          prior.kind === "subagent_message" &&
+          prior.parent_id === ev.parent_id &&
+          prior.source_key === ev.source_key,
+        )
+      ) return [];
+      return ev.is_error
+        ? [{ role: "error", text: ev.text ?? "", parentId: ev.parent_id, sourceKey: ev.source_key }]
+        : [{ role: "text", text: ev.text ?? "", parentId: ev.parent_id, sourceKey: ev.source_key }];
+    }
+    case "subagent_update": {
+      if (ev.vendor !== "codex" || !ev.root_thread_id || !ev.child_thread_id || !ev.state || !ev.observation_status) return [];
+      const subagentId = `codex:${ev.root_thread_id}:${ev.child_thread_id}`;
+      // 이력은 갱신마다 상태 이벤트를 남긴다. 첫 관측 위치에 마지막 값을 투영해 한 카드만
+      // 렌더하면서, 실행 재개(running)가 과거 done을 덮는 순서도 보존한다.
+      if (index != null && all) {
+        const first = all.findIndex((candidate) =>
+          candidate.kind === "subagent_update" &&
+          candidate.vendor === "codex" &&
+          candidate.root_thread_id === ev.root_thread_id &&
+          candidate.child_thread_id === ev.child_thread_id,
+        );
+        if (first !== index) return [];
+        const latest = [...all].reverse().find((candidate) =>
+          candidate.kind === "subagent_update" &&
+          candidate.vendor === "codex" &&
+          candidate.root_thread_id === ev.root_thread_id &&
+          candidate.child_thread_id === ev.child_thread_id,
+        ) ?? ev;
+        return mapConvoEvent(latest);
+      }
+      return [{
+        role: "subagent_state",
+        subagentId,
+        parentId: ev.parent_id ?? undefined,
+        title: ev.title ?? ev.nickname ?? ev.agent_role ?? "Codex 서브에이전트",
+        state: ev.state,
+        model: ev.model ?? null,
+        observationStatus: ev.observation_status,
+      }];
+    }
     case "tool_use":
       return [
         {
@@ -171,7 +261,7 @@ const mapConvoEvent = (
           name: ev.name ?? "",
           summary: ev.summary ?? "",
           toolId: ev.tool_id,
-          parentId: ev.parent_id,
+          parentId: ev.parent_id ?? undefined,
         },
       ];
     case "tool_result":
@@ -181,13 +271,13 @@ const mapConvoEvent = (
           summary: ev.summary ?? "",
           is_error: !!ev.is_error,
           toolUseId: ev.tool_use_id,
-          parentId: ev.parent_id,
+          parentId: ev.parent_id ?? undefined,
         },
       ];
     case "tool_output":
       if (!ev.tool_use_id) return [];
       const contents = normalizeToolOutputContents(ev.contents);
-      return contents.length ? [{ role: "tool_output", toolUseId: ev.tool_use_id, contents, parentId: ev.parent_id }] : [];
+      return contents.length ? [{ role: "tool_output", toolUseId: ev.tool_use_id, contents, parentId: ev.parent_id ?? undefined }] : [];
     case "subagent_model":
       // 아이템으로 만들되 대화에 그려지지는 않는다 — 서브 에이전트 폴드가 카드 칩으로 접는다.
       if (!ev.parent_id || !ev.model) return [];
@@ -266,11 +356,6 @@ interface Props {
 const replyReady = (it: ConvoItem, isLast: boolean, busy: boolean) =>
   it.role === "text" && (it.complete ?? (!busy || !isLast));
 
-interface ConversationScrollState {
-  scrollTop: number;
-  shouldFollow: boolean;
-}
-
 /** user 말풍선 — 슬래시 스킬 확장이 있었으면 "실제 전송문 보기" 토글(기본 접힘)로 확장문을 노출. */
 function UserBubble({ text, expandedText }: { text: string; expandedText?: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -323,22 +408,27 @@ export const ConversationView = memo(function ConversationView({
   translatable = false,
 }: Props) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const shouldFollowRef = useRef(true);
+  // 다시 마운트된 뷰는 기억해 둔 자리에서 시작한다 — 아래 layout effect가 그 scrollTop을 되돌린다.
+  const shouldFollowRef = useRef(
+    (conversationId == null ? undefined : conversationScrollMemory.get(conversationId))?.shouldFollow ?? true,
+  );
   const activeConversationRef = useRef(conversationId);
   const wasHiddenRef = useRef(false);
   const restoringScrollRef = useRef(false);
-  const scrollStateByConversationRef = useRef(
-    new Map<number | string, ConversationScrollState>(),
-  );
+  /** 이 대화에서 사용자가 직접 스크롤을 움직였는지. 아래 clamp 무시 규칙은 브라우저가 낸 스크롤에만
+   *  적용해야 한다 — 사용자의 스크롤까지 무시하면 기억한 자리가 더는 갱신되지 않는다. */
+  const userScrolledRef = useRef(false);
+  const scrollStateByConversationRef = useRef(conversationScrollMemory);
   const waitCardObserverRef = useRef<ResizeObserver | null>(null);
   /** 스크롤할 때마다 잡아 두는 보던 자리. 폭이 바뀐 뒤 이것으로 되돌린다. */
   const scrollAnchorRef = useRef<ConversationScrollAnchor | null>(null);
   /** 보던 자리를 잡았을 때의 폭. 이 값과 다르면 줄바꿈이 이미 바뀐 뒤다. */
   const anchorWidthRef = useRef(0);
 
-  // 렌더 윈도우 — 세션별 확장량은 ref에 남기고 확장은 강제 리렌더로 반영한다.
-  // state로 두면 세션 전환마다 초기화 타이밍을 맞춰야 하지만, ref는 키로 읽으므로 그럴 필요가 없다.
-  const windowByConversationRef = useRef(new Map<number | string, number>());
+  // 렌더 윈도우 — 세션별 확장량은 모듈 저장소에 남기고 확장은 강제 리렌더로 반영한다.
+  // state로 두면 세션 전환마다 초기화 타이밍을 맞춰야 하지만, 저장소는 키로 읽으므로 그럴 필요가 없다.
+  // 기억한 scrollTop은 그때의 윈도우 기준이라 둘은 함께 남아야 한다.
+  const windowByConversationRef = useRef(conversationWindowMemory);
   const [, bumpWindow] = useReducer((n: number) => n + 1, 0);
   /** 확장 직전 scrollHeight — 위쪽에 붙은 만큼 scrollTop을 밀어 보던 위치를 고정한다. */
   const expandAnchorRef = useRef<number | null>(null);
@@ -454,6 +544,7 @@ export const ConversationView = memo(function ConversationView({
       const saved = conversationId == null ? undefined : scrollStateByConversationRef.current.get(conversationId);
       if (saved) {
         shouldFollowRef.current = saved.shouldFollow;
+        userScrolledRef.current = false;
         restoringScrollRef.current = true;
         container.scrollTop = saved.scrollTop;
         requestAnimationFrame(() => {
@@ -476,6 +567,7 @@ export const ConversationView = memo(function ConversationView({
       activeConversationRef.current = conversationId;
       // 항목 DOM은 인덱스 key로 재사용된다 — 이전 대화에서 잡은 자리는 이 대화의 것이 아니다.
       scrollAnchorRef.current = null;
+      userScrolledRef.current = false;
       const savedState =
         conversationId == null
           ? undefined
@@ -489,11 +581,17 @@ export const ConversationView = memo(function ConversationView({
     if (conversationId == null) return;
     const savedState = scrollStateByConversationRef.current.get(conversationId);
     if (!savedState) return;
+    // 기억한 자리가 지금 높이보다 아래면(히스토리 도착 전, 펼침·번역이 접혀 짧아진 뒤) 닿는 데까지
+    // 내려간다. 0에 두면 맨 위로 튄 것으로 보인다. 저장값은 그대로 두므로 높이가 차면 다시 맞춘다.
     const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-    if (maxScrollTop >= savedState.scrollTop) container.scrollTop = savedState.scrollTop;
+    container.scrollTop = Math.min(savedState.scrollTop, maxScrollTop);
     // subagents는 items에서 파생되므로 deps에 두지 않는다 — 같은 변화로 두 번 돌 뿐이다.
     // waitMode: 카드가 열리며 아래에 붙은 높이도 따라 내려가야 보인다.
   }, [conversationId, items, busy, windowSize, activityState, activityOperation, hidden, waitMode]);
+
+  const markUserScroll = (): void => {
+    userScrolledRef.current = true;
+  };
 
   const updateFollowState = (): void => {
     if (hidden || restoringScrollRef.current) return;
@@ -509,7 +607,10 @@ export const ConversationView = memo(function ConversationView({
         : scrollStateByConversationRef.current.get(conversationId);
     const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
     // 세션 전환 직후 히스토리가 비는 동안 발생한 강제 clamp는 사용자의 저장 위치가 아니다.
-    if (savedState && !savedState.shouldFollow && maxScrollTop < savedState.scrollTop) return;
+    // 다만 사용자가 직접 움직인 스크롤은 기억한 자리보다 짧은 화면에서도 새 자리다.
+    if (!userScrolledRef.current && savedState && !savedState.shouldFollow && maxScrollTop < savedState.scrollTop) {
+      return;
+    }
     const shouldFollow = isConversationNearBottom(container);
     shouldFollowRef.current = shouldFollow;
     if (conversationId == null) return;
@@ -549,6 +650,10 @@ export const ConversationView = memo(function ConversationView({
         ref={scrollContainerRef}
         className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden space-y-3 px-4 py-3"
         onScroll={updateFollowState}
+        onWheel={markUserScroll}
+        onTouchStart={markUserScroll}
+        onPointerDown={markUserScroll}
+        onKeyDown={markUserScroll}
       >
         {items.length === 0 && !busy && (
           <div className="text-text-muted text-sm border border-border rounded-md p-4">
@@ -573,6 +678,21 @@ export const ConversationView = memo(function ConversationView({
           // 같은 톤으로 섞이면 사용자가 자기가 한 말/본 결과로 착각한다. 과하게 낮추지 않는다.
           const dimCls = it.inherited ? "opacity-60" : "";
           if (it.role === "interaction") return <div key={i}>{renderQuestion?.(it.interactionId)}</div>;
+          if (it.role === "subagent_state") {
+            // 중첩 자식은 루트 카드의 본문/탭으로만 들어간다. 최상위 자식만 메인에 앵커를 둔다.
+            const thread = !it.parentId ? subagents?.get(it.subagentId) : undefined;
+            return thread ? (
+              <div key={i} className={dimCls || undefined}>
+                <SubagentCard
+                  thread={thread}
+                  parentBusy={busy}
+                  onOpenSubagent={onOpenSubagent}
+                  onOpenLink={onOpenLink}
+                  onLinkMenu={onLinkMenu}
+                />
+              </div>
+            ) : null;
+          }
           if (it.role === "user") {
             return (
               <div key={i} className={`flex flex-col items-end ${dimCls}`.trim()}>
@@ -745,15 +865,80 @@ export const ConversationView = memo(function ConversationView({
   );
 });
 
+/** Fold cross-page metadata/messages while retaining the first card anchor.
+ *  Durable replay pages preserve repeated user messages; only optimistic live tails dedupe them. */
+function convoItemSourceKey(item: ConvoItem): string | null {
+  if ((item.role === "text" || item.role === "error") && item.sourceKey)
+    return JSON.stringify([item.parentId, item.sourceKey]);
+  if ((item.role === "tool" || item.role === "tool_result") && item.parentId?.startsWith("codex:")) {
+    const toolId = item.role === "tool" ? item.toolId : item.toolUseId;
+    if (toolId?.startsWith("codex-tool:")) return JSON.stringify([item.role, item.parentId, toolId]);
+  }
+  return null;
+}
+
+export function appendConvoItems(prev: ConvoItem[], items: ConvoItem[], dedupeUser = true): ConvoItem[] {
+  const last = prev[prev.length - 1];
+  const first = items[0];
+  if (dedupeUser && last?.role === "user" && first?.role === "user" && last.text === first.text)
+    items = items.slice(1);
+  const next = [...prev];
+  const states = new Map<string, number>();
+  const sources = new Set<string>();
+  for (let index = 0; index < next.length; index++) {
+    const item = next[index];
+    if (item.role === "subagent_state") states.set(item.subagentId, index);
+    const source = convoItemSourceKey(item);
+    if (source) sources.add(source);
+  }
+  for (const item of items) {
+    if (item.role === "subagent_state") {
+      const index = states.get(item.subagentId);
+      if (index != null) { next[index] = item; continue; }
+      states.set(item.subagentId, next.length);
+    }
+    const source = convoItemSourceKey(item);
+    if (source) {
+      if (sources.has(source)) continue;
+      sources.add(source);
+    }
+    next.push(item);
+  }
+  return next;
+}
+
 /** Replace a streaming message in place; append only its first snapshot. */
 export function appendConvoEvent(items: ConvoItem[], ev: ConvoEventLike): ConvoItem[] {
   const additions=eventToItems(ev);
+  const subagentState = additions[0]?.role === "subagent_state" ? additions[0] : null;
+  if (subagentState) {
+    const index = items.findIndex((item) => item.role === "subagent_state" && item.subagentId === subagentState.subagentId);
+    return index < 0 ? [...items, ...additions] : items.map((item, i) => i === index ? subagentState : item);
+  }
+  const source = additions[0] ? convoItemSourceKey(additions[0]) : null;
+  if (source && items.some(item => convoItemSourceKey(item) === source)) return items;
   if (ev.kind !== "text_update" || !ev.item_id) return [...items,...additions];
   const index=items.findIndex((item)=>item.role === "text" && item.streamId === ev.item_id);
   if (index<0) return [...items,...additions];
   return items.map((item,i)=>i===index?additions[0]:item);
 }
 export function coalesceConvoEvent<T extends ConvoEventLike>(events:T[],ev:T):T[]{
+  // Durable remote user events replace the still-pending optimistic event. A
+  // result/reset boundary keeps a repeated request in a later turn distinct.
+  if (ev.kind === "user") {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const previous = events[index];
+      if (["result", "context_cleared", "debate_ended"].includes(previous.kind)) break;
+      if (previous.kind !== "user") continue;
+      if (previous.optimistic === true && ev.optimistic !== true &&
+          previous.text === ev.text && previous.inherited === ev.inherited &&
+          (previous.parent_id ?? null) === (ev.parent_id ?? null) &&
+          (previous.speaker ?? null) === (ev.speaker ?? null)) {
+        return events.map((event, i) => i === index ? ev : event);
+      }
+      break;
+    }
+  }
   if(ev.kind!=="text_update"||!ev.item_id)return [...events,ev];
   const index=events.findIndex((item)=>item.kind==="text_update"&&item.item_id===ev.item_id);
   return index<0?[...events,ev]:events.map((item,i)=>i===index?ev:item);

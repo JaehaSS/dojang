@@ -31,6 +31,9 @@ pub struct RunRow {
     /// 계획 거절·계획 리뷰 fix가 남긴, 다음 분할이 소비할 피드백.
     #[sqlx(default)]
     pub feedback: Option<String>,
+    /// 분할 심판이 clarify·decline을 낸 뒤 사용자 답변을 기다리는 동안의 질문·사유(`model::Clarification`).
+    #[sqlx(default)]
+    pub clarification_json: Option<String>,
 }
 
 impl RunRow {
@@ -182,6 +185,7 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     // 이후에 추가된 컬럼. 이미 있으면 실패하므로 결과를 무시한다(멱등).
     for stmt in [
         "ALTER TABLE pipeline_runs ADD COLUMN feedback TEXT",
+        "ALTER TABLE pipeline_runs ADD COLUMN clarification_json TEXT",
         "ALTER TABLE pipeline_tickets ADD COLUMN gen INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE pipeline_tickets ADD COLUMN spawn_head TEXT",
     ] {
@@ -233,6 +237,41 @@ pub async fn list_runs(pool: &SqlitePool, repo: Option<&str>) -> anyhow::Result<
                 .fetch_all(pool)
                 .await?
         }
+    })
+}
+
+/// 목록용 실행 행 + 티켓 집계 + 지금 도는 단계.
+#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
+pub struct RunSummaryRow {
+    #[serde(flatten)]
+    #[sqlx(flatten)]
+    pub run: RunRow,
+    /// 제외(cancelled)된 티켓은 세지 않는다 — 실행 상세의 `통합 n/m` 분모와 같다.
+    pub tickets_total: i64,
+    pub tickets_integrated: i64,
+    pub tickets_escalated: i64,
+    /// 가장 최근에 시작한 running 단계의 kind. 없으면 null.
+    pub active_step_kind: Option<String>,
+}
+
+/// 실행 목록 + 진행 집계를 한 번의 SQL로 가져온다(실행별 N+1 없음).
+pub async fn list_runs_summary(pool: &SqlitePool, repo: Option<&str>) -> anyhow::Result<Vec<RunSummaryRow>> {
+    let sql = "SELECT r.*,
+            COALESCE(t.total, 0) AS tickets_total,
+            COALESCE(t.integrated, 0) AS tickets_integrated,
+            COALESCE(t.escalated, 0) AS tickets_escalated,
+            (SELECT s.kind FROM pipeline_steps s WHERE s.run_id = r.id AND s.status = 'running'
+              ORDER BY s.id DESC LIMIT 1) AS active_step_kind
+         FROM pipeline_runs r
+         LEFT JOIN (
+            SELECT run_id, SUM(CASE WHEN state <> 'cancelled' THEN 1 ELSE 0 END) AS total,
+                   SUM(CASE WHEN state = 'integrated' THEN 1 ELSE 0 END) AS integrated,
+                   SUM(CASE WHEN state = 'escalated' THEN 1 ELSE 0 END) AS escalated
+            FROM pipeline_tickets GROUP BY run_id
+         ) t ON t.run_id = r.id";
+    Ok(match repo {
+        Some(r) => sqlx::query_as(&format!("{sql} WHERE r.repo = ? ORDER BY r.id DESC")).bind(r).fetch_all(pool).await?,
+        None => sqlx::query_as(&format!("{sql} ORDER BY r.id DESC")).fetch_all(pool).await?,
     })
 }
 
@@ -480,6 +519,66 @@ pub async fn set_run_feedback(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// 분할 심판의 clarify·decline을 기록하고 Drafting에서 멈춘다. 같은 revision 토큰으로 캐시된 단계를
+/// 다시 쓰지 않도록 revision을 올린다(다음 분할은 사용자 답변을 피드백으로 받아 새 토큰으로 돈다).
+/// 이미 멈춰 있으면(재시작 뒤 캐시 재적용) 질문만 갱신하고 revision은 그대로 둔다.
+pub async fn set_run_clarification(
+    pool: &SqlitePool,
+    id: i64,
+    clarification_json: &str,
+    reason: &str,
+    now: i64,
+) -> anyhow::Result<bool> {
+    let mut tx = pool.begin().await?;
+    let paused = sqlx::query(
+        "UPDATE pipeline_runs SET state = 'paused', paused_from = 'drafting', paused_reason = ?,
+            clarification_json = ?, feedback = NULL, spec_revision = spec_revision + 1, updated_at = ?
+         WHERE id = ? AND state = 'drafting'",
+    )
+    .bind(reason)
+    .bind(clarification_json)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if !paused {
+        sqlx::query(
+            "UPDATE pipeline_runs SET clarification_json = ?, updated_at = ?
+             WHERE id = ? AND state = 'paused' AND paused_from = 'drafting'",
+        )
+        .bind(clarification_json)
+        .bind(now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(paused)
+}
+
+/// 사용자 답변으로 intake를 닫는다: 답변을 피드백으로 두고 질문을 지운 뒤 Drafting으로 돌아간다.
+/// clarify 대기 상태(paused ← drafting, clarification_json 있음)가 아니면 Ok(false).
+pub async fn answer_clarification(
+    pool: &SqlitePool,
+    id: i64,
+    feedback: &str,
+    now: i64,
+) -> anyhow::Result<bool> {
+    let r = sqlx::query(
+        "UPDATE pipeline_runs SET state = 'drafting', paused_from = NULL, paused_reason = NULL,
+            clarification_json = NULL, last_error = NULL, feedback = ?, updated_at = ?
+         WHERE id = ? AND state = 'paused' AND paused_from = 'drafting' AND clarification_json IS NOT NULL",
+    )
+    .bind(feedback)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() == 1)
 }
 
 /// 분할 결과를 한 트랜잭션으로 확정한다: 스펙 저장·revision 증가·피드백 소비·티켓 교체.
@@ -980,6 +1079,21 @@ pub async fn reviewer_counts(
 /// 파이프라인이 관리하는 티켓 작업은 실행이 끝나기 전까지, 통합 작업은 최종 승인 대기(G2) 밖에서 막는다.
 /// 종결된 실행(완료·취소·실패)은 더 이상 드라이버가 만지지 않으므로 정리할 수 있게 풀어 준다.
 pub const PIPELINE_MANAGED_MESSAGE: &str = "파이프라인이 관리하는 작업입니다. 파이프라인 화면에서 처리하세요";
+
+/// 비종결 실행(최종 승인 대기 제외)의 통합 작업이면 그 실행 id.
+///
+/// 통합 작업은 실행의 뿌리다 — 작업 목록에서 그것을 지우는 행위는 실행을 취소하는 것과 같은 뜻이므로,
+/// `task_cancel`·`task_discard`는 가드 메시지로 거절하는 대신 실행 취소로 돌린다. 제외 집합은
+/// `pipeline_guard_for_task`의 통합 작업 분기와 같아야 한다 — 가드가 막는 곳에서만 돌린다.
+pub async fn active_run_for_integration_task(pool: &SqlitePool, task_id: i64) -> anyhow::Result<Option<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM pipeline_runs
+         WHERE integration_task_id = ? AND state NOT IN ('done', 'cancelled', 'failed', 'awaiting_merge_approval') LIMIT 1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await?)
+}
 
 pub async fn pipeline_guard_for_task(pool: &SqlitePool, task_id: i64) -> anyhow::Result<Option<String>> {
     let ticket_run: Option<String> = sqlx::query_scalar(

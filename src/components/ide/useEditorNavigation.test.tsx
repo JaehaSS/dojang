@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useEditorNavigation } from "./useEditorNavigation";
+import { useEditorNavigation, type EditorNavigationIdentity } from "./useEditorNavigation";
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -28,7 +28,7 @@ const origin = {
 
 function Harness({
   identity = { host: "local", taskId: 1, windowId: "main" },
-}) {
+}: { identity?: EditorNavigationIdentity }) {
   api = useEditorNavigation({
     identity,
     openTarget: async () => "opened",
@@ -195,6 +195,15 @@ describe("useEditorNavigation", () => {
       ),
     );
     await act(async () => api?.onRevealed(api?.reveal ?? undefined));
+    expect(api?.canBack).toBe(false);
+  });
+
+  it("supports project navigation and discards a reveal when its root changes", async () => {
+    await act(async () => root.render(<Harness identity={{ host: "local", taskId: null, windowId: "editor", workspaceKey: "/repo/one" }} />));
+    await act(async () => { await api?.navigate(target, origin); });
+    expect(api?.reveal?.path).toBe(target.path);
+    await act(async () => root.render(<Harness identity={{ host: "local", taskId: null, windowId: "editor", workspaceKey: "/repo/two" }} />));
+    expect(api?.reveal).toBeNull();
     expect(api?.canBack).toBe(false);
   });
 

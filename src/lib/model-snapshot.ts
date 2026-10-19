@@ -20,6 +20,8 @@ interface ModelSnapshotEvent {
   kind: string;
   resolved?: string | null;
   requested?: string | null;
+  speaker?: unknown;
+  parent_id?: unknown;
 }
 
 /**
@@ -36,6 +38,7 @@ export function foldModelSnapshot(
 ): ModelSnapshot {
   return events.reduce<ModelSnapshot>(
     (acc, ev) => {
+      if (ev.parent_id != null || (ev.speaker != null && ev.speaker !== "left")) return acc;
       if (ev.kind === "context_cleared") return EMPTY_MODEL_SNAPSHOT;
       return ev.kind === "model_snapshot"
         ? { resolved: ev.resolved ?? acc.resolved, requested: ev.requested ?? acc.requested }

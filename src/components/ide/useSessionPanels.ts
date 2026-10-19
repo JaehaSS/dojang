@@ -13,15 +13,21 @@ export interface PanelState {
   codeOpen: boolean;
   /** 코드 열의 활성 탭. */
   codeTab: CodeTab;
-  /** 세션 본문에 표시 중인 변경 파일. */
-  centralDiffPath: string | null;
   /** 파일 트리(⌘B). */
   showTree: boolean;
+  /**
+   * 트리 열이 보여 주는 것 — 파일 트리인가 변경 목록인가(ADR 2026-10-08 결정 1).
+   * `showTree`와 독립이다. 닫힌 트리의 렌즈 값은 다음에 열릴 때의 시작 렌즈다 —
+   * 변경을 보다 닫은 사람이 다시 열면 변경이 나와야 "닫았다 열었다"가 성립한다.
+   */
+  treeLens: TreeLens;
   /** 플로팅 작업정보 채널의 핀. */
   channelPinned: boolean;
 }
 
 type Updater<T> = T | ((prev: T) => T);
+
+export type TreeLens = "files" | "changes";
 
 export interface SessionPanels extends PanelState {
   /**
@@ -32,10 +38,10 @@ export interface SessionPanels extends PanelState {
   setTerminalDock: (next: Updater<boolean>) => void;
   setCodeOpen: (next: Updater<boolean>) => void;
   setCodeTab: (next: Updater<CodeTab>) => void;
-  setCentralDiffPath: (path: string | null) => void;
-  openDiffPanel: () => void;
-  toggleDiffPanel: () => void;
   setShowTree: (next: Updater<boolean>) => void;
+  setTreeLens: (next: Updater<TreeLens>) => void;
+  /** 변경 렌즈를 켜고 트리를 연다. 멱등 — 이미 그 상태면 아무것도 바꾸지 않는다. */
+  openChangesLens: () => void;
   setChannelPinned: (next: Updater<boolean>) => void;
 }
 
@@ -52,8 +58,8 @@ const seedState = (): PanelState => ({
   terminalDock: false,
   codeOpen: false,
   codeTab: "file",
-  centralDiffPath: null,
   showTree: false,
+  treeLens: "files",
   channelPinned: true,
 });
 
@@ -125,38 +131,14 @@ export function useSessionPanels(sessionKey: string | null): SessionPanels {
   );
 
   const setTerminalDock = useCallback((n: Updater<boolean>) => apply("terminalDock", n), [apply]);
-  const setCodeOpen = useCallback(
-    (n: Updater<boolean>) => {
-      const next = typeof n === "function" ? n(stateRef.current.codeOpen) : n;
-      apply("codeOpen", next);
-      if (!next) apply("centralDiffPath", null);
-    },
-    [apply],
-  );
-  const setCodeTab = useCallback(
-    (n: Updater<CodeTab>) => {
-      const next = typeof n === "function" ? n(stateRef.current.codeTab) : n;
-      apply("codeTab", next);
-      if (next !== "diff") apply("centralDiffPath", null);
-    },
-    [apply],
-  );
-  const setCentralDiffPath = useCallback((path: string | null) => apply("centralDiffPath", path), [apply]);
-  const openDiffPanel = useCallback(() => {
-    apply("codeOpen", true);
-    apply("codeTab", "diff");
-  }, [apply]);
-  const toggleDiffPanel = useCallback(() => {
-    const { codeOpen, codeTab } = stateRef.current;
-    if (codeOpen && codeTab === "diff") {
-      apply("codeOpen", false);
-      apply("centralDiffPath", null);
-      return;
-    }
-    apply("codeOpen", true);
-    apply("codeTab", "diff");
-  }, [apply]);
+  const setCodeOpen = useCallback((n: Updater<boolean>) => apply("codeOpen", n), [apply]);
+  const setCodeTab = useCallback((n: Updater<CodeTab>) => apply("codeTab", n), [apply]);
   const setShowTree = useCallback((n: Updater<boolean>) => apply("showTree", n), [apply]);
+  const setTreeLens = useCallback((n: Updater<TreeLens>) => apply("treeLens", n), [apply]);
+  const openChangesLens = useCallback(() => {
+    apply("treeLens", "changes");
+    apply("showTree", true);
+  }, [apply]);
   const setChannelPinned = useCallback(
     (n: Updater<boolean>) => apply("channelPinned", n),
     [apply],
@@ -168,10 +150,9 @@ export function useSessionPanels(sessionKey: string | null): SessionPanels {
     setTerminalDock,
     setCodeOpen,
     setCodeTab,
-    setCentralDiffPath,
-    openDiffPanel,
-    toggleDiffPanel,
     setShowTree,
+    setTreeLens,
+    openChangesLens,
     setChannelPinned,
   };
 }

@@ -18,6 +18,9 @@ const headerStatus = (entry: SubagentEntry | null, parentBusy: boolean) => {
   if (!entry) return { mark: "●", color: "text-text-muted", label: "기록된 서브 에이전트" };
   if (entry.state === "failed") return { mark: "×", color: "text-status-failed", label: "실패" };
   if (entry.state === "done") return { mark: "✓", color: "text-status-done", label: "완료" };
+  if (entry.state === "stopped") return { mark: "○", color: "text-status-awaiting", label: "중단됨" };
+  if (entry.state === "unknown") return { mark: "?", color: "text-text-muted", label: "완료 확인 불가" };
+  if (entry.vendor === "codex") return { mark: "→", color: "text-primary-bright", label: "작업 중" };
   if (!parentBusy)
     return { mark: "○", color: "text-status-awaiting", label: "미완료 — 턴 종료로 중단됨" };
   return { mark: "→", color: "text-primary-bright", label: "작업 중" };
@@ -35,7 +38,8 @@ export function SubagentView({
   conversationId,
 }: Props) {
   const st = headerStatus(entry, parentBusy);
-  const running = entry?.state === "running" && parentBusy;
+  const running = entry?.state === "running" && (entry.vendor === "codex" || parentBusy);
+  const detailsUnavailable = entry?.vendor === "codex" && entry.observationStatus != null && entry.observationStatus !== "available";
   return (
     <div className="flex flex-1 min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-border bg-bg px-4 py-2 text-sm">
@@ -43,9 +47,16 @@ export function SubagentView({
         <span className="text-text truncate">{entry?.title ?? "서브 에이전트"}</span>
         <span className="ml-auto shrink-0 text-xs text-text-muted">{st.label}</span>
       </div>
+      {detailsUnavailable && (items.length > 0 || running) && (
+        <div className="px-4 py-2 text-sm text-text-muted">
+          {items.length > 0 ? "일부 상세 기록을 확인할 수 없습니다." : "상세 기록을 확인할 수 없습니다."}
+        </div>
+      )}
       {items.length === 0 && !running ? (
         <div className="px-4 py-3 text-sm text-text-muted">
-          이 서브 에이전트의 상세 이벤트가 없습니다 — 스폰 요약과 결과는 메인 대화에서 확인하세요.
+          {detailsUnavailable
+            ? "이 서브 에이전트의 상세 기록을 확인할 수 없습니다."
+            : "이 서브 에이전트의 상세 이벤트가 없습니다 — 스폰 요약과 결과는 메인 대화에서 확인하세요."}
         </div>
       ) : (
         // 이벤트가 아직 없어도 작업 중이면 busy 인디케이터를 보여 헤더와 본문 상태를 일치시킨다.

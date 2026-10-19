@@ -63,18 +63,10 @@ import { stageLabel, ensembleLabel, elapsedLabel, type CreationState } from "../
 import { QUESTION_AGENTS } from "../../lib/conversation-interaction";
 import type { SessionStyle } from "../../lib/session-style";
 
-/** off: 대화(턴마다 `-p`) · questions: 대화 + 질문 응답 · approvals: 대화 + 질문 응답 + 실행 전 승인(Claude만).
- *  터미널/대화 자체는 설정 › 작업 실행의 세션 방식이 정한다(`session-style.ts`). */
-type InteractionMode = "off" | "questions" | "approvals";
-
 interface Props {
   serviceTier?: "default" | "fast";
   onServiceTierChange?: (value: "default" | "fast") => void;
-  questionsEnabled?: boolean;
-  onQuestionsEnabledChange?: (value: boolean) => void;
-  approvalsEnabled?: boolean;
-  onApprovalsEnabledChange?: (value: boolean) => void;
-  /** 설정의 세션 방식. 터미널이면 대화 세부 선택 대신 터미널 표시만 둔다 — 이어받기는 대화로만 잇는다. */
+  /** 설정의 세션 방식. 터미널이면 터미널 표시를 둔다 — 이어받기는 대화로만 잇는다. */
   sessionStyle?: SessionStyle;
   /** 새 세션이 살 환경. 생성 시점에 고정되므로 여기서만 고를 수 있다 (ADR 0133). */
   host: HostId;
@@ -162,10 +154,6 @@ export function Composer({
   setReasoningEffort,
   serviceTier = "default",
   onServiceTierChange,
-  questionsEnabled = false,
-  onQuestionsEnabledChange,
-  approvalsEnabled = false,
-  onApprovalsEnabledChange,
   sessionStyle = "conversation",
   instruction,
   setInstruction,
@@ -477,7 +465,7 @@ export function Composer({
     });
   };
 
-  // 클립보드 이미지 붙여넣기 — 레포의 `.praxis/pasted/`에 저장하고 경로 참조를 지시문에 삽입
+  // 클립보드 이미지 붙여넣기 — 레포의 `.dojang/pasted/`에 저장하고 경로 참조를 지시문에 삽입
   // (에이전트가 그 경로의 파일을 읽는다). 작업 생성 전이라 캡처 칩 파이프라인(worktree)은 없다.
   const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const file = findImageFile(e.clipboardData);
@@ -542,16 +530,8 @@ export function Composer({
 
   const canCreate = !busy && connected && !!repo.trim() && !!instruction.trim();
   const showResume = hostCapabilities(activeHost).sessionHomeResume;
-  const showInteraction = host === LOCAL_HOST && agents.length === 1 && QUESTION_AGENTS.includes(agents[0]) && !!onQuestionsEnabledChange;
-  const canApprove = agents[0] === "claude" && !!onApprovalsEnabledChange;
-  // 이어받기는 대화 세션만 이을 수 있다 — 설정이 터미널이어도 이어받기는 대화 선택을 보인다.
-  const terminalSession = showInteraction && sessionStyle === "terminal" && !resumeSession;
-  // 승인은 질문 응답 위에서만 성립하므로 두 체크박스 대신 한 선택으로 묶는다.
-  const interactionMode: InteractionMode = !questionsEnabled ? "off" : canApprove && approvalsEnabled ? "approvals" : "questions";
-  const setInteractionMode = (mode: InteractionMode) => {
-    onQuestionsEnabledChange?.(mode === "questions" || mode === "approvals");
-    onApprovalsEnabledChange?.(mode === "approvals");
-  };
+  // 이어받기는 설정이 터미널이어도 대화 세션으로 잇는다.
+  const terminalSession = host === LOCAL_HOST && agents.length === 1 && QUESTION_AGENTS.includes(agents[0]) && sessionStyle === "terminal" && !resumeSession;
   return (
     <div className="border-t border-border px-4 pt-2 pb-3 bg-bg shrink-0">
       <div className="composer-toolbar mb-2">
@@ -573,6 +553,48 @@ export function Composer({
           />
         )}
         <AgentPicker agents={agents} onChange={setAgents} />
+        {/* 이어받기·터미널 방식 표시는 에이전트 선택 옆에 둔다 — 고른 세션이 에이전트를 정한다.
+            질문·승인 선택이 사라져 도구줄이 다시 한 줄에 들어간다(원장 #557의 전제가 바뀜). */}
+        {showResume && (
+          resumeSession ? (
+            <span className={chip}>
+              <Icon name="clock" size={13} />
+              <span
+                className="max-w-[160px] truncate"
+                title={resumeSession.title?.trim() || resumeSession.first_message?.trim() || resumeSession.session_id}
+              >
+                {resumeSession.title?.trim() ||
+                  resumeSession.first_message?.trim() ||
+                  resumeSession.session_id.slice(0, 8)}
+              </span>
+              <button
+                type="button"
+                className="text-text-muted hover:text-text"
+                aria-label="이어받기 세션 해제"
+                onClick={() => onResumeSessionChange(null)}
+              >
+                <Icon name="x" size={12} />
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="flex items-center gap-1 text-xs text-text-secondary border border-border rounded-md px-2 py-1 hover:border-border-strong"
+              onClick={() => setSessionPickerOpen(true)}
+            >
+              <Icon name="clock" size={13} />
+              세션 이어받기
+            </button>
+          )
+        )}
+        {terminalSession && (
+          <span
+            className="text-xs text-text-secondary"
+            title="실제 CLI를 앱 터미널에서 그대로 씁니다. 작업 화면에서는 터미널 안에서만 입력합니다. 설정 › 작업 실행 › 세션 방식에서 바꿉니다."
+          >
+            터미널 세션
+          </span>
+        )}
         {/* 세션 모델 오버라이드 — 앙상블(2개+)은 벤더별 기본을 따르므로 단일 선택일 때만 노출 */}
         {agents.length === 1 && (
           <ModelPicker agent={agents[0]} model={model} onChange={setModel} />
@@ -711,66 +733,6 @@ export function Composer({
             </span>
           </button>
         </div>
-        {/* 무엇을·어디서(위 도구줄)와 달리, 세션이 어떻게 흘러갈지를 정하는 옵션은 입력창 아래에 둔다.
-            한 줄에 모두 두면 Claude 질문 세션에서 도구줄이 두 줄로 넘어갔다. */}
-        {(showResume || showInteraction) && (
-          <div className="composer-toolbar mt-1.5">
-            {showResume && (
-              resumeSession ? (
-                <span className={chip}>
-                  <Icon name="clock" size={13} />
-                  <span
-                    className="max-w-[160px] truncate"
-                    title={resumeSession.title?.trim() || resumeSession.first_message?.trim() || resumeSession.session_id}
-                  >
-                    {resumeSession.title?.trim() ||
-                      resumeSession.first_message?.trim() ||
-                      resumeSession.session_id.slice(0, 8)}
-                  </span>
-                  <button
-                    type="button"
-                    className="text-text-muted hover:text-text"
-                    aria-label="이어받기 세션 해제"
-                    onClick={() => onResumeSessionChange(null)}
-                  >
-                    <Icon name="x" size={12} />
-                  </button>
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  className="flex items-center gap-1 text-xs text-text-secondary border border-border rounded-md px-2 py-1 hover:border-border-strong"
-                  onClick={() => setSessionPickerOpen(true)}
-                >
-                  <Icon name="clock" size={13} />
-                  세션 이어받기
-                </button>
-              )
-            )}
-            {terminalSession ? (
-              <span
-                className="text-xs text-text-secondary"
-                title="실제 CLI를 앱 터미널에서 그대로 씁니다. 작업 화면에서는 터미널 안에서만 입력합니다. 설정 › 작업 실행 › 세션 방식에서 바꿉니다."
-              >
-                터미널 세션
-              </span>
-            ) : showInteraction && (
-              <label title="대화: 턴마다 CLI를 -p로 실행해 말풍선으로 보여 줍니다. 질문 응답: 에이전트가 선택지 질문으로 답을 받아 이어갑니다. 실행 전 승인: 파일 수정·명령 실행 전에 허용 여부를 묻습니다(Claude만).">
-                <select
-                  aria-label="세션 방식"
-                  value={interactionMode}
-                  disabled={busy}
-                  onChange={(e) => setInteractionMode(e.target.value as InteractionMode)}
-                >
-                  <option value="off">대화</option>
-                  <option value="questions">대화 · 질문 응답</option>
-                  {/* 실행 전 승인 — Claude 질문 세션만 CLI의 권한 프롬프트를 앱으로 받을 수 있다. */}
-                  {canApprove && <option value="approvals">대화 · 질문 응답 · 실행 전 승인</option>}
-                </select>
-              </label>
-            )}
-          </div>
-        )}
         {busy && (
           <div className="mt-1 flex items-center gap-2 text-xs text-text-secondary">
             <span role="status" aria-live="polite">

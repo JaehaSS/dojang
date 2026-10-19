@@ -56,6 +56,8 @@ pub struct ActiveTask {
 /// 세부 필드는 상태 카드·인터럽트·재시작 조정에서 공용으로 사용한다.
 #[derive(Clone)]
 pub struct ActiveConvo {
+    /// Late cleanup may only release the reservation belonging to this owner.
+    pub owner: Arc<()>,
     pub pgid: Option<u32>,
     pub vendor_bin: String,
     pub started_at: i64,
@@ -85,6 +87,7 @@ pub(crate) enum ConvoAdmissionAction {
 struct ConvoReservation {
     active: ActiveConvos,
     id: i64,
+    owner: Arc<()>,
     remove_on_drop: bool,
 }
 
@@ -93,7 +96,7 @@ impl Drop for ConvoReservation {
         if !self.remove_on_drop {
             return;
         }
-        release_convo_if_finalized(&self.active,self.id);
+        release_convo_if_finalized(&self.active, self.id, &self.owner);
     }
 }
 
@@ -111,9 +114,11 @@ fn reserve_convo_switch(active: ActiveConvos, id: i64) -> Result<ConvoReservatio
         return Err("대화 턴이 아직 종료 처리 중입니다 — 잠시 후 다시 시도하세요".into());
     }
     let ts = now();
+    let owner = Arc::new(());
     turns.insert(
         id,
         ActiveConvo {
+            owner: owner.clone(),
             pgid: None,
             vendor_bin: String::new(),
             started_at: ts,
@@ -126,18 +131,75 @@ fn reserve_convo_switch(active: ActiveConvos, id: i64) -> Result<ConvoReservatio
     Ok(ConvoReservation {
         active,
         id,
+        owner,
         remove_on_drop: true,
     })
 }
 
 /// The structured controller is removed only after cleanup and the task-state commit.
-fn release_convo_if_finalized(active: &ActiveConvos, id: i64) -> bool {
+fn release_convo_if_finalized(active: &ActiveConvos, id: i64, owner: &Arc<()>) -> bool {
+    release_convo_if_finalized_with(active, id, owner, || {}) != ConvoRelease::Blocked
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ConvoRelease {
+    Released,
+    Superseded,
+    Blocked,
+}
+
+fn release_convo_if_finalized_with(
+    active: &ActiveConvos,
+    id: i64,
+    owner: &Arc<()>,
+    on_release: impl FnOnce(),
+) -> ConvoRelease {
+    let mut turns = active.lock().unwrap_or_else(|e| e.into_inner());
+    if !turns.get(&id).is_some_and(|turn| Arc::ptr_eq(&turn.owner, owner)) {
+        return ConvoRelease::Superseded;
+    }
     if crate::convo::app_server::execution(id).is_some() {
         crate::convo::app_server::mark_cleanup_failed(id);
-        return false;
+        return ConvoRelease::Blocked;
     }
-    active.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-    true
+    // Publish the old turn's final state before another admission can emit Running.
+    on_release();
+    turns.remove(&id);
+    ConvoRelease::Released
+}
+
+/// A committed review state with no process is the legacy turn's finalization evidence.
+/// Reclaim only that completed owner; an admission/switch reservation has no vendor yet.
+async fn reserve_convo_agent_switch(
+    pool: &SqlitePool,
+    active: ActiveConvos,
+    id: i64,
+) -> Result<ConvoReservation, String> {
+    let stale = active.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned();
+    if let Some(turn) = stale.filter(|turn| !turn.vendor_bin.is_empty()) {
+        let task = db::get_task(pool, id).await.map_err(|e| e.to_string())?;
+        let finalized = task.is_some_and(|task| {
+            task.mode == "conversation"
+                && task.state == tstate::AWAITING_REVIEW
+                && task.convo_pgid.is_none()
+        });
+        if finalized {
+            crate::convo::interaction::ensure_idle(pool, id).await?;
+            let process_ended = match turn.pgid {
+                Some(pid) => verify::process_group_alive_checked(pid).is_ok_and(|alive| !alive),
+                None => true,
+            };
+            if process_ended {
+                let mut turns = active.lock().unwrap_or_else(|e| e.into_inner());
+                if turns.get(&id).is_some_and(|current| Arc::ptr_eq(&current.owner, &turn.owner))
+                    && crate::convo::app_server::execution(id).is_none()
+                {
+                    turns.remove(&id);
+                }
+            }
+        }
+    }
+    reserve_convo_switch(active, id)
 }
 
 /// 프리뷰 웹뷰 핸들과 그것이 사는 곳.
@@ -217,6 +279,8 @@ pub struct AppState {
     pub preview_bridge: crate::preview_bridge::PreviewBridge,
     /// Preview Workbench 제출 receipt의 앱 실행 중 단일 소스.
     pub preview_workbench: crate::preview_workbench::PreviewWorkbench,
+    /// 작업별 Design Canvas Vite 서버. owner 토큰이 늦은 프런트 정리를 새 서버와 분리한다.
+    pub design_canvas: crate::design_canvas::DesignCanvasServers,
     /// 에디터 "정의로 이동"용 언어 서버 풀 (작업 × 언어). 로컬 전용 — 서버가 워크트리
     /// 파일시스템을 직접 읽으므로 원격 워크트리에는 붙일 수 없다.
     pub lsp: Arc<crate::lspclient::LspPool>,
@@ -253,6 +317,7 @@ impl Default for AppState {
             preview_openings: Default::default(),
             preview_bridge: crate::preview_bridge::PreviewBridge::new(),
             preview_workbench: crate::preview_workbench::PreviewWorkbench::new(),
+            design_canvas: crate::design_canvas::DesignCanvasServers::default(),
             lsp: Arc::new(crate::lspclient::LspPool::default()),
             control_tokens: crate::preview_bridge::mcp::ControlTokens::default(),
             mcp_instance: crate::preview_bridge::random_hex_id().ok(),
@@ -277,6 +342,8 @@ pub use project_plan::*;
 pub(crate) mod pipeline_driver;
 mod pipeline;
 pub use pipeline::*;
+#[cfg(test)]
+mod task_removal_tests;
 pub use task_results::*;
 
 mod quiz;
@@ -287,10 +354,12 @@ mod voice;
 pub use voice::*;
 mod translate;
 pub use translate::*;
-mod vocab;
-pub use vocab::*;
+mod know_cards;
+pub use know_cards::*;
 mod shell;
 pub use shell::*;
+mod clipboard;
+pub use clipboard::*;
 mod repl;
 pub use repl::*;
 mod wiki_workspace;
@@ -315,6 +384,8 @@ mod schedule;
 pub use schedule::*;
 mod designmode;
 pub use designmode::*;
+mod design_canvas;
+pub use design_canvas::*;
 mod preview_workbench;
 pub use preview_workbench::*;
 mod preview_window;
@@ -2677,8 +2748,8 @@ pub async fn task_resume(
         .as_deref()
         .map(str::trim)
         .unwrap_or_default();
-    // agy가 저장하는 것은 세션 id가 아니라 "직전 대화"라는 센티널이다(print 모드에서 대화 id를
-    // 얻을 수 없다). 물려받아 봐야 새 워크트리에는 직전 대화가 없고, 있다면 그것은 이 대화가
+    // stream-json 이전의 agy 작업은 세션 id가 아니라 "직전 대화"라는 센티널을 저장했다(텍스트
+    // print 모드에서는 대화 id를 얻을 수 없었다). 물려받아 봐야 새 워크트리에는 직전 대화가 없고, 있다면 그것은 이 대화가
     // 아니다 — 이어받았다는 표시만 남고 문맥은 엉뚱한 곳에서 오거나 아예 오지 않는다.
     if session == crate::convo::AGY_CONTINUE {
         return Err(
@@ -2775,7 +2846,7 @@ pub async fn task_resume(
 /// 2026-09-17 결정 10).
 ///
 /// 기본(`all=false`)은 `repo`를 접두로 갖는 cwd(선두 또는 말미)만 낸다 — Praxis 워크트리는
-/// `<repo>/.praxis/worktrees/…`라 같은 접두로 함께 잡힌다. `all=true`면 접두 필터를 걷는다.
+/// `<repo>/.dojang/worktrees/…`라 같은 접두로 함께 잡힌다. `all=true`면 접두 필터를 걷는다.
 /// `query`는 제목·첫 메시지·cwd에 대한 대소문자 무시 부분 문자열 검색이다. 정렬은 최근순,
 /// 상한은 항상 200 — 호출부가 더 큰 값을 요구할 방법이 없다(파라미터로 받지 않는다).
 ///
@@ -3883,6 +3954,8 @@ async fn start_convo_turn(
         state.preview_bridge.release(id);
         crate::preview_control::emit_control_state(&app, &state, id, "release", true);
     }
+    // 알아둘 것 판정의 요청 재료 — vault 첨부가 붙기 전의 사용자 원문이다.
+    let know_request = message;
     let message = delivered_message;
 
     let notify = app.clone();
@@ -3918,6 +3991,7 @@ async fn start_convo_turn(
     // Freeze all session settings at admission; later edits belong to the next message.
     let settings_task = task;
     reservation.handoff_to_turn();
+    let turn_owner = reservation.owner.clone();
 
     std::thread::spawn(move || {
         // 턴 종료 시(패닉 포함) 진행중 엔트리 제거 — busy 영구 고착/유령 pid 방지.
@@ -3926,10 +4000,20 @@ async fn start_convo_turn(
             i64,
             Option<PreviewReceiptAcceptance>,
             AppHandle,
+            Arc<()>,
+            Option<(SqlitePool, Option<String>)>,
         );
         impl Drop for Done {
             fn drop(&mut self) {
-                if !release_convo_if_finalized(&self.0, self.1) {
+                let released = release_convo_if_finalized_with(&self.0, self.1, &self.4, || {
+                    if let Some((pool, awaiting_kind)) = &self.5 {
+                        emit_awaiting_review(&self.3, pool, self.1, awaiting_kind.as_deref());
+                    }
+                });
+                if released == ConvoRelease::Superseded {
+                    return;
+                }
+                if released == ConvoRelease::Blocked {
                     if let Ok(pool) = pool_of(&self.3.state::<AppState>()) {
                         let _ = tauri::async_runtime::block_on(async {
                             if let Some(execution) = crate::convo::app_server::execution(self.1) {
@@ -3962,7 +4046,7 @@ async fn start_convo_turn(
                 );
             }
         }
-        let _done = Done(active.clone(), id, preview_receipt, app.clone());
+        let mut _done = Done(active.clone(), id, preview_receipt, app.clone(), turn_owner, None);
 
         // 이벤트 영속을 전용 스레드로 분리 — 읽기 루프가 per-event DB 쓰기에 막히지 않게(백프레셔 방지).
         // mpsc는 순서 보존 + 논블로킹 송신. 턴 종료 시 tx drop → 수신측이 잔여 배수 후 종료.
@@ -4000,6 +4084,8 @@ async fn start_convo_turn(
         // 메인 스레드 마지막 어시스턴트 텍스트 + 오류 여부 — 턴 종료 후 질문 대기 판별 재료.
         let mut last_text = String::new();
         let mut result_error = false;
+        // 알아둘 것 카드의 판정 재료 — 메인 도구 호출과 실패한 결과만 상한까지 모은다.
+        let mut know_digest = crate::know_cards::TurnDigest::default();
 
         // 라운드 루프. 토론이 아니면 정확히 한 바퀴 돌고 나가므로 오늘과 같은 경로다.
         // 토론이면 **한 시퀀스 전체가 한 점유**여야 한다 — 턴마다 `Done`을 놓으면 그 틈에
@@ -4260,6 +4346,7 @@ async fn start_convo_turn(
                         }
                         crate::convo::ConvoEvent::Other => {}
                         _ => {
+                            know_digest.observe(&ev);
                             if let Some(turn) = active
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
@@ -4292,7 +4379,7 @@ async fn start_convo_turn(
                                 | crate::convo::ConvoEvent::ToolResult { .. }
                                 | crate::convo::ConvoEvent::Interaction { .. } => {
                                     tool_seen |=
-                                        matches!(&ev, crate::convo::ConvoEvent::ToolUse { .. });
+                                        matches!(&ev, crate::convo::ConvoEvent::ToolUse { parent_id: None, .. });
                                     untracked_input_seen = true;
                                     if let Some(attempt) = delivery_attempt.as_deref() {
                                         let payload =
@@ -4566,8 +4653,8 @@ async fn start_convo_turn(
             }
             crate::convo::app_server::unregister(id);
         }
-        emit_awaiting_review(&app, &pool, id, awaiting_kind);
         // in-flight 해제 — 이후 새 턴 허용. 캡처(느림)는 해제 뒤라 다음 턴을 막지 않는다.
+        _done.5 = Some((pool.clone(), awaiting_kind.map(str::to_string)));
         drop(_done);
         if structured {
             let _ = app.emit(
@@ -4575,6 +4662,24 @@ async fn start_convo_turn(
                 serde_json::json!({"taskId":id}),
             );
         }
+        // 알아둘 것 판정도 해제 뒤에 둔다 — 모델 호출(최대 60초)이 다음 턴을 막지 않는다.
+        crate::know_cards::after_turn(
+            &app,
+            &pool,
+            id,
+            crate::know_cards::TurnGate {
+                debate: debate.is_some(),
+                vendor: crate::convo::Vendor::from_agent(&left_agent),
+                result_seen,
+                result_error,
+                main_tool_uses: know_digest.main_tool_uses(),
+            },
+            crate::know_cards::JudgeInput {
+                request: know_request,
+                answer: last_text,
+                digest: know_digest,
+            },
+        );
         // 자동 캡처·회고(P2)와 수동 회고(자기개선 제안)는 모두 제거됐다(설계 2026-09-13
         // §P2 제거, 1.0 자기개선 제거) — 메모리 정본이 파일이 된 뒤로 자동 추출·관측할
         // 대상이 없고, 도달 불가 상태였던 제안 검토 화면도 함께 없앴다.
@@ -4744,12 +4849,18 @@ pub async fn annotations_resend(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("작업을 찾을 수 없습니다")?;
-    let targets = annotations::list_by_ids(&pool, task_id, &ids)
+    // 사람이 쓴 주석만 보낸다. 에이전트 노트(author != human)가 섞이면 에이전트가 쓴 글이
+    // 에이전트에게 되돌아간다 — 화면이 걸러도 서버가 한 번 더 거른다.
+    let targets: Vec<_> = annotations::list_by_ids(&pool, task_id, &ids)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|annotation| annotations::author::is_human(&annotation.author))
+        .collect();
     if targets.is_empty() {
         return Err("재전송할 주석을 찾을 수 없습니다".into());
     }
+    let ids: Vec<String> = targets.iter().map(|annotation| annotation.id.clone()).collect();
     let hunks = task_hunks(&task)?;
     let message = annotations::format_resend(&annotations::build_resend_items(&targets, &hunks));
 
@@ -4837,8 +4948,42 @@ pub async fn convo_interrupt(state: State<'_, AppState>, id: i64) -> Result<(), 
 
 /// 실행 중인 로컬 작업을 종료하고 검토 대기 전이가 끝날 때까지 기다린다.
 #[tauri::command]
-pub async fn task_cancel(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    cancel_task_inner(&state, id).await
+pub async fn task_cancel(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    cancel_task_with_app(&app, &state, id).await
+}
+
+async fn cancel_task_with_app<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    id: i64,
+) -> Result<(), String> {
+    if cancel_run_of_integration_task(app, state, id).await? {
+        return Ok(());
+    }
+    cancel_task_inner(state, id).await
+}
+
+/// 비종결 파이프라인 실행의 통합 작업이면 실행 자체를 취소하고 `true`를 돌려준다.
+///
+/// 작업 목록의 삭제는 `task_cancel` → `task_discard` 순서로 들어온다(`src/lib/task-removal.ts`). 통합 작업은
+/// 계획 승인 대기 동안 세션 없이 `Created`로 머물러 `cancel_task_inner`가 "실행 중인 터미널 세션이
+/// 없습니다"로 실패하고, 그다음 폐기는 파이프라인 가드가 막는다 — 어느 쪽도 사용자가 고칠 수 없는 말이고,
+/// 목록 갱신마다 작업이 되살아난다(실행 #1). 통합 작업은 실행의 뿌리이므로 그것을 지우는 뜻은 실행 취소다.
+/// 티켓 작업은 돌리지 않는다 — 실행은 그 티켓 없이도 계속될 수 있고, 재시도·건너뛰기는 파이프라인 화면이 맡는다.
+async fn cancel_run_of_integration_task<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    id: i64,
+) -> Result<bool, String> {
+    let pool = pool_of(state)?;
+    let Some(run_id) = crate::pipeline::db::active_run_for_integration_task(&pool, id)
+        .await
+        .map_err(|error| format!("파이프라인 소속 여부를 확인하지 못했습니다: {error}"))?
+    else {
+        return Ok(false);
+    };
+    pipeline::cancel_run(app, state, run_id).await?;
+    Ok(true)
 }
 
 /// `task_cancel`의 본체. 파이프라인 드라이버도 티켓 작업을 멈출 때 쓴다.
@@ -5163,6 +5308,7 @@ mod task_activity_tests {
 
     fn turn(last_operation: Option<&str>) -> ActiveConvo {
         ActiveConvo {
+            owner: std::sync::Arc::new(()),
             pgid: Some(1234),
             vendor_bin: "claude".to_string(),
             started_at: 100,
@@ -5372,6 +5518,7 @@ fn spawn_convo_reaper(
     pgid: u32,
     vendor_bin: String,
     adopted_at: i64,
+    owner: Arc<()>,
 ) {
     const POLL_SECS: u64 = 3;
     const WATCHDOG_SECS: i64 = CONVO_IDLE_TIMEOUT_SECS as i64;
@@ -5412,9 +5559,10 @@ fn spawn_convo_reaper(
                 db::mark_awaiting_review_with_notification(&pool, id, now(), None, "failure").await;
             // 가드 전이(BR-3)
         });
-        active.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-        let _ = app.emit("convo://event", ConvoPayload { id, speaker: None, event: note });
-        emit_awaiting_review(&app, &pool, id, None);
+        release_convo_if_finalized_with(&active, id, &owner, || {
+            let _ = app.emit("convo://event", ConvoPayload { id, speaker: None, event: note });
+            emit_awaiting_review(&app, &pool, id, None);
+        });
     });
 }
 
@@ -5452,10 +5600,12 @@ pub async fn reconcile_stale_running(
         };
         match classify_stale(&t.mode, pgid, alive) {
             StaleAction::Adopt(pgid) => {
+                let owner = Arc::new(());
                 // busy/interrupt 복원 — 재등록해야 convo_history.busy=true, convo_interrupt 동작.
                 active.lock().unwrap_or_else(|e| e.into_inner()).insert(
                     t.id,
                     ActiveConvo {
+                        owner: owner.clone(),
                         pgid: Some(pgid),
                         vendor_bin: vendor_bin.to_string(),
                         started_at: now_ts,
@@ -5472,6 +5622,7 @@ pub async fn reconcile_stale_running(
                     pgid,
                     vendor_bin.to_string(),
                     now_ts,
+                    owner,
                 );
                 // 상태는 Running 유지 — 프론트가 taskList로 Running 로드(별도 emit 불필요).
             }
@@ -5856,6 +6007,7 @@ pub async fn lsp_semantic_tokens(
     text: String,
 ) -> Result<Option<crate::lspclient::SemanticTokens>, String> {
     let wt = task_worktree_snapshot(&state, id)?;
+    fsapi::safe_join(&wt.path, &path).map_err(|e| e.to_string())?;
     let lsp = Arc::clone(&state.lsp);
     lsp.semantic_tokens(id, &wt.path, &path, &text).await
 }
@@ -5869,7 +6021,8 @@ pub async fn lsp_status(
 ) -> Result<crate::lspclient::LspStatus, String> {
     let pool = pool_of(&state)?;
     let root = worktree_root(&pool, id).await?;
-    Ok(crate::lspclient::status_for(&root, &path))
+    fsapi::safe_join(&root, &path).map_err(|e| e.to_string())?;
+    Ok(state.lsp.status_for(id, &root, &path).await)
 }
 
 /// IDE: worktree 하위 rel 경로를 절대경로 문자열로 해석 (opener로 기본앱/Finder 열기용).
@@ -6907,7 +7060,7 @@ pub(crate) async fn switch_task_agent_checked(
     if !supports_convo_agent_switch(agent) {
         return Err(format!("대화 에이전트로 전환할 수 없습니다: {agent}"));
     }
-    let _reservation = reserve_convo_switch(active, id)?;
+    let _reservation = reserve_convo_agent_switch(pool, active, id).await?;
     crate::convo::interaction::runtime_of(pool, id).await?;
     crate::convo::interaction::ensure_idle(pool, id).await?;
 
@@ -7515,9 +7668,30 @@ pub(crate) enum BranchDisposal {
 /// 브랜치는 남는다. 폐기된 작업의 산출물이 문서뿐인 경우(조사·설계 단계) 그것이 근거의 유일한
 /// 사본이고, 워크트리를 지우면 커밋되지 않은 파일은 어디에도 남지 않는다(설계 0056).
 #[tauri::command]
-pub async fn task_discard(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    reject_if_pipeline_managed(&pool_of(&state)?, id).await?;
-    discard_task(&state, id, BranchDisposal::CommitAndPreserve).await
+pub async fn task_discard(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    discard_task_with_app(&app, &state, id).await
+}
+
+async fn discard_task_with_app<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    id: i64,
+) -> Result<(), String> {
+    if cancel_run_of_integration_task(app, state, id).await? {
+        return Ok(());
+    }
+    let pool = pool_of(state)?;
+    reject_if_pipeline_managed(&pool, id).await?;
+    // 이미 폐기된 작업의 폐기는 멱등이다. 바로 앞의 `task_cancel`이 실행 취소로 통합 작업을 Discarded로
+    // 닫았을 때 여기서 "검토 대기 상태의 작업만…"으로 거절하면, 지워졌는데도 오류 배너가 뜬다.
+    let task = db::get_task(&pool, id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("작업을 찾을 수 없습니다")?;
+    if task.state == tstate::DISCARDED {
+        return Ok(());
+    }
+    discard_task(state, id, BranchDisposal::CommitAndPreserve).await
 }
 
 /// `task_discard`의 본체 — 브랜치 처분만 호출자가 정한다.
@@ -8303,6 +8477,7 @@ fn close_shell_of(state: &AppState, id: i64) {
 fn close_designmode_webview_of(state: &AppState, id: i64) {
     state.control_tokens.revoke_task(id);
     close_preview_surface(state, id);
+    state.design_canvas.stop_task(id);
 }
 
 /// 창 닫기는 MCP 연결을 폐기하지 않는다. 작업 종료만 토큰을 회수한다.
@@ -8687,6 +8862,19 @@ pub async fn task_patterns(
 ) -> Result<insights::TaskPatterns, String> {
     let pool = pool_of(&state)?;
     insights::compute_patterns(&pool, &range, tz_offset_secs, now())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// 앱 사용 시간 — 조작 시간·켜져 있던 시간·메인 창 포커스 시간. 활성 일수는 로컬 날짜로 센다.
+#[tauri::command]
+pub async fn app_activity(
+    state: State<'_, AppState>,
+    range: String,
+    tz_offset_secs: i64,
+) -> Result<insights::AppActivity, String> {
+    let pool = pool_of(&state)?;
+    insights::compute_app_activity(&pool, &range, tz_offset_secs, now())
         .await
         .map_err(|error| error.to_string())
 }
@@ -9310,7 +9498,7 @@ pub async fn paste_capture_save(
 }
 
 /// 홈 컴포저(작업 생성 전) 클립보드 이미지 저장 — 아직 worktree가 없어 캡처 파이프라인을
-/// 탈 수 없다. `repo`의 `.praxis/pasted/`에 남기고 절대경로를 돌려주면, 프론트가 지시문
+/// 탈 수 없다. `repo`의 `.dojang/pasted/`에 남기고 절대경로를 돌려주면, 프론트가 지시문
 /// 텍스트에 삽입한다(에이전트 CLI가 경로의 파일을 직접 읽는다).
 #[tauri::command]
 pub fn paste_image_save(repo: String, data_base64: String, mime: String) -> Result<String, String> {
@@ -9473,6 +9661,7 @@ mod convo_expansion_tests {
         let active = Arc::new(Mutex::new(HashMap::from([(
             42,
             ActiveConvo {
+                owner: std::sync::Arc::new(()),
                 pgid: Some(4242),
                 vendor_bin: "codex".into(),
                 started_at: 1,
@@ -9992,6 +10181,98 @@ mod agent_switch_tests {
         Arc::new(Mutex::new(HashMap::new()))
     }
 
+    #[tokio::test]
+    async fn finalized_limit_error_releases_stale_turn_before_switching_to_default() {
+        let (path, worktree) = paths();
+        let pool = db::init_pool(&path).await.unwrap();
+        let id = task(&pool, &worktree, "claude").await;
+        let active = active();
+        let old_turn = reserve_convo_switch(active.clone(), id).unwrap();
+        active.lock().unwrap().get_mut(&id).unwrap().vendor_bin = "claude".into();
+        event(&pool, id, serde_json::json!({
+            "kind": "user", "text": "기존 변경 사항을 보존하고 검증을 이어가세요"
+        }), 2).await;
+        event(&pool, id, serde_json::json!({
+            "kind": "result", "is_error": true,
+            "text": "You've hit your session limit", "session_id": "old-session"
+        }), 3).await;
+
+        let (switched, _) = switch_task_agent_checked(&pool, active.clone(), id, "codex", "")
+            .await.unwrap();
+        assert_eq!(switched.agent.as_deref(), Some("codex"));
+        assert_eq!(switched.model.as_deref().unwrap_or_default(), "");
+        assert!(switched.pending_capsule.as_deref().unwrap().contains("기존 변경 사항을 보존"));
+        assert!(db::list_convo_events(&pool, id).await.unwrap().iter().any(|event| event.contains("session limit")));
+        assert!(active.lock().unwrap().is_empty());
+
+        // A late destructor from the old turn must not release the next owner.
+        let next_turn = reserve_convo_switch(active.clone(), id).unwrap();
+        crate::convo::app_server::register(id, "next-owner".into()).unwrap();
+        drop(old_turn);
+        assert!(active.lock().unwrap().contains_key(&id));
+        assert!(!crate::convo::app_server::cleanup_failed(id));
+        crate::convo::app_server::unregister(id);
+        drop(next_turn);
+        assert!(active.lock().unwrap().is_empty());
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(worktree);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn switch_reclaims_only_after_state_process_and_controller_finalize() {
+        use std::os::unix::process::CommandExt;
+        use crate::convo::{app_server, interaction as ledger};
+
+        let (path, worktree) = paths();
+        let pool = db::init_pool(&path).await.unwrap();
+        let id = task(&pool, &worktree, "claude").await;
+        let active = active();
+        let old_turn = reserve_convo_switch(active.clone(), id).unwrap();
+        let mut command = tokio::process::Command::new("/bin/sleep");
+        command.arg("30").kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        {
+            let mut turns = active.lock().unwrap();
+            let turn = turns.get_mut(&id).unwrap();
+            turn.vendor_bin = "claude".into();
+            turn.pgid = Some(pid);
+        }
+
+        db::update_state(&pool, id, tstate::RUNNING, 3).await.unwrap();
+        assert!(switch_task_agent_checked(&pool, active.clone(), id, "codex", "").await.is_err());
+        db::update_state(&pool, id, tstate::AWAITING_REVIEW, 4).await.unwrap();
+        db::set_convo_pgid(&pool, id, Some(i64::from(pid))).await.unwrap();
+        assert!(switch_task_agent_checked(&pool, active.clone(), id, "codex", "").await.is_err());
+        db::set_convo_pgid(&pool, id, None).await.unwrap();
+        assert!(switch_task_agent_checked(&pool, active.clone(), id, "codex", "").await.is_err());
+        assert!(child.try_wait().unwrap().is_none(), "switch must not kill the running provider");
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+
+        ledger::bind(&pool, id).await.unwrap();
+        let execution = ledger::begin(&pool, id, 5).await.unwrap();
+        assert!(switch_task_agent_checked(&pool, active.clone(), id, "codex", "").await.is_err());
+        ledger::finish(&pool, &execution, "failed", None).await.unwrap();
+        app_server::register_local(id, execution).unwrap();
+        app_server::mark_cleanup_failed(id);
+        assert!(switch_task_agent_checked(&pool, active.clone(), id, "codex", "").await.is_err());
+        assert!(active.lock().unwrap().contains_key(&id));
+        assert_eq!(db::get_task(&pool, id).await.unwrap().unwrap().agent.as_deref(), Some("claude"));
+        app_server::unregister(id);
+
+        let (switched, _) = switch_task_agent_checked(&pool, active.clone(), id, "codex", "").await.unwrap();
+        assert_eq!(switched.agent.as_deref(), Some("codex"));
+        assert!(active.lock().unwrap().is_empty());
+        drop(old_turn);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(worktree);
+        let _ = std::fs::remove_file(path);
+    }
+
     async fn event(pool: &SqlitePool, id: i64, value: serde_json::Value, ts: i64) {
         db::append_convo_event(pool, id, &value.to_string(), ts).await.unwrap();
     }
@@ -10127,6 +10408,7 @@ mod agent_switch_tests {
         busy.lock().unwrap().insert(
             id,
             ActiveConvo {
+                owner: std::sync::Arc::new(()),
                 pgid: None,
                 vendor_bin: String::new(),
                 started_at: 0,
@@ -10770,23 +11052,48 @@ mod autoupdate_guard_tests {
 mod question_ownership_tests {
     use super::*;
     #[test]
+    fn only_the_current_owner_publishes_final_state_before_admission_reopens() {
+        let id = 9_999_733;
+        let active = Arc::new(Mutex::new(HashMap::new()));
+        let old = reserve_convo_switch(active.clone(), id).unwrap();
+        active.lock().unwrap().remove(&id);
+        let next = reserve_convo_switch(active.clone(), id).unwrap();
+        assert_eq!(
+            release_convo_if_finalized_with(&active, id, &old.owner, || panic!("stale state event")),
+            ConvoRelease::Superseded,
+        );
+        assert!(active.lock().unwrap().contains_key(&id));
+        let mut published = false;
+        assert_eq!(
+            release_convo_if_finalized_with(&active, id, &next.owner, || {
+                assert!(active.try_lock().is_err(), "new admission must wait for the final state event");
+                published = true;
+            }),
+            ConvoRelease::Released,
+        );
+        assert!(published);
+        assert!(active.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn failed_setup_after_controller_registration_keeps_the_reservation() {
         let id=9_999_732;let active=Arc::new(Mutex::new(HashMap::new()));
         let reservation=reserve_convo_switch(active.clone(),id).unwrap();
+        let owner = reservation.owner.clone();
         crate::convo::app_server::register(id,"uncommitted-setup".into()).unwrap();
         drop(reservation);
         assert!(ensure_convo_idle(&active,id).is_err());assert!(crate::convo::app_server::cleanup_failed(id));
-        crate::convo::app_server::unregister(id);assert!(release_convo_if_finalized(&active,id));
+        crate::convo::app_server::unregister(id);assert!(release_convo_if_finalized(&active,id,&owner));
     }
     #[test]
     fn cleanup_failure_keeps_write_approve_discard_and_new_turn_locked() {
         let id=9_999_731;let active=Arc::new(Mutex::new(HashMap::new()));
-        let mut reservation=reserve_convo_switch(active.clone(),id).unwrap();reservation.handoff_to_turn();drop(reservation);
+        let mut reservation=reserve_convo_switch(active.clone(),id).unwrap();let owner = reservation.owner.clone();reservation.handoff_to_turn();drop(reservation);
         crate::convo::app_server::register(id,"execution-fixture".into()).unwrap();
-        assert!(!release_convo_if_finalized(&active,id));
+        assert!(!release_convo_if_finalized(&active,id,&owner));
         assert!(crate::convo::app_server::cleanup_failed(id));
         assert!(ensure_convo_idle(&active,id).is_err());assert!(reserve_convo_switch(active.clone(),id).is_err());
         crate::convo::app_server::unregister(id);
-        assert!(release_convo_if_finalized(&active,id));assert!(ensure_convo_idle(&active,id).is_ok());
+        assert!(release_convo_if_finalized(&active,id,&owner));assert!(ensure_convo_idle(&active,id).is_ok());
     }
 }

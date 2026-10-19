@@ -1,4 +1,5 @@
 import { Component, useState, type ErrorInfo, type ReactNode } from "react";
+import { copyText } from "../lib/clipboard";
 
 /**
  * 렌더 예외 로그의 표식. 원격 세션이 "먹통"이 됐을 때 devtools 콘솔에서 이 한 줄만
@@ -18,7 +19,7 @@ function Fallback({ error, onReset }: { error: Error; onReset: () => void }) {
   const [copied, setCopied] = useState(false);
   // 스택은 사용자가 개발자에게 그대로 넘기는 물건이다 — 손으로 긁게 두면 잘린 채로 온다.
   const copy = (): void => {
-    void navigator.clipboard?.writeText(`${error.message}\n\n${error.stack ?? ""}`);
+    void copyText(`${error.message}\n\n${error.stack ?? ""}`).catch(() => undefined);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1500);
   };

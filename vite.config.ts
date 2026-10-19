@@ -2,6 +2,8 @@ import { defineConfig } from "vite";
 // `test` 키를 vite 설정 타입에 얹는 것은 이 import의 부수효과다 — 지우면 타입이 깨진다.
 import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import designSourceTags from "./scripts/design-source-tags.mjs";
+import { designTokensPlugin } from "./scripts/design-tokens.mjs";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -12,13 +14,20 @@ const host = process.env.TAURI_DEV_HOST;
 //   mobile: mobile.html  → dist-mobile/ (praxis-runner가 /m/ 로 서빙, rust-embed 내장)
 // 모바일은 base="/m/"라 자산 경로가 /m/assets/*로 나가고, publicDir도 분리해
 // 데스크톱 번들에 SW·manifest가 섞이지 않게 한다. (설계 0013 §5.2·§9)
-export default defineConfig(async ({ mode }) => {
+export default defineConfig(async ({ mode, command }) => {
   const isMobile = mode === "mobile";
+  const isDesign = command === "serve" && mode === "design";
+  const designBabelPlugins = command === "serve"
+    ? [[designSourceTags, { root: process.cwd() }]]
+    : [];
 
   return {
-    plugins: [react()],
+    plugins: [
+      react({ babel: { plugins: designBabelPlugins } }),
+      ...(command === "serve" ? [designTokensPlugin()] : []),
+    ],
 
-    // 저장소 **안에** 사는 worktree를 훑지 않는다. `.claude/worktrees`·`.praxis/worktrees`는
+    // 저장소 **안에** 사는 worktree를 훑지 않는다. `.claude/worktrees`·`.dojang/worktrees`와 기존 `.praxis/worktrees`는
     // 다른 시점의 소스 트리 전체를 담고 있어, 그 안의 테스트는 그때의 코드에 맞춰 통과하던
     // 것이다. 지금 트리에서 돌리면 실패로 나오고, 그 실패는 방금 만든 회귀처럼 읽힌다.
     // 수집 비용도 크다 — worktree 9개가 있던 시점의 `src/components/ide`는 90초, 걷어낸
@@ -30,6 +39,7 @@ export default defineConfig(async ({ mode }) => {
       exclude: [
         ...configDefaults.exclude,
         "**/.claude/worktrees/**",
+        "**/.dojang/worktrees/**",
         "**/.praxis/worktrees/**",
         // node:test suite; executed by check:workflow, not Vitest.
       ],
@@ -54,8 +64,8 @@ export default defineConfig(async ({ mode }) => {
     server: {
       port: 1420,
       strictPort: true,
-      host: host || false,
-      hmr: host
+      host: isDesign ? "127.0.0.1" : host || false,
+      hmr: host && !isDesign
         ? {
             protocol: "ws",
             host,

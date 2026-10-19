@@ -12,18 +12,24 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::{oneshot, Notify};
 
 pub use server::ServerSpec;
 
 /// 점프 요청 한 건의 상한. rust-analyzer는 최초 인덱싱 중 느리게 답한다.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// 대형 Java 프로젝트의 최초 사용처 검색은 import 직후 20초를 넘길 수 있다.
+const REFERENCES_TIMEOUT: Duration = Duration::from_secs(120);
+const IDLE_TTL: Duration = Duration::from_secs(120);
+const REAPER_INTERVAL: Duration = Duration::from_secs(15);
+const MAX_CACHED_IDLE: usize = 2;
 /// 진단용으로 붙잡아 둘 stderr 마지막 줄 수.
 const STDERR_TAIL: usize = 20;
 
@@ -60,6 +66,137 @@ struct SemanticLatch {
     /// 상한 초과 사유에 담을 마지막 관측 — 없으면 알림이 하나도 오지 않은 것이다.
     last_seen: Mutex<Option<String>>,
     changed: Notify,
+}
+
+/// 준비 래치와 별개인 프로젝트 import 상태.
+///
+/// jdtls는 import가 끝나면 `language/status`의 `ProjectStatus`를 `OK` 또는 `WARNING`으로
+/// 보낸다. **`WARNING`은 import 실패가 아니다** — `ProjectsManager.reportProjectsStatus`가
+/// 워크스페이스의 최대 문제 심각도가 ERROR면 `WARNING`, 아니면 `OK`를 고르는 것뿐이라,
+/// Lombok·미해결 의존성으로 컴파일 오류 마커가 있는 프로젝트는 거의 항상 `WARNING`이고
+/// 그 뒤에도 정의·사용처 조회는 정상 동작한다. 실패로 다루면 멀쩡한 서버가 "언어 서버
+/// 오류"로 굳어 사용처 조회가 막힌다. 그래서 사유를 `warning`에만 남기고 상태는 바꾸지 않는다.
+///
+/// 진짜 실패 신호는 둘이다 — jdtls의 `language/status` `Error`(InitHandler가 초기화 실패 때
+/// 보낸다)와 rust-analyzer의 `experimental/serverStatus health=error`. `window/logMessage`·
+/// `window/showMessage`는 판정에 쓰지 않는다. jdtls의 LogHandler는 플랫폼 로그의 ERROR
+/// 항목을 전부 `type=1`로 흘려보내므로(JavaBuilder의 리소스 복사 예외 등) 하나만 받아도
+/// 서버가 살아 있는 채로 영구히 실패로 굳는다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProjectHealth {
+    Starting,
+    Analyzing,
+    Ready,
+    Failed(String),
+}
+
+struct ProjectHealthState {
+    state: Mutex<ProjectHealth>,
+    /// 서버는 쓸 수 있지만 결과가 온전하지 않을 수 있는 사유 — 상태 표시의 보조 설명.
+    warning: Mutex<Option<String>>,
+}
+
+impl ProjectHealthState {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ProjectHealth::Starting),
+            warning: Mutex::new(None),
+        }
+    }
+
+    fn record(&self, spec: &ServerSpec, method: &str, params: &Value) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+        match method {
+            "language/status" if spec.key == "jdtls" => {
+                let kind = params
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let message = params
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                match kind {
+                    "ProjectStatus" => {
+                        if !message.eq_ignore_ascii_case("ok") {
+                            self.note_warning(format!(
+                                "jdtls가 프로젝트의 컴파일 오류를 보고했습니다 ({message}) — 해결되지 않은 심볼의 참조는 결과에서 빠질 수 있습니다"
+                            ));
+                        }
+                        // 준비 뒤에 다시 오는 ProjectStatus(빌드 파일 변경 등)로 되돌리지 않는다 —
+                        // ServiceReady는 다시 오지 않으므로 "분석 중"에 영영 머문다.
+                        if *state == ProjectHealth::Starting {
+                            *state = ProjectHealth::Analyzing;
+                        }
+                    }
+                    "Error" => {
+                        let reason = if message.is_empty() {
+                            "jdtls 초기화 실패".to_string()
+                        } else {
+                            format!("jdtls 초기화 실패: {message}")
+                        };
+                        *state = ProjectHealth::Failed(reason);
+                    }
+                    "ServiceReady" if !matches!(*state, ProjectHealth::Failed(_)) => {
+                        *state = ProjectHealth::Ready;
+                    }
+                    _ => {}
+                }
+            }
+            "experimental/serverStatus" => {
+                let quiescent = params
+                    .get("quiescent")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let health = params
+                    .get("health")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if health == "error" {
+                    let message = params
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("LSP 서버 오류");
+                    *state = ProjectHealth::Failed(message.into());
+                } else if health == "ok" && quiescent {
+                    *state = ProjectHealth::Ready;
+                } else {
+                    *state = ProjectHealth::Analyzing;
+                }
+            }
+            "$/progress" if spec.readiness == server::ReadinessSignal::Progress => {
+                if matches!(*state, ProjectHealth::Failed(_)) {
+                    return;
+                }
+                if protocol::parse_progress_kind(params).as_deref() == Some("end") {
+                    *state = ProjectHealth::Ready;
+                } else if !matches!(*state, ProjectHealth::Failed(_)) {
+                    *state = ProjectHealth::Analyzing;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn phase(&self) -> ProjectHealth {
+        self.state
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_else(|_| ProjectHealth::Failed("LSP 프로젝트 상태 잠금 실패".into()))
+    }
+
+    fn note_warning(&self, detail: String) {
+        if let Ok(mut warning) = self.warning.lock() {
+            *warning = Some(detail);
+        }
+    }
+
+    fn warning(&self) -> Option<String> {
+        self.warning.lock().ok().and_then(|warning| warning.clone())
+    }
 }
 
 impl SemanticLatch {
@@ -113,6 +250,15 @@ impl SemanticLatch {
         };
         if status.is_ready() {
             return self.latch(ReadyState::Ready);
+        }
+        if status.kind == "Error" {
+            // InitHandler가 초기화 실패 때 보낸다 — 여기서 끝내지 않으면 오지 않을
+            // ServiceReady를 상한까지 기다린다.
+            let reason = match status.message.as_deref() {
+                Some(message) if !message.is_empty() => format!("jdtls 초기화 실패: {message}"),
+                _ => "jdtls 초기화 실패".to_string(),
+            };
+            return self.latch(ReadyState::Failed(reason));
         }
         self.note(format!("language/status={}", status.kind));
     }
@@ -190,6 +336,153 @@ fn unsupported_reason(spec: &ServerSpec) -> Option<String> {
     ))
 }
 
+fn server_settings(spec: &ServerSpec, root: &Path) -> Result<Value, String> {
+    if spec.key != "jdtls" {
+        return Ok(json!({}));
+    }
+    let jdk = server::resolve_java_import_jdk(root)?;
+    Ok(json!({
+        "java": {
+            "import": { "gradle": { "java": { "home": jdk.home } } }
+        }
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigStamp {
+    name: &'static str,
+    exists: bool,
+    length: u64,
+    modified_nanos: u128,
+}
+
+#[derive(Debug, Clone)]
+struct ConfigCacheEntry {
+    stamps: Vec<ConfigStamp>,
+    content_hash: String,
+}
+
+async fn config_identity(
+    inner: &LspPoolInner,
+    spec: &ServerSpec,
+    root: &Path,
+) -> Result<String, String> {
+    let settings = server_settings(spec, root)?;
+    let stamps = config_stamps(spec, root);
+    let cache_key = (root.to_path_buf(), spec.key);
+    let content_hash = {
+        let cache = inner.config_cache.lock().await;
+        cache
+            .get(&cache_key)
+            .filter(|entry| entry.stamps == stamps)
+            .map(|entry| entry.content_hash.clone())
+    };
+    let content_hash = match content_hash {
+        Some(hash) => hash,
+        None => {
+            let hash = config_content_hash(spec, root)?;
+            inner.config_cache.lock().await.insert(
+                cache_key,
+                ConfigCacheEntry {
+                    stamps,
+                    content_hash: hash.clone(),
+                },
+            );
+            hash
+        }
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(spec.key.as_bytes());
+    hasher.update(root.to_string_lossy().as_bytes());
+    hasher.update(settings.to_string().as_bytes());
+    hasher.update(content_hash.as_bytes());
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn config_stamps(spec: &ServerSpec, root: &Path) -> Vec<ConfigStamp> {
+    spec.config_files
+        .iter()
+        .map(|name| {
+            let metadata = std::fs::metadata(root.join(name)).ok();
+            let modified_nanos = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_nanos());
+            ConfigStamp {
+                name,
+                exists: metadata.is_some(),
+                length: metadata.as_ref().map_or(0, std::fs::Metadata::len),
+                modified_nanos,
+            }
+        })
+        .collect()
+}
+
+fn config_content_hash(spec: &ServerSpec, root: &Path) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    for name in spec.config_files {
+        hasher.update((name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        let path = root.join(name);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                hasher.update([1]);
+                hasher.update((bytes.len() as u64).to_le_bytes());
+                hasher.update(bytes);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                hasher.update([0]);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "LSP 설정 파일을 읽지 못했습니다 ({}): {error}",
+                    path.display()
+                ))
+            }
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn jdtls_data_dir(root: &Path, task_id: i64, config_identity: &str) -> Result<PathBuf, String> {
+    let cache = std::env::var_os("DOJANG_LSP_JAVA_DATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(lsp_cache_root);
+    let path = jdtls_data_path(&cache, root, task_id, config_identity);
+    std::fs::create_dir_all(&path).map_err(|e| {
+        format!(
+            "jdtls 캐시 디렉터리를 만들지 못했습니다 ({}): {e}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+fn jdtls_data_path(cache: &Path, root: &Path, task_id: i64, config_identity: &str) -> PathBuf {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    hasher.update(task_id.to_le_bytes());
+    hasher.update(config_identity.as_bytes());
+    cache.join("jdtls").join(format!("{:x}", hasher.finalize()))
+}
+
+fn lsp_cache_root() -> PathBuf {
+    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(cache).join("praxis/lsp");
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join("Library/Caches/Praxis/lsp");
+    }
+    #[cfg(windows)]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local).join("Praxis/lsp");
+    }
+    std::env::temp_dir().join("praxis/lsp")
+}
+
 /// 사용자가 요청한 이동 종류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GotoKind {
@@ -236,6 +529,8 @@ pub struct LspStatus {
     pub available: bool,
     /// 서버 표기명 (없으면 지원 언어가 아님).
     pub server: Option<String>,
+    /// 설치/연결/분석 상태. available은 설치 가능 여부만 뜻한다.
+    pub phase: String,
     /// 사용 불가 사유 — UI가 그대로 보여준다.
     pub detail: Option<String>,
 }
@@ -273,14 +568,23 @@ pub struct LspClient {
     /// 결과까지 덮어 색이 오히려 사라진다).
     semantic_legend: Mutex<Option<SemanticLegend>>,
     readiness: Arc<SemanticLatch>,
+    health: Arc<ProjectHealthState>,
+    settings: Value,
+    last_used: Mutex<Instant>,
     stderr_tail: Arc<Mutex<Vec<String>>>,
 }
 
 impl LspClient {
     /// 서버를 띄우고 initialize 핸드셰이크까지 마친다.
-    async fn spawn(spec: ServerSpec, root: &Path) -> Result<Self, String> {
+    async fn spawn(
+        task_id: i64,
+        spec: ServerSpec,
+        root: &Path,
+        config_identity: &str,
+    ) -> Result<Self, String> {
         // Windows에서 npm으로 깐 언어 서버는 `.cmd` shim이라 맨 이름으로는 실행되지 않는다.
-        let program = crate::reviewer::which(spec.command).unwrap_or_else(|| spec.command.to_string());
+        let program =
+            crate::reviewer::which(spec.command).unwrap_or_else(|| spec.command.to_string());
         let mut command = Command::new(program);
         command
             .args(spec.args)
@@ -288,6 +592,17 @@ impl LspClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        let settings = server_settings(&spec, root)?;
+        if spec.key == "jdtls" {
+            let runtime = server::resolve_jdtls_runtime()?;
+            let data = jdtls_data_dir(root, task_id, config_identity)?;
+            command
+                .arg("--java-executable")
+                .arg(runtime)
+                .arg("--jvm-arg=-Xms128m")
+                .arg("-data")
+                .arg(data);
+        }
         set_process_group(&mut command);
 
         let mut child = command
@@ -304,12 +619,15 @@ impl LspClient {
         // 래치는 initialize 이전에 리더 스레드에 물린다 — 그래야 기동 직후 오는
         // 에지 트리거 알림을 하나도 놓치지 않는다.
         let readiness = Arc::new(SemanticLatch::new(spec));
+        let health = Arc::new(ProjectHealthState::new());
 
         spawn_reader(
             stdout,
             Arc::clone(&pending),
             Arc::clone(&stdin),
             Arc::clone(&readiness),
+            Arc::clone(&health),
+            settings.clone(),
         );
         spawn_stderr_drain(stderr, Arc::clone(&stderr_tail));
 
@@ -323,6 +641,9 @@ impl LspClient {
             docs: Mutex::new(HashMap::new()),
             semantic_legend: Mutex::new(None),
             readiness,
+            health,
+            settings,
+            last_used: Mutex::new(Instant::now()),
             stderr_tail,
         };
         client.initialize().await?;
@@ -330,7 +651,7 @@ impl LspClient {
     }
 
     async fn initialize(&self) -> Result<(), String> {
-        let params = initialize_params(&self.spec, &self.root);
+        let params = initialize_params(&self.spec, &self.root, &self.settings);
         let timeout = Duration::from_secs(self.spec.init_timeout_secs);
         let result = self.request("initialize", params, timeout).await?;
         // legend는 이 응답에만 있다. 놓치면 토큰 데이터의 숫자를 해석할 방법이 사라진다.
@@ -366,7 +687,7 @@ impl LspClient {
         // Pyright는 이 알림 뒤에 workspace/configuration을 요청해 프로젝트 설정을 읽는다.
         self.notify(
             "workspace/didChangeConfiguration",
-            json!({ "settings": {} }),
+            json!({ "settings": self.settings }),
         )
     }
 
@@ -415,7 +736,12 @@ impl LspClient {
             // 선언 자체는 빼야 "사용처"가 된다 — 넣으면 결과 첫 줄이 늘 제자리다.
             params["context"] = json!({ "includeDeclaration": false });
         }
-        let result = self.request(kind.method(), params, REQUEST_TIMEOUT).await?;
+        let timeout = if kind == GotoKind::References {
+            REFERENCES_TIMEOUT
+        } else {
+            REQUEST_TIMEOUT
+        };
+        let result = self.request(kind.method(), params, timeout).await?;
         Ok(protocol::parse_locations(&result))
     }
 
@@ -476,12 +802,16 @@ impl LspClient {
             return Err(e);
         }
 
+        let pending = PendingRequest::new(id, Arc::clone(&self.pending), Arc::clone(&self.stdin));
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => {
+                pending.complete();
+                result
+            }
             // 리더 스레드가 sender를 떨군다 = 서버가 죽었다.
             Ok(Err(_)) => Err(self.death_detail()),
             Err(_) => {
-                self.pending.lock().ok().and_then(|mut p| p.remove(&id));
+                pending.cancel();
                 Err(format!(
                     "{} 응답이 {}초 안에 오지 않았습니다 — 인덱싱 중일 수 있습니다",
                     self.spec.key,
@@ -515,17 +845,93 @@ impl LspClient {
             .map(|mut c| matches!(c.try_wait(), Ok(None)))
             .unwrap_or(false)
     }
+
+    /// 명시적 worktree/window 종료는 Arc 대여 중이어도 즉시 프로세스를 끊는다. 대기 중인
+    /// 요청은 stdout EOF로 깨우며, 이후 Arc가 떨어질 때까지 기다리지 않는다.
+    fn shutdown(&self) {
+        if let Ok(mut child) = self.child.lock() {
+            crate::verify::kill_group(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn touch(&self) {
+        if let Ok(mut used) = self.last_used.lock() {
+            *used = Instant::now();
+        }
+    }
+
+    fn idle_for(&self) -> Duration {
+        self.last_used
+            .lock()
+            .map(|used| used.elapsed())
+            .unwrap_or_default()
+    }
+
+    async fn wait_java_ready(&self) -> Result<(), String> {
+        if self.spec.key != "jdtls" {
+            return Ok(());
+        }
+        match self.readiness.wait().await {
+            Readiness::Ready => match self.health.phase() {
+                ProjectHealth::Failed(reason) => Err(reason),
+                _ => Ok(()),
+            },
+            Readiness::Failed(reason) => Err(reason),
+            Readiness::Unsupported(reason) => Err(reason),
+        }
+    }
+}
+
+struct PendingRequest {
+    id: i64,
+    pending: PendingResponses,
+    stdin: Arc<Mutex<ChildStdin>>,
+    active: AtomicBool,
+}
+
+impl PendingRequest {
+    fn new(id: i64, pending: PendingResponses, stdin: Arc<Mutex<ChildStdin>>) -> Self {
+        Self {
+            id,
+            pending,
+            stdin,
+            active: AtomicBool::new(true),
+        }
+    }
+
+    fn cancel(&self) {
+        if self.active.swap(false, Ordering::SeqCst) {
+            self.pending
+                .lock()
+                .ok()
+                .and_then(|mut p| p.remove(&self.id));
+            let _ = write_message(
+                &self.stdin,
+                &json!({
+                    "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": self.id }
+                }),
+            );
+        }
+    }
+
+    fn complete(&self) {
+        self.active.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 
 impl Drop for LspClient {
     fn drop(&mut self) {
         // exit 노티는 생략한다 — 어차피 프로세스 그룹을 죽이고, 정상 종료를 기다리면
         // 앱 종료가 서버 응답에 묶인다.
-        if let Ok(mut child) = self.child.lock() {
-            crate::verify::kill_group(child.id());
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.shutdown();
     }
 }
 
@@ -535,7 +941,7 @@ impl Drop for LspClient {
 /// `Progress` 신호가 성립하지 않는다. `hierarchicalDocumentSymbolSupport`를 빼면
 /// rust-analyzer가 구형 `SymbolInformation`으로 폴백해 좌표가 본문 시작으로 떨어지고
 /// `references`가 0건이 된다(ADR 0099).
-fn initialize_params(spec: &ServerSpec, root: &Path) -> Value {
+fn initialize_params(spec: &ServerSpec, root: &Path, settings: &Value) -> Value {
     let uri = protocol::path_to_uri(root);
     let mut capabilities = json!({
         "window": { "workDoneProgress": true },
@@ -566,6 +972,7 @@ fn initialize_params(spec: &ServerSpec, root: &Path) -> Value {
             "uri": uri,
             "name": root.file_name().and_then(|n| n.to_str()).unwrap_or("workspace"),
         }],
+        "initializationOptions": { "settings": settings },
         "capabilities": capabilities,
     })
 }
@@ -585,6 +992,8 @@ fn spawn_reader(
     pending: PendingResponses,
     stdin: Arc<Mutex<ChildStdin>>,
     readiness: Arc<SemanticLatch>,
+    health: Arc<ProjectHealthState>,
+    settings: Value,
 ) {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -597,9 +1006,10 @@ fn spawn_reader(
                 // method + id = 서버→클라이언트 요청. 답하지 않으면 pyright 등은
                 // workspace/configuration 응답을 기다리다 초기화가 멈춘다.
                 if let Some(id) = id {
-                    answer_server_request(&stdin, id, method, &value);
+                    answer_server_request(&stdin, id, method, &value, &settings);
                 } else if let Some(params) = value.get("params") {
                     readiness.record(method, params);
+                    health.record(&readiness.spec, method, params);
                 }
                 continue;
             }
@@ -620,15 +1030,31 @@ fn spawn_reader(
     });
 }
 
-fn answer_server_request(stdin: &Arc<Mutex<ChildStdin>>, id: i64, method: &str, request: &Value) {
-    // 설정은 전부 기본값으로 답한다(항목 수만 맞춰 빈 객체). 나머지 요청은 null로 수락.
+fn answer_server_request(
+    stdin: &Arc<Mutex<ChildStdin>>,
+    id: i64,
+    method: &str,
+    request: &Value,
+    settings: &Value,
+) {
+    // 일부 서버는 initialize 설정을 읽지 않고 이 요청에서만 workspace 설정을 조회한다.
     let result = if method == "workspace/configuration" {
-        let count = request
+        let items = request
             .get("params")
             .and_then(|p| p.get("items"))
             .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        Value::Array(vec![json!({}); count])
+            .map_or(&[][..], Vec::as_slice);
+        Value::Array(
+            items
+                .iter()
+                .map(|item| {
+                    item.get("section")
+                        .and_then(Value::as_str)
+                        .and_then(|section| setting_for_section(settings, section))
+                        .unwrap_or_else(|| settings.clone())
+                })
+                .collect(),
+        )
     } else {
         Value::Null
     };
@@ -636,6 +1062,14 @@ fn answer_server_request(stdin: &Arc<Mutex<ChildStdin>>, id: i64, method: &str, 
         stdin,
         &json!({ "jsonrpc": "2.0", "id": id, "result": result }),
     );
+}
+
+fn setting_for_section(settings: &Value, section: &str) -> Option<Value> {
+    let mut cursor = settings;
+    for component in section.split('.') {
+        cursor = cursor.get(component)?;
+    }
+    Some(cursor.clone())
 }
 
 fn lsp_error_message(error: &Value) -> String {
@@ -669,10 +1103,92 @@ fn set_process_group(command: &mut Command) {
     }
 }
 
-/// 작업(워크트리) × 언어별 서버 풀.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ClientKey {
+    task_id: i64,
+    root: PathBuf,
+    server: &'static str,
+    config_identity: String,
+}
+
 #[derive(Default)]
+struct LspPoolInner {
+    clients: tokio::sync::Mutex<HashMap<ClientKey, Arc<LspClient>>>,
+    starts: tokio::sync::Mutex<HashMap<ClientKey, Arc<tokio::sync::Mutex<()>>>>,
+    starting: tokio::sync::Mutex<HashMap<ClientKey, Arc<StartingState>>>,
+    failures: tokio::sync::Mutex<HashMap<ClientKey, String>>,
+    config_cache: tokio::sync::Mutex<HashMap<(PathBuf, &'static str), ConfigCacheEntry>>,
+    /// shutdown과 세대 확인·cache 삽입만 짧게 직렬화한다. JVM 부팅은 이 잠금을 잡지 않는다.
+    lifecycle: tokio::sync::Mutex<()>,
+    task_epochs: tokio::sync::Mutex<HashMap<i64, u64>>,
+    all_epoch: AtomicI64,
+    terminal_shutdown: AtomicBool,
+    #[cfg(test)]
+    before_first_cache_read: tokio::sync::Mutex<Option<Arc<TestCacheReadGate>>>,
+    reaper_active: AtomicBool,
+}
+
+#[cfg(test)]
+struct TestCacheReadGate {
+    entered: tokio::sync::Barrier,
+    release: tokio::sync::Barrier,
+}
+
+struct StartingState {
+    cancelled: AtomicBool,
+    cancelled_changed: Notify,
+    completed: AtomicBool,
+    completed_changed: Notify,
+}
+
+impl StartingState {
+    fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            cancelled_changed: Notify::new(),
+            completed: AtomicBool::new(false),
+            completed_changed: Notify::new(),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.cancelled_changed.notify_waiters();
+    }
+
+    fn complete(&self) {
+        self.completed.store(true, Ordering::SeqCst);
+        self.completed_changed.notify_waiters();
+    }
+
+    async fn wait_complete(&self) {
+        loop {
+            let notified = self.completed_changed.notified();
+            if self.completed.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct StartingCompletion {
+    state: Arc<StartingState>,
+}
+
+impl Drop for StartingCompletion {
+    fn drop(&mut self) {
+        // outer client_for future가 취소되어도 initialize future와 LspClient가 먼저 drop된 뒤
+        // shutdown waiter를 깨운다.
+        self.state.complete();
+    }
+}
+
+/// 작업 × 실제 언어 프로젝트 × 설정별 서버 풀. 같은 서버 프로세스를 공유하는 것은
+/// 동일 worktree와 동일 설정뿐이므로 다른 dirty 버퍼가 섞이지 않는다.
+#[derive(Clone, Default)]
 pub struct LspPool {
-    clients: tokio::sync::Mutex<HashMap<(i64, &'static str), Arc<LspClient>>>,
+    inner: Arc<LspPoolInner>,
 }
 
 impl LspPool {
@@ -694,21 +1210,30 @@ impl LspPool {
         let abs = worktree.join(rel_path);
         let (spec, language_id) =
             server::spec_for_path(&abs).ok_or("이 파일 형식은 정의 이동을 지원하지 않습니다")?;
-        if let Some(reason) = server::unavailable_reason(&spec, worktree) {
+        let root = server::resolve_root(&spec, worktree, &abs)?;
+        if let Some(reason) = server::unavailable_reason(&spec, &root) {
             return Err(reason);
         }
 
-        let client = self.client_for(task_id, worktree, spec).await?;
-        let uri = protocol::path_to_uri(&abs);
-        client.sync_document(&uri, language_id, text)?;
-
-        let locations = client
-            .goto(&uri, kind, line.saturating_sub(1), column.saturating_sub(1))
-            .await?;
-        Ok(locations
-            .into_iter()
-            .filter_map(|loc| to_target(&loc, worktree))
-            .collect())
+        let client = self.client_for(task_id, &root, spec).await?;
+        client.touch();
+        let result = async {
+            client.wait_java_ready().await?;
+            let uri = protocol::path_to_uri(&abs);
+            client.sync_document(&uri, language_id, text)?;
+            let locations = client
+                .goto(&uri, kind, line.saturating_sub(1), column.saturating_sub(1))
+                .await?;
+            Ok(locations
+                .into_iter()
+                .filter_map(|loc| to_target(&loc, worktree))
+                .collect())
+        }
+        .await;
+        client.touch();
+        drop(client);
+        self.reap().await;
+        result
     }
 
     /// 파일 하나의 시맨틱 토큰 — Monaco의 `DocumentSemanticTokensProvider`가 그대로 먹는다.
@@ -729,13 +1254,24 @@ impl LspPool {
         let Some((spec, language_id)) = server::spec_for_path(&abs) else {
             return Ok(None);
         };
-        if server::unavailable_reason(&spec, worktree).is_some() {
+        let Ok(root) = server::resolve_root(&spec, worktree, &abs) else {
+            return Ok(None);
+        };
+        if server::unavailable_reason(&spec, &root).is_some() {
             return Ok(None);
         }
-        let client = self.client_for(task_id, worktree, spec).await?;
-        let uri = protocol::path_to_uri(&abs);
-        client.sync_document(&uri, language_id, text)?;
-        client.semantic_tokens(&uri).await
+        let client = self.client_for(task_id, &root, spec).await?;
+        client.touch();
+        let result = async {
+            let uri = protocol::path_to_uri(&abs);
+            client.sync_document(&uri, language_id, text)?;
+            client.semantic_tokens(&uri).await
+        }
+        .await;
+        client.touch();
+        drop(client);
+        self.reap().await;
+        result
     }
 
     /// 파일 하나의 심볼 목록 — 코드 그래프 인덱싱의 수집 경로.
@@ -753,15 +1289,24 @@ impl LspPool {
         let abs = worktree.join(rel_path);
         let (spec, language_id) =
             server::spec_for_path(&abs).ok_or("이 파일 형식은 심볼 수집을 지원하지 않습니다")?;
-        if let Some(reason) = server::unavailable_reason(&spec, worktree) {
+        let root = server::resolve_root(&spec, worktree, &abs)?;
+        if let Some(reason) = server::unavailable_reason(&spec, &root) {
             return Err(reason);
         }
         let text = std::fs::read_to_string(&abs).map_err(|e| format!("{}: {e}", abs.display()))?;
 
-        let client = self.client_for(task_id, worktree, spec).await?;
-        let uri = protocol::path_to_uri(&abs);
-        client.sync_document(&uri, language_id, &text)?;
-        client.document_symbols(&uri).await
+        let client = self.client_for(task_id, &root, spec).await?;
+        client.touch();
+        let result = async {
+            let uri = protocol::path_to_uri(&abs);
+            client.sync_document(&uri, language_id, &text)?;
+            client.document_symbols(&uri).await
+        }
+        .await;
+        client.touch();
+        drop(client);
+        self.reap().await;
+        result
     }
 
     /// 이 서버의 의미 분석이 준비될 때까지 기다린다.
@@ -777,15 +1322,19 @@ impl LspPool {
         if let Some(reason) = unsupported_reason(&spec) {
             return Readiness::Unsupported(reason);
         }
-        match self.client_for(task_id, worktree, spec).await {
+        let root = match server::resolve_root(&spec, worktree, worktree) {
+            Ok(root) => root,
+            Err(reason) => return Readiness::Failed(reason),
+        };
+        match self.client_for(task_id, &root, spec).await {
             Ok(client) => client.readiness.wait().await,
             Err(reason) => Readiness::Failed(reason),
         }
     }
 
     /// 풀에서 살아 있는 클라이언트를 꺼낸다. 죽었으면 버리고 `None`.
-    async fn live_client(&self, key: &(i64, &'static str)) -> Option<Arc<LspClient>> {
-        let mut clients = self.clients.lock().await;
+    async fn live_client(&self, key: &ClientKey) -> Option<Arc<LspClient>> {
+        let mut clients = self.inner.clients.lock().await;
         let existing = clients.get(key)?;
         if existing.is_alive() {
             return Some(Arc::clone(existing));
@@ -794,63 +1343,455 @@ impl LspPool {
         None
     }
 
-    /// **spawn 중에는 풀 가드를 놓는다.** 풀은 `AppState`에 하나뿐이라 가드를 쥔 채
-    /// 기다리면 jdtls JVM 부팅 동안 모든 작업의 goto·semantic tokens가 멈춘다.
-    /// 대신 경합하면 프로세스가 둘 뜰 수 있으므로, 늦게 도착한 쪽은 자기 것을 버린다
-    /// (`Arc`가 여기서 떨어지고 `Drop`이 프로세스 그룹을 죽인다).
+    /// 동일 키의 시작은 합치되, JVM 부팅 동안 전역 풀 가드는 잡지 않는다.
     async fn client_for(
         &self,
         task_id: i64,
         worktree: &Path,
         spec: ServerSpec,
     ) -> Result<Arc<LspClient>, String> {
-        let key = (task_id, spec.key);
-        if let Some(existing) = self.live_client(&key).await {
-            return Ok(existing);
-        }
-        let client = Arc::new(LspClient::spawn(spec, worktree).await?);
-        let mut clients = self.clients.lock().await;
-        if let Some(existing) = clients.get(&key) {
-            if existing.is_alive() {
-                return Ok(Arc::clone(existing));
+        let root = worktree
+            .canonicalize()
+            .unwrap_or_else(|_| worktree.to_path_buf());
+        // 종료 세대는 config I/O보다 먼저 고정한다. shutdown 뒤에는 stale 조회가 기존
+        // cache client를 돌려주거나 새 JVM을 시작할 수 없다.
+        let (task_epoch, all_epoch) = {
+            let _lifecycle = self.inner.lifecycle.lock().await;
+            if self.inner.terminal_shutdown.load(Ordering::SeqCst) {
+                return Err("앱 종료로 LSP 서버 시작을 중단했습니다".into());
+            }
+            self.generation_locked(task_id).await
+        };
+        #[cfg(test)]
+        self.pause_before_first_cache_read().await;
+        let config_identity = config_identity(&self.inner, &spec, &root).await?;
+        let key = ClientKey {
+            task_id,
+            root: root.clone(),
+            server: spec.key,
+            config_identity,
+        };
+        {
+            let _lifecycle = self.inner.lifecycle.lock().await;
+            if !self
+                .generation_matches_locked(task_id, task_epoch, all_epoch)
+                .await
+            {
+                return Err("LSP 범위가 종료되어 서버 시작을 취소했습니다".into());
+            }
+            if let Some(existing) = self.live_client(&key).await {
+                return Ok(existing);
             }
         }
-        clients.insert(key, Arc::clone(&client));
+        let start = {
+            let mut starts = self.inner.starts.lock().await;
+            Arc::clone(
+                starts
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        let _start_guard = start.lock().await;
+        {
+            let _lifecycle = self.inner.lifecycle.lock().await;
+            if self
+                .generation_matches_locked(task_id, task_epoch, all_epoch)
+                .await
+            {
+                if let Some(existing) = self.live_client(&key).await {
+                    return Ok(existing);
+                }
+            } else {
+                return Err("LSP 범위가 종료되어 서버 시작을 취소했습니다".into());
+            }
+        }
+        let starting = Arc::new(StartingState::new());
+        {
+            let _lifecycle = self.inner.lifecycle.lock().await;
+            if !self
+                .generation_matches_locked(task_id, task_epoch, all_epoch)
+                .await
+            {
+                return Err("LSP 범위가 종료되어 서버 시작을 취소했습니다".into());
+            }
+            self.inner
+                .starting
+                .lock()
+                .await
+                .insert(key.clone(), Arc::clone(&starting));
+        }
+        let _completion = StartingCompletion {
+            state: Arc::clone(&starting),
+        };
+        let client = match self
+            .spawn_until_cancelled(task_id, spec, &root, &key.config_identity, &starting)
+            .await
+        {
+            Ok(client) => Arc::new(client),
+            Err(error) => {
+                let _lifecycle = self.inner.lifecycle.lock().await;
+                if self
+                    .generation_matches_locked(task_id, task_epoch, all_epoch)
+                    .await
+                {
+                    self.inner
+                        .failures
+                        .lock()
+                        .await
+                        .insert(key.clone(), error.clone());
+                }
+                self.finish_start(&key, &start, &starting).await;
+                return Err(error);
+            }
+        };
+        let _lifecycle = self.inner.lifecycle.lock().await;
+        if !self
+            .generation_matches_locked(task_id, task_epoch, all_epoch)
+            .await
+        {
+            client.shutdown();
+            self.finish_start(&key, &start, &starting).await;
+            return Err("LSP 범위가 종료되어 서버 시작을 취소했습니다".into());
+        }
+        self.inner.failures.lock().await.remove(&key);
+        self.inner
+            .clients
+            .lock()
+            .await
+            .insert(key.clone(), Arc::clone(&client));
+        drop(_lifecycle);
+        self.finish_start(&key, &start, &starting).await;
+        self.ensure_reaper();
+        self.reap().await;
         Ok(client)
+    }
+
+    async fn generation_locked(&self, task_id: i64) -> (u64, i64) {
+        let task_epoch = self
+            .inner
+            .task_epochs
+            .lock()
+            .await
+            .get(&task_id)
+            .copied()
+            .unwrap_or_default();
+        (task_epoch, self.inner.all_epoch.load(Ordering::SeqCst))
+    }
+
+    #[cfg(test)]
+    async fn pause_before_first_cache_read(&self) {
+        let gate = self.inner.before_first_cache_read.lock().await.clone();
+        if let Some(gate) = gate {
+            gate.entered.wait().await;
+            gate.release.wait().await;
+        }
+    }
+
+    async fn generation_matches_locked(
+        &self,
+        task_id: i64,
+        task_epoch: u64,
+        all_epoch: i64,
+    ) -> bool {
+        self.generation_locked(task_id).await == (task_epoch, all_epoch)
+    }
+
+    async fn spawn_until_cancelled(
+        &self,
+        task_id: i64,
+        spec: ServerSpec,
+        root: &Path,
+        config_identity: &str,
+        starting: &StartingState,
+    ) -> Result<LspClient, String> {
+        let cancelled = starting.cancelled_changed.notified();
+        tokio::pin!(cancelled);
+        cancelled.as_mut().enable();
+        if starting.cancelled.load(Ordering::SeqCst) {
+            return Err("LSP 범위가 종료되어 서버 시작을 취소했습니다".into());
+        }
+        let spawn = LspClient::spawn(task_id, spec, root, config_identity);
+        tokio::pin!(spawn);
+        tokio::select! {
+            result = &mut spawn => result,
+            _ = &mut cancelled => Err("LSP 범위가 종료되어 서버 시작을 취소했습니다".into()),
+        }
+    }
+
+    async fn finish_start(
+        &self,
+        key: &ClientKey,
+        start: &Arc<tokio::sync::Mutex<()>>,
+        starting: &Arc<StartingState>,
+    ) {
+        let mut starts = self.inner.starts.lock().await;
+        if starts
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, start))
+        {
+            starts.remove(key);
+        }
+        drop(starts);
+        let mut starting_entries = self.inner.starting.lock().await;
+        if starting_entries
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, starting))
+        {
+            starting_entries.remove(key);
+        }
+        starting.complete();
     }
 
     /// 작업이 끝나거나 폐기될 때 그 워크트리의 서버를 모두 정리한다.
     pub async fn shutdown_task(&self, task_id: i64) {
-        let mut clients = self.clients.lock().await;
-        clients.retain(|(id, _), _| *id != task_id);
+        let (clients, starting) = {
+            let _lifecycle = self.inner.lifecycle.lock().await;
+            let mut epochs = self.inner.task_epochs.lock().await;
+            *epochs.entry(task_id).or_default() += 1;
+            let mut clients = self.inner.clients.lock().await;
+            let keys = clients
+                .keys()
+                .filter(|key| key.task_id == task_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let clients = keys
+                .into_iter()
+                .filter_map(|key| clients.remove(&key))
+                .collect::<Vec<_>>();
+            let starting = {
+                let mut entries = self.inner.starting.lock().await;
+                let keys = entries
+                    .keys()
+                    .filter(|key| key.task_id == task_id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                keys.into_iter()
+                    .filter_map(|key| entries.remove(&key))
+                    .collect::<Vec<_>>()
+            };
+            for state in &starting {
+                state.cancel();
+            }
+            self.inner
+                .starts
+                .lock()
+                .await
+                .retain(|key, _| key.task_id != task_id);
+            self.inner
+                .failures
+                .lock()
+                .await
+                .retain(|key, _| key.task_id != task_id);
+            (clients, starting)
+        };
+        for client in clients {
+            client.shutdown();
+        }
+        for state in starting {
+            state.wait_complete().await;
+        }
     }
 
     /// 앱 종료 경로.
     pub async fn shutdown_all(&self) {
-        self.clients.lock().await.clear();
+        let (clients, starting) = {
+            let _lifecycle = self.inner.lifecycle.lock().await;
+            self.inner.terminal_shutdown.store(true, Ordering::SeqCst);
+            self.inner.all_epoch.fetch_add(1, Ordering::SeqCst);
+            let clients = std::mem::take(&mut *self.inner.clients.lock().await);
+            let starting = std::mem::take(&mut *self.inner.starting.lock().await)
+                .into_values()
+                .collect::<Vec<_>>();
+            for state in &starting {
+                state.cancel();
+            }
+            self.inner.starts.lock().await.clear();
+            self.inner.failures.lock().await.clear();
+            (clients, starting)
+        };
+        for (_, client) in clients {
+            client.shutdown();
+        }
+        for state in starting {
+            state.wait_complete().await;
+        }
+    }
+
+    pub async fn status_for(&self, task_id: i64, worktree: &Path, rel_path: &str) -> LspStatus {
+        let abs = worktree.join(rel_path);
+        let Some((spec, _)) = server::spec_for_path(&abs) else {
+            return unavailable_status(None, None);
+        };
+        let root = match server::resolve_root(&spec, worktree, &abs) {
+            Ok(root) => root,
+            Err(detail) => return unavailable_status(Some(spec.key), Some(detail)),
+        };
+        if let Some(detail) = server::unavailable_reason(&spec, &root) {
+            return unavailable_status(Some(spec.key), Some(detail));
+        }
+        let root = root.canonicalize().unwrap_or(root);
+        let config_identity = match config_identity(&self.inner, &spec, &root).await {
+            Ok(identity) => identity,
+            Err(detail) => {
+                return LspStatus {
+                    available: true,
+                    server: Some(spec.key.into()),
+                    phase: "error".into(),
+                    detail: Some(detail),
+                }
+            }
+        };
+        let key = ClientKey {
+            task_id,
+            root,
+            server: spec.key,
+            config_identity,
+        };
+        if let Some(detail) = self.inner.failures.lock().await.get(&key).cloned() {
+            return LspStatus {
+                available: true,
+                server: Some(spec.key.into()),
+                phase: "error".into(),
+                detail: Some(detail),
+            };
+        }
+        let completed_start = self
+            .inner
+            .starting
+            .lock()
+            .await
+            .get(&key)
+            .is_some_and(|state| state.completed.load(Ordering::SeqCst));
+        if completed_start {
+            self.inner.starting.lock().await.remove(&key);
+            self.inner.starts.lock().await.remove(&key);
+        }
+        if self.inner.starts.lock().await.contains_key(&key) {
+            return LspStatus {
+                available: true,
+                server: Some(spec.key.into()),
+                phase: "starting".into(),
+                detail: None,
+            };
+        }
+        let client = self.inner.clients.lock().await.get(&key).cloned();
+        match client {
+            None => LspStatus {
+                available: true,
+                server: Some(spec.key.into()),
+                phase: "idle".into(),
+                detail: None,
+            },
+            Some(client) if !client.is_alive() => LspStatus {
+                available: true,
+                server: Some(spec.key.into()),
+                phase: "error".into(),
+                detail: Some(client.death_detail()),
+            },
+            Some(client) => match client.health.phase() {
+                ProjectHealth::Starting => LspStatus {
+                    available: true,
+                    server: Some(spec.key.into()),
+                    phase: "starting".into(),
+                    detail: None,
+                },
+                ProjectHealth::Analyzing => LspStatus {
+                    available: true,
+                    server: Some(spec.key.into()),
+                    phase: "analyzing".into(),
+                    detail: None,
+                },
+                ProjectHealth::Ready => LspStatus {
+                    available: true,
+                    server: Some(spec.key.into()),
+                    phase: "ready".into(),
+                    // 준비는 됐지만 결과가 온전하지 않을 수 있는 사유(컴파일 오류 등).
+                    detail: client.health.warning(),
+                },
+                ProjectHealth::Failed(detail) => LspStatus {
+                    available: true,
+                    server: Some(spec.key.into()),
+                    phase: "error".into(),
+                    detail: Some(detail),
+                },
+            },
+        }
+    }
+
+    fn ensure_reaper(&self) {
+        if self.inner.reaper_active.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(REAPER_INTERVAL).await;
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                if reap_inner(&inner).await {
+                    return;
+                }
+            }
+        });
+    }
+
+    async fn reap(&self) {
+        let _ = reap_inner(&self.inner).await;
     }
 }
 
 /// 이 파일에서 LSP를 쓸 수 있는지 — 에디터가 탭을 열 때 물어본다.
 pub fn status_for(worktree: &Path, rel_path: &str) -> LspStatus {
     let Some((spec, _)) = server::spec_for_path(&worktree.join(rel_path)) else {
-        return LspStatus {
-            available: false,
-            server: None,
-            detail: None, // 지원 언어가 아닌 건 오류가 아니다 — 조용히 비활성.
-        };
+        return unavailable_status(None, None);
     };
-    match server::unavailable_reason(&spec, worktree) {
-        Some(detail) => LspStatus {
-            available: false,
-            server: Some(spec.key.to_string()),
-            detail: Some(detail),
-        },
+    let root = match server::resolve_root(&spec, worktree, &worktree.join(rel_path)) {
+        Ok(root) => root,
+        Err(detail) => return unavailable_status(Some(spec.key), Some(detail)),
+    };
+    match server::unavailable_reason(&spec, &root) {
+        Some(detail) => unavailable_status(Some(spec.key), Some(detail)),
         None => LspStatus {
             available: true,
             server: Some(spec.key.to_string()),
+            phase: "idle".into(),
             detail: None,
         },
+    }
+}
+
+fn unavailable_status(server: Option<&str>, detail: Option<String>) -> LspStatus {
+    LspStatus {
+        available: false,
+        server: server.map(str::to_string),
+        phase: "unavailable".into(),
+        detail,
+    }
+}
+
+async fn reap_inner(inner: &Arc<LspPoolInner>) -> bool {
+    let mut clients = inner.clients.lock().await;
+    clients.retain(|_, client| {
+        client.is_alive() && (Arc::strong_count(client) > 1 || client.idle_for() < IDLE_TTL)
+    });
+    let mut idle = clients
+        .iter()
+        .filter(|(_, client)| Arc::strong_count(client) == 1)
+        .map(|(key, client)| (key.clone(), client.idle_for()))
+        .collect::<Vec<_>>();
+    idle.sort_by_key(|(_, duration)| std::cmp::Reverse(*duration));
+    for (key, _) in idle {
+        if clients.len() <= MAX_CACHED_IDLE {
+            break;
+        }
+        clients.remove(&key);
+    }
+    if clients.is_empty() {
+        inner.reaper_active.store(false, Ordering::SeqCst);
+        true
+    } else {
+        false
     }
 }
 
@@ -996,6 +1937,67 @@ mod timing {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    const FAKE_LSP_SCRIPT: &str = r#"
+import json, sys, time
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line: return None
+        if line in (b'\n', b'\r\n'): break
+        key, value = line.decode().split(':', 1)
+        headers[key.lower()] = value.strip()
+    return json.loads(sys.stdin.buffer.read(int(headers['content-length'])))
+def send(value):
+    data = json.dumps(value).encode()
+    sys.stdout.buffer.write(b'Content-Length: ' + str(len(data)).encode() + b'\r\n\r\n' + data)
+    sys.stdout.buffer.flush()
+while True:
+    request = read_message()
+    if request is None: break
+    method = request.get('method')
+    if method == 'initialize':
+        if 'slow' in json.dumps(request): time.sleep(.35)
+        send({'jsonrpc':'2.0', 'id':request['id'], 'result':{'capabilities':{}}})
+    elif method == 'sleep':
+        time.sleep(10)
+    elif 'id' in request:
+        send({'jsonrpc':'2.0', 'id':request['id'], 'result':None})
+"#;
+
+    #[cfg(unix)]
+    const FAKE_SPEC: ServerSpec = ServerSpec {
+        key: "fake-lsp",
+        command: "python3",
+        args: &["-u", "-c", FAKE_LSP_SCRIPT],
+        root_markers: &["fixture"],
+        config_files: &[],
+        readiness: server::ReadinessSignal::Unsupported,
+        init_timeout_secs: 2,
+        ready_timeout_secs: 2,
+    };
+
+    #[cfg(unix)]
+    const CONFIG_FAKE_SPEC: ServerSpec = ServerSpec {
+        key: "fake-config-lsp",
+        command: "python3",
+        args: &["-u", "-c", FAKE_LSP_SCRIPT],
+        root_markers: &["fixture"],
+        config_files: &["fixture.toml"],
+        readiness: server::ReadinessSignal::Unsupported,
+        init_timeout_secs: 2,
+        ready_timeout_secs: 2,
+    };
+
+    #[cfg(unix)]
+    fn fake_root(name: &str) -> PathBuf {
+        let root = crate::testtmp::dir().join(format!("lsp-pool-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("fixture"), "\n").unwrap();
+        root
+    }
+
     fn spec_of(sample: &str) -> ServerSpec {
         server::spec_for_path(Path::new(sample)).unwrap().0
     }
@@ -1010,7 +2012,7 @@ mod tests {
     #[test]
     fn initialize_declares_work_done_progress_for_every_server() {
         for sample in ["probe.rs", "a.ts", "a.py", "A.java"] {
-            let params = initialize_params(&spec_of(sample), Path::new("/workspace"));
+            let params = initialize_params(&spec_of(sample), Path::new("/workspace"), &json!({}));
             assert_eq!(
                 params.pointer("/capabilities/window/workDoneProgress"),
                 Some(&Value::Bool(true)),
@@ -1028,13 +2030,13 @@ mod tests {
 
     #[test]
     fn server_status_notification_goes_only_to_rust_analyzer() {
-        let rust = initialize_params(&spec_of("probe.rs"), Path::new("/workspace"));
+        let rust = initialize_params(&spec_of("probe.rs"), Path::new("/workspace"), &json!({}));
         assert_eq!(
             rust.pointer("/capabilities/experimental/serverStatusNotification"),
             Some(&Value::Bool(true))
         );
         for sample in ["a.ts", "a.py", "A.java"] {
-            let params = initialize_params(&spec_of(sample), Path::new("/workspace"));
+            let params = initialize_params(&spec_of(sample), Path::new("/workspace"), &json!({}));
             assert!(
                 params.pointer("/capabilities/experimental").is_none(),
                 "{sample}: rust-analyzer 전용 capability를 보내면 안 된다"
@@ -1114,6 +2116,299 @@ mod tests {
 
         latch.record("language/status", &json!({ "type": "ServiceReady" }));
         assert_eq!(latch.wait().await, Readiness::Ready);
+    }
+
+    /// `ProjectStatus: WARNING`은 "프로젝트에 컴파일 오류 마커가 있다"는 뜻이지 import 실패가
+    /// 아니다. Lombok을 쓰는 실제 프로젝트가 그렇고, 그 뒤에도 정의·사용처 조회는 동작한다.
+    #[test]
+    fn java_project_problems_keep_health_ready_with_a_warning() {
+        let health = ProjectHealthState::new();
+        let spec = spec_of("A.java");
+        health.record(
+            &spec,
+            "language/status",
+            &json!({ "type": "ProjectStatus", "message": "WARNING" }),
+        );
+        assert_eq!(health.phase(), ProjectHealth::Analyzing);
+        health.record(&spec, "language/status", &json!({ "type": "ServiceReady" }));
+        assert_eq!(health.phase(), ProjectHealth::Ready);
+        assert!(
+            health.warning().is_some_and(|w| w.contains("WARNING")),
+            "사유는 보조 설명으로만 남는다"
+        );
+    }
+
+    /// jdtls의 LogHandler는 플랫폼 로그의 ERROR 항목을 전부 `window/logMessage type=1`로
+    /// 보낸다(JavaBuilder 예외 등). 살아 있는 서버를 그것으로 실패 처리하면 안 된다.
+    #[test]
+    fn java_error_log_messages_do_not_fail_health() {
+        let health = ProjectHealthState::new();
+        let spec = spec_of("A.java");
+        health.record(
+            &spec,
+            "language/status",
+            &json!({ "type": "ProjectStatus", "message": "OK" }),
+        );
+        health.record(&spec, "language/status", &json!({ "type": "ServiceReady" }));
+        health.record(
+            &spec,
+            "window/logMessage",
+            &json!({ "type": 1, "message": "JavaBuilder handling ImageBuilderInternalException while building: core" }),
+        );
+        health.record(
+            &spec,
+            "window/showMessage",
+            &json!({ "type": 1, "message": "Build path problems" }),
+        );
+        assert_eq!(health.phase(), ProjectHealth::Ready);
+    }
+
+    /// 진짜 초기화 실패는 `language/status`의 `Error`로 온다 — 상태와 래치가 함께 끝나야
+    /// 오지 않을 ServiceReady를 상한까지 기다리지 않는다.
+    #[tokio::test]
+    async fn java_init_error_fails_health_and_latch() {
+        let health = ProjectHealthState::new();
+        let spec = spec_of("A.java");
+        health.record(
+            &spec,
+            "language/status",
+            &json!({ "type": "Error", "message": "Failed to initialize" }),
+        );
+        health.record(&spec, "language/status", &json!({ "type": "ServiceReady" }));
+        assert!(matches!(
+            health.phase(),
+            ProjectHealth::Failed(reason) if reason.contains("Failed to initialize")
+        ));
+
+        let latch = latch("A.java");
+        latch.record(
+            "language/status",
+            &json!({ "type": "Error", "message": "Failed to initialize" }),
+        );
+        assert!(matches!(
+            latch.wait().await,
+            Readiness::Failed(reason) if reason.contains("Failed to initialize")
+        ));
+    }
+
+    /// 준비 뒤에 다시 오는 ProjectStatus(빌드 파일 변경 재import)로 "분석 중"에 되돌아가지 않는다.
+    #[test]
+    fn java_project_status_after_ready_does_not_regress() {
+        let health = ProjectHealthState::new();
+        let spec = spec_of("A.java");
+        health.record(
+            &spec,
+            "language/status",
+            &json!({ "type": "ProjectStatus", "message": "OK" }),
+        );
+        health.record(&spec, "language/status", &json!({ "type": "ServiceReady" }));
+        health.record(
+            &spec,
+            "language/status",
+            &json!({ "type": "ProjectStatus", "message": "WARNING" }),
+        );
+        assert_eq!(health.phase(), ProjectHealth::Ready);
+    }
+
+    #[test]
+    fn pool_key_isolates_task_root_and_configuration() {
+        let base = ClientKey {
+            task_id: 1,
+            root: PathBuf::from("/workspace/a"),
+            server: "jdtls",
+            config_identity: "jdk17".into(),
+        };
+        let other_task = ClientKey {
+            task_id: 2,
+            ..base.clone()
+        };
+        let other_root = ClientKey {
+            root: PathBuf::from("/workspace/b"),
+            ..base.clone()
+        };
+        let other_config = ClientKey {
+            config_identity: "jdk21".into(),
+            ..base.clone()
+        };
+        assert_ne!(base, other_task);
+        assert_ne!(base, other_root);
+        assert_ne!(base, other_config);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_key_start_is_coalesced_and_idle_cache_is_capped() {
+        let pool = LspPool::default();
+        let root = fake_root("coalesce");
+        let (first, second) = tokio::join!(
+            pool.client_for(31, &root, FAKE_SPEC),
+            pool.client_for(31, &root, FAKE_SPEC),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "같은 키의 시작은 한 프로세스를 공유해야 한다"
+        );
+        drop((first, second));
+
+        for name in ["cap-a", "cap-b", "cap-c"] {
+            let client = pool
+                .client_for(31, &fake_root(name), FAKE_SPEC)
+                .await
+                .unwrap();
+            drop(client);
+        }
+        pool.reap().await;
+        assert!(pool.inner.clients.lock().await.len() <= MAX_CACHED_IDLE);
+        pool.shutdown_all().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configuration_content_changes_client_and_jdtls_cache_identity() {
+        let pool = LspPool::default();
+        let root = fake_root("config-identity");
+        let config = root.join("fixture.toml");
+        let missing = config_identity(&pool.inner, &CONFIG_FAKE_SPEC, &root)
+            .await
+            .unwrap();
+        std::fs::write(&config, "missing").unwrap();
+        let present = config_identity(&pool.inner, &CONFIG_FAKE_SPEC, &root)
+            .await
+            .unwrap();
+        assert_ne!(
+            missing, present,
+            "없는 파일과 내용이 missing인 파일은 달라야 한다"
+        );
+        let stable = config_identity(&pool.inner, &CONFIG_FAKE_SPEC, &root)
+            .await
+            .unwrap();
+        assert_eq!(
+            present, stable,
+            "변하지 않은 설정은 같은 identity를 써야 한다"
+        );
+        std::fs::write(&config, "changed").unwrap();
+        let changed = config_identity(&pool.inner, &CONFIG_FAKE_SPEC, &root)
+            .await
+            .unwrap();
+        assert_ne!(present, changed);
+        assert_ne!(
+            jdtls_data_path(Path::new("/cache"), &root, 41, &present),
+            jdtls_data_path(Path::new("/cache"), &root, 41, &changed),
+            "설정이 달라지면 jdtls data 경로도 달라야 한다"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_before_first_cache_read_cannot_return_stale_client() {
+        let pool = LspPool::default();
+        let root = fake_root("shutdown-before-cache");
+        let client = pool.client_for(36, &root, FAKE_SPEC).await.unwrap();
+        drop(client);
+        let gate = Arc::new(TestCacheReadGate {
+            entered: tokio::sync::Barrier::new(2),
+            release: tokio::sync::Barrier::new(2),
+        });
+        *pool.inner.before_first_cache_read.lock().await = Some(Arc::clone(&gate));
+        let starter_pool = pool.clone();
+        let starter_root = root.clone();
+        let starter =
+            tokio::spawn(
+                async move { starter_pool.client_for(36, &starter_root, FAKE_SPEC).await },
+            );
+        gate.entered.wait().await;
+        pool.shutdown_task(36).await;
+        gate.release.wait().await;
+        assert!(starter.await.unwrap().is_err());
+        assert!(pool.inner.clients.lock().await.is_empty());
+        *pool.inner.before_first_cache_read.lock().await = None;
+        pool.shutdown_all().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_interrupts_pending_request_and_cancels_start_generation() {
+        let pool = LspPool::default();
+        let root = fake_root("pending");
+        let client = pool.client_for(32, &root, FAKE_SPEC).await.unwrap();
+        let request_client = Arc::clone(&client);
+        let pending = tokio::spawn(async move {
+            request_client
+                .request("sleep", json!({}), Duration::from_secs(5))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        pool.shutdown_task(32).await;
+        assert!(tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        assert!(pool.inner.clients.lock().await.is_empty());
+        drop(client);
+
+        let slow_root = fake_root("slow");
+        let starting_pool = pool.clone();
+        let starting_root = slow_root.clone();
+        let starting = tokio::spawn(async move {
+            starting_pool
+                .client_for(33, &starting_root, FAKE_SPEC)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        pool.shutdown_task(33).await;
+        assert!(
+            starting.await.unwrap().is_err(),
+            "종료 중 시작한 서버는 풀에 들어가면 안 된다"
+        );
+        assert!(pool.inner.clients.lock().await.is_empty());
+        let terminal_pool = LspPool::default();
+        let terminal_root = fake_root("slow-terminal");
+        let terminal_start_pool = terminal_pool.clone();
+        let terminal_start_root = terminal_root.clone();
+        let terminal_start = tokio::spawn(async move {
+            terminal_start_pool
+                .client_for(34, &terminal_start_root, FAKE_SPEC)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let stopped = Instant::now();
+        terminal_pool.shutdown_all().await;
+        assert!(
+            stopped.elapsed() < Duration::from_secs(1),
+            "종료는 initialize 상한을 기다리면 안 된다"
+        );
+        assert!(terminal_start.await.unwrap().is_err());
+        assert!(terminal_pool.inner.clients.lock().await.is_empty());
+        assert!(terminal_pool.inner.starting.lock().await.is_empty());
+
+        let aborted_pool = LspPool::default();
+        let aborted_root = fake_root("slow-aborted");
+        let aborted_start_pool = aborted_pool.clone();
+        let aborted_start_root = aborted_root.clone();
+        let aborted = tokio::spawn(async move {
+            aborted_start_pool
+                .client_for(35, &aborted_start_root, FAKE_SPEC)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        aborted.abort();
+        assert!(aborted.await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), aborted_pool.shutdown_task(35))
+                .await
+                .is_ok()
+        );
+        assert!(aborted_pool.inner.starting.lock().await.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(slow_root);
+        let _ = std::fs::remove_dir_all(terminal_root);
+        let _ = std::fs::remove_dir_all(aborted_root);
     }
 
     #[tokio::test]

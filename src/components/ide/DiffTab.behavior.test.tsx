@@ -23,6 +23,15 @@ const mocks = vi.hoisted(() => ({
   annotationsList: vi.fn(async () => []),
   diffHunks: vi.fn(),
   taskDiff: vi.fn(),
+  tauriEvents: new Map<string, (event: { payload: unknown }) => void>(),
+}));
+
+// 세션은 에이전트 리뷰 이벤트를 듣는다. 핸들러를 잡아 두고 테스트가 직접 발화한다.
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: (name: string, handler: (event: { payload: unknown }) => void) => {
+    mocks.tauriEvents.set(name, handler);
+    return Promise.resolve(() => mocks.tauriEvents.delete(name));
+  },
 }));
 
 vi.mock("../../lib/ipc", () => ({
@@ -106,6 +115,7 @@ afterEach(async () => {
   root = null;
   vi.clearAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("DiffTab 폭 강제 unified (AC-6)", () => {
@@ -114,7 +124,7 @@ describe("DiffTab 폭 강제 unified (AC-6)", () => {
     await render(<DiffTab path="src/a.ts" active />);
     expect(buttonWith("분할")?.getAttribute("aria-pressed")).toBe("true");
 
-    await emit(600);
+    await emit(500);
     expect(buttonWith("통합")?.getAttribute("aria-pressed")).toBe("true");
     expect(buttonWith("분할")?.hasAttribute("disabled")).toBe(true);
 
@@ -194,5 +204,160 @@ describe("DiffTab 단축키 (AC-5)", () => {
     expect(localStorage.getItem("praxis:diff-viewed:9")).toContain("src/a.ts");
     await press("v");
     expect(localStorage.getItem("praxis:diff-viewed:9")).not.toContain("src/a.ts");
+  });
+});
+
+describe("DiffTab 에이전트 이동 (review_navigate)", () => {
+  const second: DiffHunk = { ...hunk, id: "h2", old_range: [40, 1], new_range: [41, 1] };
+  const navigate = async (payload: unknown) => {
+    await act(async () => {
+      mocks.tauriEvents.get("review://navigate")?.({ payload });
+      await Promise.resolve();
+    });
+  };
+
+  it("이 작업의 이벤트면 그 파일 탭을 열고 목표 hunk 헤더로 스크롤한다", async () => {
+    mocks.diffHunks.mockResolvedValue([hunk, second]);
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this.dataset.hunkId ?? "?");
+    };
+    const openDiff = vi.fn();
+    await act(async () => {
+      root?.render(
+        <DiffSessionProvider task={task} openDiff={openDiff}>
+          <DiffTab path="src/a.ts" active />
+        </DiffSessionProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    await navigate({ task_id: 9, path: "src/a.ts", hunk_id: "h2", line: 41, side: "new" });
+    expect(openDiff).toHaveBeenCalledWith("src/a.ts");
+    expect(scrolled).toEqual(["h2"]);
+
+    // 같은 hunk를 다시 겨눠도 한 번 더 움직인다 — 소비한 목표는 지워지고 nonce가 새 값이다.
+    await navigate({ task_id: 9, path: "src/a.ts", hunk_id: "h2", line: 41, side: "new" });
+    expect(scrolled).toEqual(["h2", "h2"]);
+
+    await navigate({ task_id: 10, path: "src/a.ts", hunk_id: "h1", line: 1, side: "new" });
+    expect(scrolled).toEqual(["h2", "h2"]);
+    expect(openDiff).toHaveBeenCalledTimes(2);
+  });
+
+  it("hunk id가 화면과 어긋나면 줄 번호로 되찾고, 못 찾으면 목표를 버린다", async () => {
+    mocks.diffHunks.mockResolvedValue([hunk, second]);
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this.dataset.hunkId ?? "?");
+    };
+    await render(<DiffTab path="src/a.ts" active />);
+
+    // 다른 범위에서 뜬 id지만 41번 줄은 두 번째 hunk 안이다.
+    await navigate({ task_id: 9, path: "src/a.ts", hunk_id: "stale", line: 41, side: "new" });
+    expect(scrolled).toEqual(["h2"]);
+
+    // diff 밖 줄 — 스크롤하지 않고 버린다. 뒤에 범위를 바꿔도 튀지 않도록 hunk를 다시 그려 본다.
+    await navigate({ task_id: 9, path: "src/a.ts", hunk_id: "stale", line: 500, side: "new" });
+    expect(scrolled).toEqual(["h2"]);
+    mocks.diffHunks.mockResolvedValue([{ ...second, id: "stale" }]);
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(scrolled).toEqual(["h2"]);
+  });
+
+  it("노트 이벤트는 폴링을 기다리지 않고 주석만 다시 읽는다", async () => {
+    await render(<DiffTab path="src/a.ts" active />);
+    const before = mocks.annotationsList.mock.calls.length;
+
+    await act(async () => {
+      mocks.tauriEvents.get("review://annotations")?.({ payload: { task_id: 9, path: "src/a.ts" } });
+      await Promise.resolve();
+    });
+    expect(mocks.annotationsList.mock.calls.length).toBe(before + 1);
+    expect(mocks.taskDiff).toHaveBeenCalledTimes(1);
+  });
+
+  it("새 hunk로 이동할 때 지연된 diff 갱신이 끝날 때까지 목표를 유지한다", async () => {
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this.dataset.hunkId ?? "?");
+    };
+    await render(<DiffTab path="src/a.ts" active />);
+
+    const snapshot = {
+      files: [{ path: "src/a.ts", status: "M", patch: "updated" }],
+      baseline: { kind: "pinned" as const },
+    };
+    let complete!: (value: typeof snapshot) => void;
+    mocks.taskDiff.mockReturnValueOnce(new Promise((resolve) => { complete = resolve; }));
+    mocks.diffHunks.mockResolvedValue([hunk, second]);
+
+    await navigate({ task_id: 9, path: "src/a.ts", hunk_id: "h2", line: 41, side: "new" });
+    expect(scrolled).toEqual([]);
+    await act(async () => { complete(snapshot); });
+    expect(scrolled).toEqual(["h2"]);
+  });
+
+  it("갱신 중 이동 요청이 겹치면 마지막 목표만 소비한다", async () => {
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this.dataset.hunkId ?? "?");
+    };
+    await render(<DiffTab path="src/a.ts" active />);
+    let complete!: () => void;
+    mocks.taskDiff.mockReturnValueOnce(new Promise((resolve) => {
+      complete = () => resolve({ files: [{ path: "src/a.ts", patch: "updated", status: "M" }], baseline: { kind: "pinned" } });
+    }));
+    mocks.diffHunks.mockResolvedValue([hunk, second]);
+
+    await navigate({ task_id: 9, path: "src/a.ts", hunk_id: "h1", line: 1, side: "new" });
+    await navigate({ task_id: 9, path: "src/a.ts", hunk_id: "h2", line: 41, side: "new" });
+    expect(scrolled).toEqual([]);
+    await act(async () => complete());
+    expect(scrolled).toEqual(["h2"]);
+  });
+
+  it("만료 뒤에 갱신이 끝나도 이전 목표로 이동하지 않는다", async () => {
+    vi.useFakeTimers();
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    await render(<DiffTab path="src/a.ts" active />);
+    let complete!: () => void;
+    mocks.taskDiff.mockReturnValueOnce(new Promise((resolve) => {
+      complete = () => resolve({ files: [{ path: "src/a.ts", patch: "updated", status: "M" }], baseline: { kind: "pinned" } });
+    }));
+    mocks.diffHunks.mockResolvedValue([hunk, second]);
+
+    await navigate({ task_id: 9, path: "src/a.ts", hunk_id: "h2", line: 41, side: "new" });
+    await act(async () => { vi.advanceTimersByTime(15_000); });
+    await act(async () => complete());
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it("이동 전에 시작된 조회가 있으면 그 응답 뒤에 새 스냅샷을 요청한다", async () => {
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this.dataset.hunkId ?? "?");
+    };
+    await render(<DiffTab path="src/a.ts" active />);
+    let complete!: () => void;
+    mocks.taskDiff.mockReturnValueOnce(new Promise((resolve) => {
+      complete = () => resolve({
+        files: [{ path: "src/a.ts", patch: "old", status: "M" }],
+        baseline: { kind: "pinned" },
+        review: { hunks: [hunk], annotations: [] },
+      });
+    }));
+    // 이 요청의 스냅샷은 에이전트가 새 hunk를 만들기 전에 준비됐다.
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    mocks.diffHunks.mockResolvedValue([hunk, second]);
+
+    await navigate({ task_id: 9, path: "src/a.ts", hunk_id: "h2", line: 41, side: "new" });
+    await act(async () => complete());
+    expect(scrolled).toEqual(["h2"]);
   });
 });

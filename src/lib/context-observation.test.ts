@@ -16,6 +16,30 @@ const codex = (over: Record<string, unknown> = {}) => ({
 });
 
 describe("foldContextObservation", () => {
+  it("accepts Codex App Server observations with the same seconds contract", () => {
+    const out = foldContextObservation(EMPTY_CONTEXT_OBSERVATION, [codex({ source: "app_server" })], "codex");
+    expect(out.observation).toEqual({ contextTokens: 147_043, contextWindow: 258_400, observedAt: 1_725_000_000, source: "app_server" });
+    expect(foldContextObservation(EMPTY_CONTEXT_OBSERVATION, [codex({ source: "app_server", observed_at: 1_725_000_000_000 })], "codex").observation).toBeNull();
+  });
+
+  it("accepts Antigravity step observations without a window", () => {
+    const out = foldContextObservation(
+      EMPTY_CONTEXT_OBSERVATION,
+      [codex({ source: "agy_step", context_tokens: 16_886, context_window: undefined })],
+      "agy",
+    );
+    expect(out.observation).toEqual({ contextTokens: 16_886, contextWindow: null, observedAt: 1_725_000_000, source: "agy_step" });
+  });
+
+  it("does not replace main context with a peer debate participant", () => {
+    const parent = foldContextObservation(EMPTY_CONTEXT_OBSERVATION, [codex()], "codex");
+    expect(foldContextObservation(parent, [codex({ context_tokens: 42, speaker: "right" }), { kind: "context_cleared", speaker: "right" }], "codex")).toEqual(parent);
+  });
+  it("child metadata and result do not replace main context usage", () => {
+    const parent = foldContextObservation(EMPTY_CONTEXT_OBSERVATION, [codex()], "codex");
+    const child = codex({ kind: "subagent_update", context_tokens: 1, context_window: 2 });
+    expect(foldContextObservation(parent, [child, { kind: "subagent_message" }], "codex")).toEqual(parent);
+  });
   it("last call and its actual Codex window replace the legacy cumulative total", () => {
     const out = foldContextObservation(
       EMPTY_CONTEXT_OBSERVATION,

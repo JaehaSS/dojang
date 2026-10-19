@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { copyText } from "../../lib/clipboard";
 import { useHostScope } from "../../lib/host-scope";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -335,7 +336,7 @@ export function DirectoryBrowser({
       if (action === "open") return activate(entry);
       if (action === "terminal") return void (await fsOpenTerminal(entry.path));
       if (action === "reveal") return void (await revealItemInDir(entry.path));
-      if (action === "copyPath") return void (await navigator.clipboard.writeText(entry.path));
+      if (action === "copyPath") return void (await copyText(entry.path));
       if (action === "copy") return setClipboard(entry.path);
 
       // 여기부터는 전부 변경 계열 — 어느 디렉터리를 건드리는지가 액션마다 다르다.

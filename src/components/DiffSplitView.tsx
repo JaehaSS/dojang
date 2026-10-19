@@ -13,7 +13,9 @@ import {
   useAnnotationComposer,
   type AnnotationComposerState,
 } from "./DiffAnnotationThread";
-import { DiffLineText, HunkCheckbox } from "./DiffPresentation";
+import { tokensForLine, type HunkTokens, type TokenSpan } from "../lib/diff-highlight";
+import type { Theme } from "../lib/themes";
+import { DiffLineText, HunkCheckbox, useDiffTheme, useHunkTokens } from "./DiffPresentation";
 
 const cellTone: Record<string, string> = {
   add: "bg-addbg text-status-done",
@@ -29,15 +31,20 @@ interface Props {
   /** hunk 부분 승인(B-2) 선택 상태 — 생략 시 체크박스를 표시하지 않는다. */
   selectedHunkIds?: Set<string>;
   onToggleHunk?: (hunk: DiffHunk) => void;
+  /** 구문 강조 언어(Monaco 언어 id). 생략하면 평문이다. */
+  lang?: string;
 }
 
-/** 좌우 셀 하나. 폭을 정확히 반으로 고정하고 줄바꿈을 막는다 — 래핑을 허용하면 한쪽만
- *  높아져 좌우 정렬이 깨지고, 비교라는 목적 자체가 무너진다. 잘린 줄은 title로 볼 수 있다. */
+/** 좌우 셀 하나. 폭을 정확히 반으로 고정하고 긴 줄은 셀 안에서 접는다(설계 DR-14).
+ *  좌우 셀은 한 flex 행의 형제라 행 높이가 둘 중 높은 쪽을 따른다 — 한쪽만 접혀도 정렬이
+ *  유지되므로, 잘라서 가로를 맞추던 이전 방식보다 내용을 잃지 않는다. */
 function SplitCellView({
   cell,
   side,
   hasThread,
   segments,
+  tokens,
+  theme,
   onAnnotate,
 }: {
   cell: SplitCell | null;
@@ -45,13 +52,15 @@ function SplitCellView({
   side: "left" | "right";
   hasThread: boolean;
   segments?: Segment[];
+  tokens?: TokenSpan[];
+  theme: Theme;
   onAnnotate: () => void;
 }) {
   if (!cell) return <div className="w-1/2 shrink-0 bg-empty" />;
   const { line } = cell;
   const lineNumber = side === "left" ? (line.oldLine ?? line.newLine) : (line.newLine ?? line.oldLine);
   return (
-    <div className={`group/cell w-1/2 shrink-0 flex overflow-hidden ${cellTone[line.kind] ?? ""}`}>
+    <div className={`group/cell w-1/2 min-w-0 shrink-0 flex ${cellTone[line.kind] ?? ""}`}>
       <button
         className={`w-4 shrink-0 text-[10px] leading-5 ${
           hasThread ? "opacity-100" : "opacity-0 group-hover/cell:opacity-100"
@@ -67,8 +76,10 @@ function SplitCellView({
       <DiffLineText
         text={line.text || " "}
         segments={segments}
+        tokens={tokens}
+        theme={theme}
         kind={line.kind}
-        className="whitespace-pre"
+        className="min-w-0 whitespace-pre-wrap break-all"
       />
     </div>
   );
@@ -123,10 +134,14 @@ export function AnnotatedSplitDiff({
   onUpdateBody,
   selectedHunkIds,
   onToggleHunk,
+  lang = "plaintext",
 }: Props) {
   const composer = useAnnotationComposer(onCreate, onUpdateBody);
   const grouped = groupAnnotationsByPosition(annotations);
   const rows = toSplitRowsFromHunks(hunks);
+  const tokens = useHunkTokens(hunks, lang);
+  const theme = useDiffTheme();
+  const hunkById = new Map(hunks.map((hunk) => [hunk.id, hunk]));
 
   return (
     <div className="text-xs font-code leading-relaxed">
@@ -168,6 +183,8 @@ export function AnnotatedSplitDiff({
                 side="left"
                 hasThread={threadAt(grouped, row.left).length > 0}
                 segments={intra?.before}
+                tokens={cellTokens(tokens, hunkById, row.left)}
+                theme={theme}
                 onAnnotate={() => openAt(composer, row.left)}
               />
               <div className="w-px bg-border shrink-0" />
@@ -176,6 +193,8 @@ export function AnnotatedSplitDiff({
                 side="right"
                 hasThread={threadAt(grouped, row.right).length > 0}
                 segments={intra?.after}
+                tokens={cellTokens(tokens, hunkById, row.right)}
+                theme={theme}
                 onAnnotate={() => openAt(composer, row.right)}
               />
             </div>
@@ -198,4 +217,14 @@ function threadAt(
 function openAt(composer: AnnotationComposerState, cell: SplitCell | null): void {
   if (!cell) return;
   composer.openNew(cell.hunkId, annotationLine(cell.line), cell.line.side);
+}
+
+function cellTokens(
+  tokens: Map<string, HunkTokens> | null,
+  hunkById: Map<string, DiffHunk>,
+  cell: SplitCell | null,
+): TokenSpan[] | undefined {
+  const hunk = cell ? hunkById.get(cell.hunkId) : undefined;
+  if (!cell || !hunk) return undefined;
+  return tokensForLine(tokens?.get(hunk.id), cell.line, hunk);
 }

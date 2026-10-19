@@ -169,6 +169,7 @@ async fn debate_end_removes_the_row_and_records_the_boundary() {
     held.lock().unwrap().insert(
         id,
         ActiveConvo {
+            owner: Arc::new(()),
             pgid: None,
             vendor_bin: String::new(),
             started_at: 1,
@@ -199,6 +200,7 @@ fn interrupt_sets_the_flag_without_a_pgid() {
     active.lock().unwrap().insert(
         7,
         ActiveConvo {
+            owner: Arc::new(()),
             pgid: None,
             vendor_bin: "claude".into(),
             started_at: 1,

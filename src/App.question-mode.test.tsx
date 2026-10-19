@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 
 /**
- * 질문 응답은 질문형 세션의 정식 기능이다 — "고급·실험 기능 표시"(설정 › 모양새)와 무관하게
- * 홈 화면 컴포저에 보이고, 토글을 껐다 켜도 사용자가 고른 값이 그대로 남아야 한다.
+ * 홈 컴포저의 세션 방식 선택은 제거한다. 고급 기능 토글과 무관하게 이어받기는 유지한다.
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -76,28 +75,23 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
-describe("질문 응답 선택 — 고급 토글과 무관", () => {
-  it("기본값(고급 꺼짐)에서도 '(실험)' 없이 입력창 아래 옵션 줄에 보인다", () => {
-    const select = interactionSelect();
-    expect(select).not.toBeNull();
-    expect(select!.value).toBe("off");
-    expect(select!.textContent).toContain("질문 응답");
-    expect(select!.textContent).not.toContain("실험");
-    // 도구줄(저장소·에이전트·모델)과 갈라, 도구줄이 두 줄로 넘어가지 않게 한다.
-    const toolbar = container.querySelector(".composer-toolbar");
-    expect(toolbar!.contains(select)).toBe(false);
+describe("홈 컴포저의 세션 방식 선택 제거", () => {
+  it("세션 방식 선택 없이 상단 도구줄에 세션 이어받기를 둔다", () => {
+    expect(interactionSelect()).toBeNull();
+    expect(container.textContent).not.toContain("질문 응답");
+    const resume = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "세션 이어받기");
+    expect(resume).toBeDefined();
+    // 질문·승인 선택이 사라진 뒤 이어받기는 입력창 아래가 아니라 에이전트 선택 옆(상단 도구줄)에 있다.
+    const toolbar = container.querySelector(".composer-toolbar")!;
+    expect(toolbar.contains(resume!)).toBe(true);
+    expect(container.querySelectorAll(".composer-toolbar").length).toBe(1);
   });
 
-  it("고급 토글을 켜고 꺼도 사용자가 고른 값이 유지된다", async () => {
-    await act(async () => {
-      const select = interactionSelect()!;
-      select.value = "questions";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    expect(interactionSelect()?.value).toBe("questions");
-
+  it("고급 토글을 켜고 꺼도 세션 방식 선택이 나타나지 않는다", async () => {
     await act(async () => setExperimentalFeaturesEnabled(true));
+    expect(interactionSelect()).toBeNull();
     await act(async () => setExperimentalFeaturesEnabled(false));
-    expect(interactionSelect()?.value).toBe("questions");
+    expect(interactionSelect()).toBeNull();
+    expect(container.textContent).toContain("세션 이어받기");
   });
 });

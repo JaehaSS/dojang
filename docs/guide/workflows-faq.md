@@ -54,10 +54,12 @@
 "릴리스 노트 정리", "테스트 커버리지 확인"처럼 매번 비슷하게 쓰는 지시문은 스킬로 만듭니다.
 
 ```
-.praxis/skills/release-note.md 작성 → 컴포저에서 /release-note 호출
+.claude/skills/release-note/SKILL.md 작성 → 컴포저에서 /release-note 호출
 ```
 
-전역(`~/.praxis`)에 두면 모든 프로젝트에서 쓸 수 있고, 프로젝트 쪽이 우선합니다.
+스킬은 선택한 벤더의 디렉터리에 둡니다. Codex를 사용하면 `.codex/skills/release-note/SKILL.md`를
+작성합니다. 전역 디렉터리(`~/.claude/skills` 또는 `~/.codex/skills`)에 두면 모든 프로젝트에서
+쓸 수 있고, 프로젝트 쪽이 우선합니다.
 GitHub에서 남의 스킬을 가져올 수도 있습니다.
 
 ### F. 자리를 비울 때 — 모바일 PWA

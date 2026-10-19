@@ -60,7 +60,66 @@ fn save_stays_within_worktree() {
     let dir = captures_dir(&worktree, 7);
     assert!(dir.starts_with(&worktree));
     assert!(dir.is_dir());
+    assert!(dir.starts_with(worktree.join(crate::project_paths::DIR)));
     let _ = fs::remove_dir_all(&worktree);
+}
+
+#[cfg(unix)]
+#[test]
+fn save_refuses_a_symlinked_dojang_root() {
+    use std::os::unix::fs::symlink;
+
+    let worktree = tmp();
+    let outside = tmp();
+    let sentinel = outside.join("sentinel.txt");
+    fs::write(&sentinel, "keep").unwrap();
+    symlink(&outside, worktree.join(crate::project_paths::DIR)).unwrap();
+
+    assert!(save_capture(&worktree, 7, sample(), None).is_err());
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep");
+    let _ = fs::remove_dir_all(&worktree);
+    let _ = fs::remove_dir_all(&outside);
+}
+
+#[cfg(unix)]
+#[test]
+fn record_write_refuses_a_final_file_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let worktree = tmp();
+    let outside = tmp();
+    let sentinel = outside.join("sentinel.json");
+    fs::write(&sentinel, "keep").unwrap();
+    let record = save_capture(&worktree, 7, sample(), None).unwrap();
+    let record_path = captures_dir(&worktree, 7).join(format!("{}.json", record.id));
+    fs::remove_file(&record_path).unwrap();
+    symlink(&sentinel, &record_path).unwrap();
+
+    assert!(capture::write_record(&captures_dir(&worktree, 7), &record).is_err());
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep");
+    let _ = fs::remove_dir_all(&worktree);
+    let _ = fs::remove_dir_all(&outside);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn screenshot_refuses_a_final_file_symlink_and_existing_image() {
+    use std::os::unix::fs::symlink;
+    let worktree = tmp();
+    let outside = tmp();
+    let sentinel = outside.join("sentinel.png");
+    fs::write(&sentinel, "keep").unwrap();
+    let image = worktree.join("capture.png");
+    symlink(&sentinel, &image).unwrap();
+    let rect = BoundingRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 };
+    assert!(capture::take_screenshot(&rect, &image).is_none());
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep");
+    fs::remove_file(&image).unwrap();
+    fs::write(&image, "existing").unwrap();
+    assert!(capture::take_screenshot(&rect, &image).is_none());
+    assert_eq!(fs::read_to_string(&image).unwrap(), "existing");
+    let _ = fs::remove_dir_all(worktree);
+    let _ = fs::remove_dir_all(outside);
 }
 
 #[test]
@@ -71,6 +130,24 @@ fn list_returns_saved_captures_sorted() {
     let list = list_captures(&worktree, 1).unwrap();
     assert_eq!(list.len(), 2);
     assert!(list[0].captured_at <= list[1].captured_at);
+    let _ = fs::remove_dir_all(&worktree);
+}
+
+#[test]
+fn list_reads_legacy_captures_alongside_new_captures() {
+    let worktree = tmp();
+    let record = save_capture(&worktree, 1, sample(), None).unwrap();
+    let legacy = worktree
+        .join(crate::project_paths::LEGACY_DIR)
+        .join("captures/1");
+    fs::create_dir_all(&legacy).unwrap();
+    fs::copy(
+        captures_dir(&worktree, 1).join(format!("{}.json", record.id)),
+        legacy.join(format!("{}.json", record.id)),
+    )
+    .unwrap();
+
+    assert_eq!(list_captures(&worktree, 1).unwrap().len(), 2);
     let _ = fs::remove_dir_all(&worktree);
 }
 
@@ -103,11 +180,17 @@ fn remove_capture_rejects_path_traversal_id() {
 }
 
 #[test]
-fn cleanup_removes_whole_task_dir() {
+fn cleanup_removes_new_and_legacy_task_dirs() {
     let worktree = tmp();
     save_capture(&worktree, 5, sample(), None).unwrap();
+    let legacy = worktree
+        .join(crate::project_paths::LEGACY_DIR)
+        .join("captures/5");
+    fs::create_dir_all(&legacy).unwrap();
+    fs::write(legacy.join("legacy.json"), "{}").unwrap();
     cleanup_captures(&worktree, 5);
     assert!(!captures_dir(&worktree, 5).exists());
+    assert!(!legacy.exists());
     let _ = fs::remove_dir_all(&worktree);
 }
 
@@ -116,6 +199,26 @@ fn cleanup_missing_dir_is_noop() {
     let worktree = tmp();
     cleanup_captures(&worktree, 123);
     let _ = fs::remove_dir_all(&worktree);
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_skips_legacy_root_symlink_without_touching_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let worktree = tmp();
+    let outside = tmp();
+    let outside_task = outside.join("captures/7");
+    fs::create_dir_all(&outside_task).unwrap();
+    let sentinel = outside_task.join("123-0.json");
+    fs::write(&sentinel, "keep").unwrap();
+    symlink(&outside, worktree.join(crate::project_paths::LEGACY_DIR)).unwrap();
+
+    remove_capture(&worktree, 7, "123-0").unwrap();
+    cleanup_captures(&worktree, 7);
+    assert!(sentinel.is_file());
+    let _ = fs::remove_dir_all(&worktree);
+    let _ = fs::remove_dir_all(&outside);
 }
 
 #[test]

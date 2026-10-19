@@ -5,7 +5,7 @@ import { chromium, webkit } from "playwright";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
-const directory = path.resolve(".praxis/verification/editor-references-entrypoints");
+const directory = path.resolve(".dojang/verification/editor-references-entrypoints");
 const fixture = path.join(directory, "ui-fixture");
 const source = (file) => `/@fs/${path.resolve(file)}`;
 

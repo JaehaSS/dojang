@@ -1,5 +1,6 @@
 import type { DiffHunk, FileDiff, RematchedAnnotation } from "../lib/ipc";
 import type { BaselineStatus } from "../lib/transport";
+import { langFromPath } from "../lib/lang-from-path";
 import type { PartialApplyState } from "./use-partial-apply";
 import { AnnotatedUnifiedDiff } from "./DiffAnnotations";
 import { AnnotatedSplitDiff } from "./DiffSplitView";
@@ -68,6 +69,7 @@ export function DiffBody(props: BodyProps) {
         onUpdateBody={props.onUpdate}
         selectedHunkIds={props.partial.selection}
         onToggleHunk={props.partial.toggle}
+        lang={langFromPath(props.current.path)}
       />
     </>
   );

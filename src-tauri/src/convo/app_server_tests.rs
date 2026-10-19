@@ -1,4 +1,35 @@
 use super::*;
+
+#[test]
+fn context_observation_uses_last_call_capacity_and_epoch_seconds() {
+    let before = crate::now();
+    let event = context_usage_event(&json!({"tokenUsage": {
+        "last": {"totalTokens": 147043},
+        "total": {"totalTokens": 7451604},
+        "modelContextWindow": 258400
+    }}));
+    let ConvoEvent::ContextUsage { context_tokens, context_window, observed_at, source, valid } = event else {
+        panic!("expected context observation");
+    };
+    assert_eq!(context_tokens, 147043);
+    assert_eq!(context_window, Some(258400));
+    assert!(observed_at.unwrap() >= before && observed_at.unwrap() <= crate::now());
+    assert_eq!(source.as_deref(), Some("app_server"));
+    assert_eq!(valid, Some(true));
+}
+
+#[test]
+fn malformed_context_observation_invalidates_instead_of_reporting_zero() {
+    for params in [
+        json!({}),
+        json!({"tokenUsage":{"last":{"totalTokens":-1},"modelContextWindow":258400}}),
+        json!({"tokenUsage":{"last":{"totalTokens":100},"modelContextWindow":0}}),
+        json!({"tokenUsage":{"total":{"totalTokens":100},"modelContextWindow":258400}}),
+    ] {
+        assert!(matches!(context_usage_event(&params), ConvoEvent::ContextUsage { valid: Some(false), observed_at: None, .. }));
+    }
+}
+
 fn db<T>(f: impl std::future::Future<Output = T>) -> T {
     tauri::async_runtime::block_on(f)
 }

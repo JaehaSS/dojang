@@ -10,18 +10,23 @@ pub fn validate_capture_image_paths(
     if requested.is_empty() {
         return Ok(Vec::new());
     }
-    let capture_root = std::fs::canonicalize(super::captures_dir(worktree_path, task_id))
-        .map_err(|_| "캡처 디렉터리를 찾을 수 없습니다".to_string())?;
+    let capture_roots = super::capture::checked_capture_task_dirs(worktree_path, task_id)
+        .into_iter()
+        .filter_map(|dir| std::fs::canonicalize(dir).ok())
+        .collect::<Vec<_>>();
+    if capture_roots.is_empty() {
+        return Err("캡처 디렉터리를 찾을 수 없습니다".into());
+    }
     requested
         .iter()
-        .map(|raw_path| validate_image_path(&capture_root, raw_path))
+        .map(|raw_path| validate_image_path(&capture_roots, raw_path))
         .collect()
 }
 
-fn validate_image_path(capture_root: &Path, raw_path: &str) -> Result<String, String> {
+fn validate_image_path(capture_roots: &[PathBuf], raw_path: &str) -> Result<String, String> {
     let path = std::fs::canonicalize(PathBuf::from(raw_path))
         .map_err(|_| format!("첨부 이미지를 찾을 수 없습니다: {raw_path}"))?;
-    if !path.starts_with(capture_root) || !path.is_file() {
+    if !capture_roots.iter().any(|root| path.starts_with(root)) || !path.is_file() {
         return Err("작업 캡처 디렉터리 밖의 이미지는 첨부할 수 없습니다".into());
     }
     let extension = path

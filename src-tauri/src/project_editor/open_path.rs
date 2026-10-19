@@ -11,8 +11,9 @@ pub async fn project_editor_open_path<R: Runtime>(
     state: State<'_, ProjectEditorState>,
     window: WebviewWindow<R>,
     path: String,
+    root: Option<String>,
 ) -> Result<(), String> {
-    let root = state.root_for_window(window.label())?;
+    let root = state.root_for_request(window.label(), root.as_deref())?;
     tauri::async_runtime::spawn_blocking(move || {
         open_verified(&root, &path, |file| {
             let file = file

@@ -155,6 +155,7 @@ pub async fn recover(app: &AppHandle, pool: &sqlx::SqlitePool) -> Result<(), Str
                 .insert(
                     id,
                     ActiveConvo {
+                        owner: std::sync::Arc::new(()),
                         pgid: None,
                         vendor_bin: agent,
                         started_at: now(),

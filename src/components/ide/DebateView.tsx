@@ -1,6 +1,8 @@
-import { useMemo, useState, type ReactElement, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { copyText } from "../../lib/clipboard";
 import { labelFor } from "../../lib/agents";
 import { convoInterrupt, debateEnd, DEBATE_SEATS, type DebateEndReason } from "../../lib/ipc";
+import { conversationScrollMemory, isConversationNearBottom } from "./conversationScroll";
 import { Items, PaneHeader, paneGrid, Round } from "./DebateRoundGrid";
 import { activeSide, consensusText, debateRounds, type DebateEventLike } from "./debate-rounds";
 import { debateSessionWidth } from "./workspace-split-width";
@@ -52,6 +54,53 @@ export function DebateView({ taskId, events, roundCap, panes, busy, onSend, onEn
   const ended = transcript.ended;
   const activeName = labelFor(panes[DEBATE_SEATS.indexOf(active)]?.agent ?? panes[0]?.agent ?? "");
 
+  // 토론을 켜면 단일 대화 뷰가 내려가고 이 뷰가 새로 마운트된다. 스크롤을 다루지 않으면 새 영역이
+  // 맨 위에서 시작해, 하단을 보던 사람에게는 화면이 갑자기 위로 튄 것처럼 보인다. 단일 대화 뷰와
+  // 같은 규칙을 따른다 — 하단을 보고 있으면 발화를 따라가고, 위로 읽어 올라갔으면 그 자리를 지킨다.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const scrollKey = `debate:${taskId}`;
+  const followRef = useRef(conversationScrollMemory.get(scrollKey)?.shouldFollow ?? true);
+
+  const settleScroll = (container: HTMLDivElement) => {
+    if (followRef.current) {
+      container.scrollTop = container.scrollHeight;
+      return;
+    }
+    const saved = conversationScrollMemory.get(scrollKey);
+    if (saved && container.scrollHeight - container.clientHeight >= saved.scrollTop) {
+      container.scrollTop = saved.scrollTop;
+    }
+  };
+  const settleRef = useRef(settleScroll);
+  settleRef.current = settleScroll;
+
+  useLayoutEffect(() => {
+    if (scrollRef.current) settleRef.current(scrollRef.current);
+  }, [scrollKey, transcript, busy]);
+
+  // 질문 카드·상태 줄처럼 events 밖에서 자라는 내용과, 컴포저 높이나 코드 열 탭 전환(display:none)으로
+  // 바뀌는 영역 크기는 위 effect가 모른다. 크기가 바뀌면 같은 규칙으로 다시 맞춘다.
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (container.clientHeight > 0) settleRef.current(container);
+    });
+    observer.observe(container);
+    if (contentRef.current) observer.observe(contentRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  const onScroll = () => {
+    const container = scrollRef.current;
+    // 가려진 동안의 0은 사용자가 움직인 자리가 아니다.
+    if (!container || container.clientHeight === 0) return;
+    const shouldFollow = isConversationNearBottom(container);
+    followRef.current = shouldFollow;
+    conversationScrollMemory.set(scrollKey, { scrollTop: container.scrollTop, shouldFollow });
+  };
+
   const send = async () => {
     const text = draft.trim();
     if (!text || busy) return;
@@ -62,13 +111,13 @@ export function DebateView({ taskId, events, roundCap, panes, busy, onSend, onEn
   const copyConclusion = () => {
     const text = consensusText(transcript);
     if (!text) return setError("복사할 결론이 없습니다");
-    void navigator.clipboard?.writeText(text).catch((cause) => setError(String(cause)));
+    void copyText(text).catch((cause) => setError(String(cause)));
   };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="min-h-0 flex-1 overflow-auto">
-        <div style={{ minWidth: debateSessionWidth(panes.length) }}>
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto" onScroll={onScroll}>
+        <div ref={contentRef} style={{ minWidth: debateSessionWidth(panes.length) }}>
           <div className="sticky top-0 z-10 grid divide-x divide-border bg-raised" style={paneGrid(panes.length)}>
             {panes.map((pane, seat) => (
               <PaneHeader key={DEBATE_SEATS[seat]} pane={pane} seat={seat} count={panes.length} active={busy && active === DEBATE_SEATS[seat]} />

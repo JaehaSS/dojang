@@ -117,4 +117,11 @@ describe("AnnotatedSplitDiff", () => {
     });
     expect(html).not.toContain("bg-addbg-strong");
   });
+
+  it("wraps long lines inside each half instead of clipping them", () => {
+    const html = render();
+    expect(html).toContain("whitespace-pre-wrap break-all");
+    expect(html).not.toContain("whitespace-pre ");
+    expect(html).not.toContain("overflow-hidden");
+  });
 });

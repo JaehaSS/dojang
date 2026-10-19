@@ -84,3 +84,40 @@ describe("SubagentCard — ConvoItem role 확장 내성", () => {
   });
 });
 
+describe("SubagentCard — Codex 관측 상태", () => {
+  it("부모 턴이 끝나도 running을 중단으로 추정하지 않고, 상세 기록 불가와 완료 미확인을 구분한다", () => {
+    const html = renderToStaticMarkup(
+      <SubagentCard
+        thread={{
+          ...thread,
+          state: "unknown",
+          vendor: "codex",
+          observationStatus: "unreadable",
+          items: [],
+        }}
+        parentBusy={false}
+        defaultExpanded
+      />,
+    );
+
+    expect(html).toContain("완료 확인 불가");
+    expect(html).toContain("상세 기록을 확인할 수 없습니다.");
+    expect(html).not.toContain("중단됨");
+  });
+
+  it("공개 결과가 있어도 관측 상한으로 빠진 상세 기록을 표시한다", () => {
+    const html = renderToStaticMarkup(
+      <SubagentCard thread={{ ...thread, vendor: "codex", observationStatus: "limited" }} parentBusy={false} defaultExpanded />,
+    );
+    expect(html).toContain("완료");
+    expect(html).toContain("상세 조사 결과");
+    expect(html).toContain("일부 상세 기록을 확인할 수 없습니다.");
+  });
+
+  it("명시적으로 stopped인 Codex 자식만 중단됨으로 표시한다", () => {
+    const html = renderToStaticMarkup(
+      <SubagentCard thread={{ ...thread, state: "stopped", vendor: "codex" }} parentBusy />,
+    );
+    expect(html).toContain("중단됨");
+  });
+});

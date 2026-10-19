@@ -1,11 +1,11 @@
 //! 검증 게이트 코어 (Framein evidence/gate 이식) — Tauri 비의존, `cargo test`.
 //!
-//! - `detect_spec`: `.praxis/validate.toml` 우선, 없으면 마커 파일로 빌드/테스트 명령 자동탐지.
+//! - `detect_spec`: `.dojang/validate.toml` 우선, 레거시 설정이 없으면 마커 파일로 빌드/테스트 명령 자동탐지.
 //! - `run_check`: worktree에서 명령 실행 → exit code + 출력 tail (timeout).
 //! - `parse_test_summary`: 빌드/테스트 출력에서 passed/failed 추출.
 //! - `gate`: 증거 → ready 판정 (체크 0개면 not-ready: 미설정을 통과로 위장 금지).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -88,21 +88,33 @@ fn toml_str(txt: &str, key: &str) -> Option<String> {
     None
 }
 
-/// 검증 명령 결정: `.praxis/validate.toml` 우선 → 마커 파일 자동탐지.
+/// 선택된 검증 설정 경로. 새 `.dojang` 설정이 존재하면 레거시 설정보다 우선한다.
+///
+/// 새 설정이 비어 있거나 읽히지 않으면 호출자는 레거시로 내려가지 않고 자동탐지를 사용해야 한다.
+pub fn validate_config_path(root: &Path) -> Option<PathBuf> {
+    crate::project_paths::DIRS
+        .into_iter()
+        .map(|dir| root.join(dir).join("validate.toml"))
+        .find(|path| path.exists())
+}
+
+/// 검증 명령 결정: `.dojang/validate.toml` 우선, 레거시 `.praxis` 설정, 마커 파일 자동탐지.
 pub fn detect_spec(root: &Path) -> ValidateSpec {
     // (1) 레포 설정 오버라이드
-    if let Ok(txt) = std::fs::read_to_string(root.join(".praxis").join("validate.toml")) {
-        let build = toml_str(&txt, "build");
-        let test = toml_str(&txt, "test");
-        let timeout_secs = toml_str(&txt, "timeout_secs")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_TIMEOUT);
-        if build.is_some() || test.is_some() {
-            return ValidateSpec {
-                build,
-                test,
-                timeout_secs,
-            };
+    if let Some(config_path) = validate_config_path(root) {
+        if let Ok(txt) = std::fs::read_to_string(config_path) {
+            let build = toml_str(&txt, "build");
+            let test = toml_str(&txt, "test");
+            let timeout_secs = toml_str(&txt, "timeout_secs")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_TIMEOUT);
+            if build.is_some() || test.is_some() {
+                return ValidateSpec {
+                    build,
+                    test,
+                    timeout_secs,
+                };
+            }
         }
     }
 
@@ -133,7 +145,17 @@ pub fn detect_spec(root: &Path) -> ValidateSpec {
         build = Some("go build ./...".into());
         test = Some("go test ./...".into());
     } else if has("pyproject.toml") || has("setup.py") || has("tox.ini") {
-        test = Some("pytest".into());
+        // 시스템 python이 아닌 프로젝트 고정 환경(.python-version 등)으로 돌려야 하므로 락 파일로 러너를 고른다.
+        test = Some(
+            if has("uv.lock") {
+                "uv run pytest"
+            } else if has("poetry.lock") {
+                "poetry run pytest"
+            } else {
+                "pytest"
+            }
+            .into(),
+        );
     } else if has("pom.xml") {
         build = Some("mvn -q -DskipTests package".into());
         test = Some("mvn -q test".into());
@@ -186,7 +208,7 @@ pub fn gate(e: &EvidenceBundle) -> GateResult {
         checks.push(("tests".into(), ok));
     }
     if checks.is_empty() {
-        warnings.push("검증 명령이 없습니다 (.praxis/validate.toml 설정 권장)".into());
+        warnings.push("검증 명령이 없습니다 (.dojang/validate.toml 설정 권장)".into());
     }
     let ready = !checks.is_empty() && checks.iter().all(|(_, ok)| *ok);
     GateResult {
@@ -540,6 +562,18 @@ mod tests {
     }
 
     #[test]
+    fn detect_python_runner_by_lockfile() {
+        let d = tmp();
+        std::fs::write(d.join("pyproject.toml"), "").unwrap();
+        assert_eq!(detect_spec(&d).test.as_deref(), Some("pytest"));
+        std::fs::write(d.join("poetry.lock"), "").unwrap();
+        assert_eq!(detect_spec(&d).test.as_deref(), Some("poetry run pytest"));
+        std::fs::write(d.join("uv.lock"), "").unwrap();
+        assert_eq!(detect_spec(&d).test.as_deref(), Some("uv run pytest"), "uv.lock이 poetry.lock보다 우선");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
     fn detect_auto_by_marker() {
         let d = tmp();
         std::fs::write(d.join("Cargo.toml"), "").unwrap();
@@ -576,6 +610,33 @@ mod tests {
         assert_eq!(s.build.as_deref(), Some("make b"));
         assert_eq!(s.test.as_deref(), Some("make t"));
         assert_eq!(s.timeout_secs, 120);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn new_config_has_priority_and_empty_new_config_falls_back_to_markers() {
+        let d = tmp();
+        std::fs::write(d.join("Cargo.toml"), "").unwrap();
+        std::fs::create_dir_all(d.join(crate::project_paths::LEGACY_DIR)).unwrap();
+        std::fs::write(
+            d.join(crate::project_paths::LEGACY_DIR)
+                .join("validate.toml"),
+            "build = \"legacy build\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(d.join(crate::project_paths::DIR)).unwrap();
+        let new_path = d.join(crate::project_paths::DIR).join("validate.toml");
+        std::fs::write(&new_path, "test = \"new test\"\n").unwrap();
+
+        assert_eq!(validate_config_path(&d), Some(new_path.clone()));
+        let selected = detect_spec(&d);
+        assert_eq!(selected.test.as_deref(), Some("new test"));
+        assert!(selected.build.is_none());
+
+        std::fs::write(&new_path, "# intentionally empty\n").unwrap();
+        let fallback = detect_spec(&d);
+        assert_eq!(fallback.build.as_deref(), Some("cargo build"));
+        assert_eq!(fallback.test.as_deref(), Some("cargo test"));
         std::fs::remove_dir_all(&d).ok();
     }
 

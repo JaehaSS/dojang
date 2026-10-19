@@ -52,6 +52,7 @@ fn annotation(hunk: &DiffHunk, hunk_id: &str, line: i64) -> ReviewAnnotation {
         body_md: "x".into(),
         status: status::SENT.into(),
         created_at: 1,
+        author: author::HUMAN.into(),
     }
 }
 
@@ -165,4 +166,39 @@ fn generated_ids_are_unique_across_calls() {
     let second = store::generate_id(1, "a.ts", 1, 1000);
     assert_ne!(first, second);
     assert!(first.starts_with("ann-"));
+}
+
+/// author 열이 없던 DB(사람 주석만 있던 시절)를 열면 열이 생기고 기존 행은 human으로 읽힌다.
+/// 에이전트 노트는 `sent`로 태어나 재전송 묶음(draft)에 섞이지 않는다.
+#[tokio::test]
+async fn migrate_adds_author_to_an_old_table_and_agent_notes_are_born_sent() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE review_annotations (
+           id TEXT PRIMARY KEY, task_id INTEGER NOT NULL, hunk_id TEXT NOT NULL, path TEXT NOT NULL,
+           line INTEGER NOT NULL, side TEXT NOT NULL, body_md TEXT NOT NULL,
+           status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','sent','resolved')),
+           created_at INTEGER NOT NULL);
+         INSERT INTO review_annotations VALUES ('ann-old', 1, 'h1', 'a.ts', 3, 'new', 'old note', 'draft', 1);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    migrate(&pool).await.unwrap();
+    migrate(&pool).await.unwrap(); // 두 번 열어도 ALTER가 다시 돌지 않는다.
+    let note = create_agent_note(&pool, 1, "h1", "a.ts", 4, "new", "agent note", "claude", 2)
+        .await
+        .unwrap();
+    let all = list_by_task(&pool, 1).await.unwrap();
+
+    assert_eq!(all.len(), 2);
+    assert_eq!((all[0].id.as_str(), all[0].author.as_str(), all[0].status.as_str()), ("ann-old", "human", "draft"));
+    assert_eq!((all[1].id.as_str(), all[1].author.as_str(), all[1].status.as_str()), (note.id.as_str(), "claude", "sent"));
+    assert!(author::is_human(&all[0].author));
+    assert!(!author::is_human(&all[1].author));
 }

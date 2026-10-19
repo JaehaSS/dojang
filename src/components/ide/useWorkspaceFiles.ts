@@ -51,6 +51,8 @@ export interface WorkspaceFiles {
   activeFile: OpenFile | null;
   refreshTree: () => void;
   showFile: (path: string, file: FileContent) => void;
+  /** 문서의 이미지처럼 탭을 열지 않고 같은 source에서 하위 리소스를 읽는다. */
+  readFile: (path: string) => Promise<FileContent>;
   /** 탭을 연다(이미 열려 있으면 활성화만). **열렸으면 true** — 읽기에 실패하면 false다.
    *  호출자가 뒤이어 커서를 옮길 때 이 값을 봐야 한다. 열리지도 않은 탭에 착지 지점을 걸면
    *  소비되지 않고 남아, 나중에 그 파일을 열 때 커서가 난데없이 뛴다.
@@ -212,6 +214,16 @@ export function useWorkspaceFiles({
   useEffect(() => () => {
     taskScopeRef.current = { ...taskScopeRef.current, generation: taskScopeRef.current.generation + 1 };
   }, []);
+
+  const readFile = useCallback(async (path: string): Promise<FileContent> => {
+    if (!fileSource) throw new Error("파일을 읽을 workspace가 없습니다.");
+    const generation = taskScopeRef.current.generation;
+    const file = await fileSource.read(path);
+    if (taskScopeRef.current.generation !== generation || sourceRef.current !== fileSource) {
+      throw new Error("파일 범위가 변경되었습니다.");
+    }
+    return file;
+  }, [fileSource]);
 
   const showFile = useCallback((path: string, file: FileContent) => {
     const key = fileTabKey(path);
@@ -389,6 +401,7 @@ export function useWorkspaceFiles({
                   content: fc.content,
                   baseContent: fc.content,
                   mtime: fc.mtime,
+                  reloadRevision: (x.reloadRevision ?? 0) + 1,
                   dirty: false,
                 }
               : x,
@@ -487,6 +500,7 @@ export function useWorkspaceFiles({
     activeFile,
     refreshTree,
     showFile,
+    readFile,
     openFile,
     openDiff,
     pinTab,

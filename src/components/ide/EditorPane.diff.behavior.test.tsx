@@ -125,7 +125,7 @@ describe("EditorPane diff 탭 (AC-13)", () => {
     expect(mocks.captureReader.current?.()).toBeNull();
   });
 
-  it("숨은 에디터 diff는 중앙 diff의 파일 단축키를 받지 않는다", async () => {
+  it("비활성 diff 탭은 활성 diff 탭의 파일 단축키를 받지 않는다", async () => {
     const hiddenOpen = vi.fn();
     const centralOpen = vi.fn();
     mocks.taskDiff.mockResolvedValue({

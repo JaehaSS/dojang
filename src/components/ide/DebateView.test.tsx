@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearConversationScrollMemory } from "./conversationScroll";
 import { DebateView } from "./DebateView";
 import type { DebateEventLike } from "./debate-rounds";
 
@@ -73,6 +74,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  clearConversationScrollMemory();
   await act(async () => root?.unmount());
   container?.remove();
   root = null;
@@ -223,5 +225,52 @@ describe("DebateView", () => {
     expect(byText("결론 복사")).toBeUndefined();
     // 끝난 뒤 컴포저는 되살아난다 — 다음 발화가 곧 계속이다.
     expect(container?.querySelector("textarea")?.disabled).toBe(false);
+  });
+
+  describe("스크롤", () => {
+    // 마운트 직후 layout effect가 높이를 읽어야 하므로 프로토타입에서 준다. scrollTop은 jsdom이 그대로 둔다.
+    let height = 1_000;
+    beforeEach(() => {
+      height = 1_000;
+      Object.defineProperties(HTMLElement.prototype, {
+        clientHeight: { configurable: true, get: () => 500 },
+        scrollHeight: { configurable: true, get: () => height },
+      });
+    });
+    afterEach(() => {
+      delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
+      delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+    });
+    const scroller = () => container?.querySelector<HTMLDivElement>(".overflow-auto") as HTMLDivElement;
+    const scrollTo = (top: number) => {
+      scroller().scrollTop = top;
+      scroller().dispatchEvent(new Event("scroll"));
+    };
+
+    it("토론을 켜면 맨 위가 아니라 최신 발화가 있는 하단에서 시작한다", async () => {
+      await render(view());
+      expect(scroller().scrollTop).toBe(1_000);
+    });
+
+    it("하단을 보던 중이면 새 발화를 따라가고, 위로 읽어 올라갔으면 그 자리를 지킨다", async () => {
+      await render(view());
+      height = 1_400;
+      await render(view({ events: [...events, { kind: "text", text: "재반박", speaker: "left" }] }));
+      expect(scroller().scrollTop).toBe(1_400);
+
+      scrollTo(200);
+      height = 1_800;
+      await render(view({ events: [...events, { kind: "text", text: "재반박", speaker: "left" }, { kind: "text", text: "동의", speaker: "right" }] }));
+      expect(scroller().scrollTop).toBe(200);
+    });
+
+    it("다시 마운트돼도 읽던 자리로 돌아온다", async () => {
+      await render(view());
+      scrollTo(200);
+      await act(async () => root?.unmount());
+      root = createRoot(container!);
+      await render(view());
+      expect(scroller().scrollTop).toBe(200);
+    });
   });
 });

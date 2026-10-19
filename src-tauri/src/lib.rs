@@ -5,6 +5,7 @@ pub mod approval;
 pub mod task_results;
 pub mod pipeline;
 pub mod project_plan;
+pub(crate) mod project_paths;
 pub mod task_review;
 pub mod baseline;
 pub mod capsule;
@@ -28,6 +29,7 @@ pub mod insightdeck;
 pub mod insights;
 pub mod interview;
 pub mod jsonextract;
+pub mod know_cards;
 pub mod knowledge;
 pub mod lspdetect;
 pub mod managed_process;
@@ -61,7 +63,6 @@ mod testtmp;
 pub mod theme_store;
 pub mod today;
 pub mod translate;
-pub mod vocab;
 pub mod verify;
 pub mod voice;
 pub mod worktree;
@@ -77,6 +78,7 @@ pub mod preview_bridge;
 pub mod preview_workbench;
 // 알파벳 순서 밖(신규 모듈) — 프리뷰 웹뷰를 실제로 모는 Tauri 디스패처.
 pub mod preview_control;
+pub mod review_control;
 // 알파벳 순서 밖(신규 모듈) — 위와 같은 이유로 끝에 추가.
 pub mod paste;
 pub mod project_editor;
@@ -84,14 +86,68 @@ pub mod project_editor;
 pub mod lspclient;
 // 알파벳 순서 밖(신규 모듈) — 데스크톱이 직접 서빙하는 모바일 표면(설계 2026-09-13).
 pub mod mobile_surface;
+// Design Canvas의 작업별 Vite 개발 서버 수명 주기.
+pub mod design_canvas;
 
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use commands::AppState;
 #[cfg(target_os = "macos")]
-use tauri::menu::{AboutMetadata, MenuBuilder, SubmenuBuilder};
+use tauri::menu::{AboutMetadata, MenuBuilder, MenuItem, SubmenuBuilder};
 use tauri::{Emitter, Manager};
+
+fn app_pool(handle: &tauri::AppHandle) -> Option<sqlx::SqlitePool> {
+    handle
+        .state::<AppState>()
+        .pool
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
+fn activity_probe(handle: &tauri::AppHandle) -> insights::app_activity::Probe {
+    insights::app_activity::Probe {
+        focused: handle
+            .get_webview_window("main")
+            .and_then(|window| window.is_focused().ok())
+            .unwrap_or(false),
+        idle_secs: insights::app_activity::system_idle_secs(),
+    }
+}
+
+/// 앱 사용 시간 하트비트 — 켜져 있던 구간, 메인 창 포커스 구간, 조작 구간을 이어 쓴다.
+/// 포커스는 이벤트로도 맞추지만 시작 직후 첫 이벤트는 풀이 생기기 전일 수 있어 매 틱 창에 직접 묻는다.
+fn start_app_activity_heartbeat(handle: &tauri::AppHandle) {
+    let handle = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(
+            insights::app_activity::HEARTBEAT_SECS,
+        ));
+        // 잠자기에서 깨어난 뒤 밀린 틱을 몰아 쏘지 않는다 — 끊긴 구간 판정이 흐려진다.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let Some(pool) = app_pool(&handle) else { continue };
+            let tracker = &insights::app_activity::TRACKER;
+            if let Err(error) = tracker.sync(&pool, || activity_probe(&handle), now()).await {
+                eprintln!("앱 사용 시간 기록 실패(무시): {error}");
+            }
+        }
+    });
+}
+
+/// 포커스 변화 시점을 하트비트를 기다리지 않고 기록한다. 이벤트 값은 쓰지 않고 창에 다시 묻는다.
+fn record_app_focus(handle: &tauri::AppHandle) {
+    let Some(pool) = app_pool(handle) else { return };
+    let handle = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let tracker = &insights::app_activity::TRACKER;
+        if let Err(error) = tracker.sync(&pool, || activity_probe(&handle), now()).await {
+            eprintln!("앱 포커스 기록 실패(무시): {error}");
+        }
+    });
+}
 
 pub(crate) fn now() -> i64 {
     SystemTime::now()
@@ -121,9 +177,13 @@ fn start_preview_mcp(app: &tauri::AppHandle) {
         tokens: state.control_tokens.clone(),
         dispatcher: std::sync::Arc::new(preview_control::TauriDispatcher {
             app: app.clone(),
+            pool: pool.clone(),
+        }),
+        review: std::sync::Arc::new(review_control::TauriReviewBridge {
+            app: app.clone(),
             pool,
         }),
-        tools: preview_bridge::mcp::Tools::phase_f(),
+        tools: preview_bridge::mcp::Tools::phase_f().with_review(),
     });
     match tauri::async_runtime::block_on(preview_bridge::mcp::bind()) {
         Ok((port, listener)) => {
@@ -245,8 +305,10 @@ pub fn run() {
                         // quiz는 knowledge_chunks를 FK로 참조한다 — 반드시 그 뒤에.
                         let _ = quiz::migrate(&pool).await;
                         let _ = today::migrate(&pool).await;
-                        let _ = vocab::migrate(&pool).await;
                         let _ = insights::migrate_dismissals(&pool).await;
+                        if let Err(error) = insights::app_activity::migrate(&pool).await {
+                            eprintln!("앱 사용 시간 스키마 초기화 실패(무시): {error}");
+                        }
                         // 옛 메모리 파이프라인이 남긴 행을 한 번만 비운다(설계 2026-09-13 §7).
                         // 실패해도 부팅을 막지 않는다 — 남은 행은 아무도 읽지 않는다.
                         match memory::file::purge_legacy_once(&pool).await {
@@ -282,6 +344,7 @@ pub fn run() {
             });
             // 프리뷰 제어 MCP 서버 — 계측 행을 남기려면 풀이 필요해 DB 초기화 뒤에 띄운다.
             start_preview_mcp(&handle);
+            start_app_activity_heartbeat(&handle);
             // 모바일 표면(설계 2026-09-13) — 지난 실행에서 켜져 있었으면 되띄운다.
             // 풀이 AppState에 들어간 **뒤**라야 review_claims를 IPC와 공유할 수 있다.
             // bind 실패가 부팅을 잡아두지 않도록 spawn으로 떼어 둔다.
@@ -418,11 +481,20 @@ pub fn run() {
                 // `paste:` 는 WKWebView 가 실제로 구현하지만 `undo:` 는 Monaco 까지 닿지 않는다.
                 // 항목을 빼면 키가 웹뷰로 내려가 Monaco 의 기본 바인딩이 받고, 일반 input·
                 // textarea 도 브라우저 기본 undo 로 동작한다.
+                // 기본 Select All의 `selectAll:`은 Monaco 문서 대신 hidden textarea를
+                // 선택한다. 메뉴는 유지하되 포커스된 웹뷰가 실제 선택 대상을 처리한다.
+                let select_all = MenuItem::with_id(
+                    app,
+                    "select-all",
+                    "Select All",
+                    true,
+                    Some("CmdOrCtrl+A"),
+                )?;
                 let edit_menu = SubmenuBuilder::new(app, "Edit")
                     .cut()
                     .copy()
                     .paste()
-                    .select_all()
+                    .item(&select_all)
                     .build()?;
                 // NOTE: .close_window() 를 의도적으로 넣지 않는다 → Cmd+W 해제.
                 let window_menu = SubmenuBuilder::new(app, "Window")
@@ -435,6 +507,22 @@ pub fn run() {
                     .items(&[&app_menu, &edit_menu, &window_menu])
                     .build()?;
                 app.set_menu(menu)?;
+                app.on_menu_event(|app, event| {
+                    if event.id().as_ref() != "select-all" {
+                        return;
+                    }
+                    if let Some(window) = app.get_focused_window() {
+                        if let Some(webview) = app.get_webview_window(window.label()) {
+                            // Monaco를 로드하지 않은 프리뷰 창도 DOM 전체 선택을 유지한다.
+                            if let Err(error) = webview.eval(
+                                "if (window.dispatchEvent(new Event('dojang:select-all', { cancelable: true }))) document.execCommand('selectAll')",
+                            )
+                            {
+                                eprintln!("전체 선택 전달 실패: {error}");
+                            }
+                        }
+                    }
+                });
             }
             Ok(())
         })
@@ -552,6 +640,7 @@ pub fn run() {
                 commands::pipeline_retry_ticket,
                 commands::pipeline_skip_ticket,
                 commands::pipeline_resume,
+                commands::pipeline_answer_clarification,
                 commands::pipeline_cancel,
                 commands::project_plan_import,
                 commands::purpose_get,
@@ -623,6 +712,7 @@ pub fn run() {
                 commands::debate_sides,
                 commands::debate_start,
                 commands::debate_end,
+                commands::clipboard_write_text,
                 commands::debate_round_cap_get,
                 commands::debate_round_cap_set,
                 commands::task_delete,
@@ -639,14 +729,11 @@ pub fn run() {
                 commands::translate_settings_get,
                 commands::translate_settings_set,
                 commands::translate_text,
-                commands::vocab_list,
-                commands::vocab_due,
-                commands::vocab_due_count,
-                commands::vocab_save,
-                commands::vocab_mark_known,
-                commands::vocab_set_status,
-                commands::vocab_review,
-                commands::vocab_delete,
+                commands::know_cards_list,
+                commands::know_card_seen,
+                commands::know_card_act,
+                commands::know_cards_enabled_get,
+                commands::know_cards_enabled_set,
                 commands::voice_stt_test,
                 commands::voice_server_status,
                 commands::voice_server_start,
@@ -742,6 +829,7 @@ pub fn run() {
                 commands::usage_claude_token_status,
                 commands::outcome_insights,
                 commands::task_patterns,
+                commands::app_activity,
                 commands::insight_cards,
                 commands::insight_card_dismiss,
                 commands::lesson_themes,
@@ -780,6 +868,10 @@ pub fn run() {
                 commands::designmode_close,
                 commands::designmode_remove_capture,
                 commands::designmode_capture_editor,
+                commands::design_canvas_start,
+                commands::design_canvas_status,
+                commands::design_canvas_stop,
+                commands::design_canvas_edit,
                 commands::preview_take_over,
                 commands::preview_release,
                 commands::preview_workbench_state,
@@ -789,12 +881,17 @@ pub fn run() {
                 commands::paste_capture_save,
                 commands::paste_image_save,
                 project_editor::project_editor_open,
+                project_editor::editor_project_prepare,
+                project_editor::editor_project_activate,
                 project_editor::project_editor_info,
                 project_editor::project_editor_tree,
                 project_editor::project_editor_read,
                 project_editor::project_editor_write,
                 project_editor::project_editor_resolve_path,
                 project_editor::project_editor_open_path,
+                project_editor::project_editor_lsp_goto,
+                project_editor::project_editor_lsp_status,
+                project_editor::project_editor_lsp_semantic_tokens,
                 project_editor::project_editor_shell_open,
                 project_editor::project_editor_shell_snapshot,
                 project_editor::project_editor_shell_write,
@@ -805,6 +902,9 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if window.label()=="main" && matches!(event,tauri::WindowEvent::Focused(true)) {convo::interaction_commands::reopened();}
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Focused(_)) {
+                record_app_focus(window.app_handle());
+            }
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 // 팝인은 숨김이라 에디터 창이 여기 오면 실제로 죽은 것이다. 메인 창의 팝아웃
                 // 상태는 editor://closed로만 풀리는데 죽은 창은 그것을 보내지 못한다 — 대신 알린다.
@@ -817,6 +917,9 @@ pub fn run() {
                     let _ = window.app_handle().emit("project-editor://closed", root);
                 }
                 project_editor::cleanup_window(&state, window.label());
+                let lsp = std::sync::Arc::clone(&window.state::<commands::AppState>().lsp);
+                let scope = project_editor::project_lsp_scope(window.label());
+                tauri::async_runtime::spawn(async move { lsp.shutdown_task(scope).await; });
             }
             // R7: 창 닫기 시 PTY 자식만 정리. 대화(convo) 자식은 의도적으로 살려둔다
             // (재시작 복원 전제 — BR-2, Plan 0012). 재시작 시 reconcile_stale_running이 생존 확인 후 복원.
@@ -855,7 +958,12 @@ pub fn run() {
         .run(|app,event| {
             if let tauri::RunEvent::ExitRequested {api,..}=event {
                 if convo::interaction_commands::shutdown(app,true) {api.prevent_exit();}
-                else { pipeline::registry::kill_everything(); }
+                else {
+                    app.state::<AppState>().design_canvas.stop_all();
+                    // Wait for language-server process groups before the app runtime exits.
+                    tauri::async_runtime::block_on(app.state::<AppState>().lsp.shutdown_all());
+                    pipeline::registry::kill_everything();
+                }
             }
         });
 }

@@ -6,6 +6,7 @@ export const run = (extra: Partial<RunRow> = {}): RunRow => ({
   id: 1, repo: "/repo", base_branch: "main", goal: "목표", state: "executing", paused_from: null, paused_reason: null,
   integration_task_id: null, integration_branch: null, integration_path: null, spec_json: null, spec_revision: 3,
   plan_review_id: null, final_review_id: null, auto_fix_used: 0, plan_fix_used: 0, last_error: null, created_at: 0, updated_at: 0,
+  clarification_json: null,
   ...extra,
 });
 

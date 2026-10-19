@@ -16,7 +16,7 @@ export type ComposerTranslateMode = "reference" | "replace";
 export interface TranslateSettings {
   composer_mode: ComposerTranslateMode;
   model: string;
-  /** ⌘J 결과와 답변 번역에서 공부할 표현을 짚는다(`src/lib/vocab.ts`). 예전에 저장된 설정엔 없으므로 없으면 켠 것으로 본다. */
+  /** ⌘J 결과와 답변 번역에서 공부할 표현을 짚는다(`src/lib/expressions.ts`). 예전에 저장된 설정엔 없으므로 없으면 켠 것으로 본다. */
   study_expressions?: boolean;
 }
 
@@ -139,7 +139,7 @@ export interface BilingualBlock {
   translation: string | null;
 }
 
-/** 대역이 기본이다. 블록 대응이 어긋나거나 HTML 문서 답변이면 예전처럼 전체 번역을 원문 아래 붙인다. */
+/** Markdown은 문단 대역이다. 통째로 렌더링하는 HTML 문서 답변만 전체 번역을 붙인다. */
 export type ReplyTranslation = { kind: "bilingual"; blocks: BilingualBlock[] } | { kind: "whole"; text: string };
 
 /** 목록·표는 통째로 한 블록이다 — 항목마다 대역하면 답변 길이가 두 배가 된다. */
@@ -172,7 +172,7 @@ export function parseBlockTranslations(raw: string, count: number): string[] | n
   try {
     const parsed: unknown = JSON.parse(body);
     if (!Array.isArray(parsed) || parsed.length !== count) return null;
-    if (!parsed.every((item) => typeof item === "string")) return null;
+    if (!parsed.every((item) => typeof item === "string" && item.trim().length > 0)) return null;
     return parsed;
   } catch {
     return null;
@@ -188,9 +188,18 @@ async function translateBilingual(text: string): Promise<ReplyTranslation> {
   if (looksLikeHtml(text)) return whole();
   const blocks = splitReplyBlocks(text);
   const sources = blocks.filter((block) => block.translate).map((block) => block.source.trim());
-  if (sources.length === 0) return whole();
-  const translated = parseBlockTranslations(await translateText("en_to_ko_blocks", JSON.stringify(sources)), sources.length);
-  if (!translated) return whole();
+  let translated = sources.length > 0
+    ? parseBlockTranslations(await translateText("en_to_ko_blocks", JSON.stringify(sources)), sources.length)
+    : [];
+  if (!translated) {
+    // 배열 대응이 깨져도 전체 번역으로 바꾸지 않는다. 문단을 하나씩 보내 원문과의 대응을 유지한다.
+    translated = [];
+    for (const source of sources) {
+      const translation = await translateText("en_to_ko", source);
+      if (!translation.trim()) throw new Error("문단 번역이 비어 있습니다. 다시 시도해 주세요.");
+      translated.push(translation);
+    }
+  }
   let next = 0;
   return {
     kind: "bilingual",

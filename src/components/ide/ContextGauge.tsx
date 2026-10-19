@@ -34,29 +34,26 @@ export function ContextGauge({
   busy = false,
   onOpenDetails,
 }: Props): ReactElement | null {
-  if (observation == null)
-    return <span className="shrink-0 self-end px-1.5 pb-0.5 text-xs text-text-muted">컨텍스트 확인 불가</span>;
-  const window = observation.contextWindow ?? contextWindowFor(task.agent, model);
-  const used = contextPercent(observation.contextTokens, task.agent, model, window);
-  if (used == null) return null;
-  const remaining = 100 - used;
+  const window = observation?.contextWindow ?? contextWindowFor(task.agent, model);
+  const used = contextPercent(observation?.contextTokens ?? null, task.agent, model, window);
+  const remaining = used == null ? null : 100 - used;
   const observedAt =
-    observation.observedAt == null
+    observation?.observedAt == null
       ? "기록 시각 없음"
       : new Date(observation.observedAt * 1000).toISOString();
-  const label = `컨텍스트 약 ${remaining}% 남음${busy ? " (이전 관측)" : ""}`;
+  const label = remaining == null ? "컨텍스트 확인 불가" : `컨텍스트 약 ${remaining}% 남음${busy ? " (이전 관측)" : ""}`;
   return (
     <button
       type="button"
-      className="shrink-0 self-end rounded px-1.5 pb-0.5 text-xs hover:bg-raised"
+      className="shrink-0 self-end rounded px-1.5 pb-0.5 text-xs hover:bg-raised focus-visible:outline-primary"
       onClick={onOpenDetails}
-      title={
+      title={observation ?
         `${label} · 마지막 관측: ${observedAt} ` +
         `(${observation.contextTokens.toLocaleString()}/${window.toLocaleString()} 토큰)`
-      }
-      aria-label={`${label} — 작업정보 열기`}
+        : "채널에서 확보된 입력과 실행 기록의 구성 보기"}
+      aria-label={`${label} · 컨텍스트 구성 보기`}
     >
-      <span className={gaugeTone(remaining)}>{label}</span>
+      <span className={remaining == null ? "text-text-muted" : gaugeTone(remaining)}>{label}</span>
     </button>
   );
 }

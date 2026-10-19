@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
-use super::capture::{next_capture_id, now_millis, write_record};
-use super::{captures_dir, BoundingRect, CaptureRecord, CaptureSource};
+use super::capture::{ensure_captures_dir, next_capture_id, now_millis, write_record};
+use super::{BoundingRect, CaptureRecord, CaptureSource};
 
 /// 클립보드 붙여넣기 이미지 → 캡처 레코드. Design Mode/에디터 캡처와 같은 디렉터리에
 /// `<id>.<ext>` + `<id>.json`으로 저장해 칩 표시·전송 시 프롬프트 주입·`image_paths`
@@ -15,11 +14,10 @@ pub fn save_pasted_capture(
     mime: &str,
 ) -> Result<CaptureRecord, String> {
     let ext = crate::paste::validate_image(bytes, mime)?;
-    let dir = captures_dir(worktree_path, task_id);
-    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let dir = ensure_captures_dir(worktree_path, task_id)?;
     let id = next_capture_id();
     let image_path = dir.join(format!("{id}.{ext}"));
-    fs::write(&image_path, bytes).map_err(|error| error.to_string())?;
+    crate::project_paths::write_new(&image_path, bytes)?;
     let record = CaptureRecord {
         id,
         task_id,

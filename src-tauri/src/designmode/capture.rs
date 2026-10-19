@@ -6,7 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{BoundingRect, CaptureRecord, CaptureSource, ElementCapture, CSS_WHITELIST};
 
-const PRAXIS_DIRNAME: &str = ".praxis";
 const CAPTURES_DIRNAME: &str = "captures";
 pub(super) const MAX_OUTER_HTML: usize = 20_000;
 static CAPTURE_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -35,9 +34,17 @@ fn valid_capture_id(id: &str) -> bool {
 
 pub fn captures_dir(worktree_path: &Path, task_id: i64) -> PathBuf {
     worktree_path
-        .join(PRAXIS_DIRNAME)
+        .join(crate::project_paths::DIR)
         .join(CAPTURES_DIRNAME)
         .join(task_id.to_string())
+}
+
+pub(super) fn ensure_captures_dir(worktree_path: &Path, task_id: i64) -> Result<PathBuf, String> {
+    let task_id = task_id.to_string();
+    crate::project_paths::ensure_dir(
+        worktree_path,
+        &[crate::project_paths::DIR, CAPTURES_DIRNAME, &task_id],
+    )
 }
 
 fn truncate_outer_html(html: &str) -> String {
@@ -82,7 +89,7 @@ fn build_record(
 pub(super) fn write_record(dir: &Path, record: &CaptureRecord) -> Result<(), String> {
     let path = dir.join(format!("{}.json", record.id));
     let json = serde_json::to_string_pretty(record).map_err(|error| error.to_string())?;
-    fs::write(path, json).map_err(|error| error.to_string())
+    crate::project_paths::write_new(&path, json.as_bytes())
 }
 
 /// `image_path`는 호출부가 이미 결정한 값을 그대로 기록한다(스크린샷 촬영 자체는
@@ -93,8 +100,7 @@ pub fn save_capture(
     capture: ElementCapture,
     image_path: Option<String>,
 ) -> Result<CaptureRecord, String> {
-    let dir = captures_dir(worktree_path, task_id);
-    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let dir = ensure_captures_dir(worktree_path, task_id)?;
     let record = build_record(next_capture_id(), task_id, capture, image_path);
     write_record(&dir, &record)?;
     Ok(record)
@@ -163,11 +169,18 @@ fn screencapture_args(rect: &BoundingRect, path: &Path) -> Vec<String> {
 /// 반환한다(사용자가 HTML/CSS 캡처는 계속 쓸 수 있어야 함). 성공 판정은 "exit 성공 + 파일 존재"만 본다.
 #[cfg(target_os = "macos")]
 pub(super) fn take_screenshot(rect: &BoundingRect, path: &Path) -> Option<String> {
+    // Reserve a regular output file before the external command can overwrite it.
+    // Existing files and final-file symlinks are rejected by create_new.
+    let reserved = fs::OpenOptions::new().write(true).create_new(true).open(path).ok()?;
+    drop(reserved);
     let status = std::process::Command::new("screencapture")
         .args(screencapture_args(rect, path))
         .status()
-        .ok()?;
-    if !status.success() || !path.is_file() {
+        .ok();
+    if !status.is_some_and(|status| status.success())
+        || !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+    {
+        let _ = fs::remove_file(path);
         return None;
     }
     Some(path.to_string_lossy().into_owned())
@@ -187,8 +200,7 @@ pub fn save_capture_with_screenshot(
     capture: ElementCapture,
     screen_rect: Option<BoundingRect>,
 ) -> Result<CaptureRecord, String> {
-    let dir = captures_dir(worktree_path, task_id);
-    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let dir = ensure_captures_dir(worktree_path, task_id)?;
     let id = next_capture_id();
     let image_path =
         screen_rect.and_then(|rect| take_screenshot(&rect, &dir.join(format!("{id}.png"))));
@@ -198,24 +210,22 @@ pub fn save_capture_with_screenshot(
 }
 
 pub fn list_captures(worktree_path: &Path, task_id: i64) -> Result<Vec<CaptureRecord>, String> {
-    let dir = captures_dir(worktree_path, task_id);
-    if !dir.is_dir() {
-        return Ok(Vec::new());
-    }
     let mut records = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        if entry
-            .path()
-            .extension()
-            .and_then(|extension| extension.to_str())
-            != Some("json")
-        {
-            continue;
-        }
-        let content = fs::read_to_string(entry.path()).map_err(|error| error.to_string())?;
-        if let Ok(record) = serde_json::from_str::<CaptureRecord>(&content) {
-            records.push(record);
+    for dir in checked_capture_task_dirs(worktree_path, task_id) {
+        for entry in fs::read_dir(&dir).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                != Some("json")
+            {
+                continue;
+            }
+            let content = fs::read_to_string(entry.path()).map_err(|error| error.to_string())?;
+            if let Ok(record) = serde_json::from_str::<CaptureRecord>(&content) {
+                records.push(record);
+            }
         }
     }
     records.sort_by(|left, right| left.captured_at.cmp(&right.captured_at));
@@ -228,22 +238,63 @@ pub fn remove_capture(worktree_path: &Path, task_id: i64, capture_id: &str) -> R
     if !valid_capture_id(capture_id) {
         return Err("유효하지 않은 캡처 id입니다".into());
     }
-    let dir = captures_dir(worktree_path, task_id);
-    // 삭제 실패(이미 없음 등)는 결과적으로 무해 — best-effort.
-    let _ = fs::remove_file(dir.join(format!("{capture_id}.json")));
-    for ext in ["png", "jpg", "jpeg", "gif", "webp", "bmp"] {
-        let _ = fs::remove_file(dir.join(format!("{capture_id}.{ext}")));
+    for dir in checked_capture_task_dirs(worktree_path, task_id) {
+        // 삭제 실패(이미 없음 등)는 결과적으로 무해 — best-effort.
+        let _ = fs::remove_file(dir.join(format!("{capture_id}.json")));
+        for ext in ["png", "jpg", "jpeg", "gif", "webp", "bmp"] {
+            let _ = fs::remove_file(dir.join(format!("{capture_id}.{ext}")));
+        }
     }
     Ok(())
 }
 
 pub fn cleanup_captures(worktree_path: &Path, task_id: i64) {
-    let _ = fs::remove_dir_all(captures_dir(worktree_path, task_id));
+    for project_dir in crate::project_paths::DIRS {
+        let _ = remove_checked_task_captures(worktree_path, task_id, project_dir);
+    }
 }
 
-/// 작업 영구 삭제에만 쓰는 checked 정리 — 공유 `.praxis`와 다른 task의 captures는 건드리지 않는다.
+/// 작업 영구 삭제에만 쓰는 checked 정리 — 공유 저장소와 다른 task의 captures는 건드리지 않는다.
 pub fn delete_task_captures(worktree_path: &Path, task_id: i64) -> Result<(), String> {
-    let Some(captures) = checked_captures_dir(worktree_path)? else {
+    for project_dir in crate::project_paths::DIRS {
+        remove_checked_task_captures(worktree_path, task_id, project_dir)?;
+    }
+    Ok(())
+}
+
+pub(super) fn checked_capture_task_dirs(worktree_path: &Path, task_id: i64) -> Vec<PathBuf> {
+    crate::project_paths::DIRS
+        .into_iter()
+        .filter_map(|project_dir| {
+            match checked_capture_task_dir(worktree_path, task_id, project_dir) {
+                Ok(Some(dir)) => Some(dir),
+                Ok(None) | Err(_) => None,
+            }
+        })
+        .collect()
+}
+
+fn checked_capture_task_dir(
+    worktree_path: &Path,
+    task_id: i64,
+    project_dir: &str,
+) -> Result<Option<PathBuf>, String> {
+    let Some(captures) = checked_captures_dir(worktree_path, project_dir)? else {
+        return Ok(None);
+    };
+    let task_dir = captures.join(task_id.to_string());
+    if !checked_directory(&task_dir, "캡처 task")? {
+        return Ok(None);
+    }
+    Ok(Some(task_dir))
+}
+
+fn remove_checked_task_captures(
+    worktree_path: &Path,
+    task_id: i64,
+    project_dir: &str,
+) -> Result<(), String> {
+    let Some(captures) = checked_captures_dir(worktree_path, project_dir)? else {
         return Ok(());
     };
     let task_dir = captures.join(task_id.to_string());
@@ -261,15 +312,18 @@ pub fn delete_task_captures(worktree_path: &Path, task_id: i64) -> Result<(), St
     fs::remove_dir_all(task_dir).map_err(|error| error.to_string())
 }
 
-fn checked_captures_dir(worktree_path: &Path) -> Result<Option<PathBuf>, String> {
+fn checked_captures_dir(
+    worktree_path: &Path,
+    project_dir: &str,
+) -> Result<Option<PathBuf>, String> {
     if !checked_directory(worktree_path, "worktree")? {
         return Ok(None);
     }
-    let praxis = worktree_path.join(PRAXIS_DIRNAME);
-    if !checked_directory(&praxis, ".praxis")? {
+    let project = worktree_path.join(project_dir);
+    if !checked_directory(&project, project_dir)? {
         return Ok(None);
     }
-    let captures = praxis.join(CAPTURES_DIRNAME);
+    let captures = project.join(CAPTURES_DIRNAME);
     if !checked_directory(&captures, "captures")? {
         return Ok(None);
     }

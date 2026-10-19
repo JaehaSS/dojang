@@ -6,7 +6,7 @@ import { createServer } from 'vite';
 import react from '@vitejs/plugin-react';
 
 // Real components with a deterministic text-only transport. This does not claim native CLI coverage.
-const directory = path.resolve('.praxis/verification/side-question');
+const directory = path.resolve('.dojang/verification/side-question');
 const fixture = path.join(directory, 'fixture');
 await mkdir(fixture, { recursive: true });
 await writeFile(path.join(fixture, 'index.html'), '<div id="root"></div><script type="module" src="./main.tsx"></script>');

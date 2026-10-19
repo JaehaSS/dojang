@@ -79,6 +79,8 @@ async fn delete_task_rows(tx: &mut Transaction<'_, Sqlite>, id: i64) -> anyhow::
         "notification_results",
         "notification_cancels",
         "preview_commands",
+        "know_cards",
+        "know_card_checks",
     ] {
         delete_task_rows_from(tx, table, id).await?;
     }

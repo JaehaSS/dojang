@@ -18,6 +18,8 @@ import {
   agentModelSet,
   debateRoundCapGet,
   debateRoundCapSet,
+  knowCardsEnabledGet,
+  knowCardsEnabledSet,
   type ShellSpec,
   type ConcurrencyLimit,
 } from "../../../lib/ipc";
@@ -56,6 +58,7 @@ export function RunTab({ onUseWorktreeChange }: Props) {
   const [lspAutoinject, setLspAutoinject] = useState(true);
   const [useWorktree, setUseWorktree] = useState(true);
   const [refreshBase, setRefreshBase] = useState(true);
+  const [knowCards, setKnowCards] = useState(true);
   // 동시 실행 상한 — 값·경계는 백엔드가 준다. 입력 중에는 문자열로 들고 있어야
   // 지웠다 다시 치는 중간 상태("")가 0으로 튀지 않는다. 확정은 blur/Enter.
   const [concurrency, setConcurrency] = useState<ConcurrencyLimit | null>(null);
@@ -73,6 +76,7 @@ export function RunTab({ onUseWorktreeChange }: Props) {
     blockUnverifiedGet().then(setBlockUnverified).catch(() => {});
     lspAutoinjectGet().then(setLspAutoinject).catch(() => {});
     refreshBaseGet().then(setRefreshBase).catch(() => {});
+    knowCardsEnabledGet().then(setKnowCards).catch(() => {});
     useWorktreeGet()
       .then((on) => {
         setUseWorktree(on);
@@ -426,6 +430,21 @@ export function RunTab({ onUseWorktreeChange }: Props) {
       )}
 
       <TranslateSection />
+
+      <SettingSection
+        id="know-cards"
+        title="알아둘 것 카드"
+        risk="cost"
+        hint="도구를 6회 이상 쓴 대화 턴이 끝나면 놓쳤을 수 있는 개념·결정·위험 하나를 그 세션의 작업정보 채널 아래에 카드로 남깁니다. 판정마다 claude(sonnet)를 도구 없이 한 번 호출합니다."
+      >
+        <SettingRow title="턴이 끝난 뒤 판정" hint="끄면 새 판정만 멈춥니다. 이미 남은 카드는 그대로 보이고 이미 앎·닫기로 치울 수 있습니다.">
+          <Switch
+            on={knowCards}
+            onClick={() => void toggle(knowCards, knowCardsEnabledSet, setKnowCards)}
+            label="알아둘 것 카드"
+          />
+        </SettingRow>
+      </SettingSection>
     </SettingsTabShell>
   );
 }

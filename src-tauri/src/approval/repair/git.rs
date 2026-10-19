@@ -46,7 +46,7 @@ pub fn fingerprint(path: &Path) -> anyhow::Result<String> {
     let names = git(path, &["ls-files", "--others", "--exclude-standard", "-z"])?;
     for name in names.split('\0').filter(|s| !s.is_empty()) {
         // App-owned candidate and journal directories aren't task input.
-        if name.starts_with(".praxis/worktrees/") || name.starts_with(".praxis/approval/") {
+        if crate::project_paths::is_auxiliary_path(name) {
             continue;
         }
         digest.update(name.as_bytes());
@@ -148,6 +148,8 @@ pub fn snapshot(
             "--quiet",
             &source,
             "--",
+            ".dojang/worktrees",
+            ".dojang/approval",
             ".praxis/worktrees",
             ".praxis/approval",
         ])?;
@@ -205,9 +207,17 @@ pub fn assert_original(session: &super::Session) -> anyhow::Result<()> {
 pub fn assert_candidate(session: &super::Session) -> anyhow::Result<()> {
     let worktree = candidate(session);
     worktree.validate_isolated_approval()?;
-    let root = managed_dir(&worktree.repo, &[".praxis", "worktrees"])?;
+    let repo = worktree.repo.canonicalize()?;
+    let candidate_path = worktree.path.canonicalize()?;
+    let legacy_root = repo.join(crate::project_paths::LEGACY_DIR).join("worktrees");
+    let dir = if candidate_path.parent() == Some(legacy_root.as_path()) {
+        crate::project_paths::LEGACY_DIR
+    } else {
+        crate::project_paths::DIR
+    };
+    let root = managed_dir(&worktree.repo, &[dir, "worktrees"])?;
     anyhow::ensure!(
-        worktree.path.canonicalize()?.parent() == Some(root.as_path()),
+        candidate_path.parent() == Some(root.as_path()),
         "해결 후보가 관리 경로를 벗어났습니다"
     );
     let meta = std::fs::symlink_metadata(&worktree.path)?;

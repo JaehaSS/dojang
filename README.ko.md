@@ -18,7 +18,7 @@
 
 ## 무엇이 다른가
 
-- **원본을 건드리지 않습니다.** 작업마다 `.praxis/worktrees/` 아래에 worktree와 전용 브랜치를
+- **원본을 건드리지 않습니다.** 작업마다 `.dojang/worktrees/` 아래에 worktree와 전용 브랜치를
   만듭니다. 폐기하면 worktree가 통째로 사라지고, 승인해야 커밋과 머지가 일어납니다.
 - **여러 작업을 한 번에 돌립니다.** 기본 8개(설정에서 1~64)를 각자의 worktree와 터미널 세션에서
   병렬로 실행합니다.
@@ -79,7 +79,7 @@ Windows 빌드는 CI가 만들며, **실제 Windows 기기에서는 아직 검�
 알려진 기능은 [지원 범위](#지원-범위)를 보세요.
 
 1. [Git for Windows](https://git-scm.com/download/win)를 설치합니다. Dojang은 git을 사용하고,
-   `.praxis-env-setup.sh`를 Git for Windows에 포함된 `sh.exe`로 실행합니다.
+   `.dojang-env-setup.sh`를 Git for Windows에 포함된 `sh.exe`로 실행합니다.
 2. [릴리스 페이지](https://github.com/JaehaSS/dojang/releases/latest)에서 `Dojang_<버전>_x64-setup.exe`(또는 `.msi`)를
    받아 실행합니다. WebView2가 없으면 설치 프로그램이 내려받습니다.
 3. 설치 파일에 코드 서명이 없어 처음 실행할 때 SmartScreen 경고가 뜹니다. **추가 정보 → 실행**을 누릅니다.

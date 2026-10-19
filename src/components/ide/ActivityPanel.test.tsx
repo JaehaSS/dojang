@@ -118,4 +118,22 @@ describe("ActivityPanel", () => {
 
     expect(html).not.toContain("최근 활동");
   });
+
+  it("Codex의 관측 미상은 부모 턴 종료만으로 중단으로 바꾸지 않는다", () => {
+    const html = renderToStaticMarkup(
+      <ActivityPanel
+        task={task}
+        runtime="local"
+        diff={{ state: "ready", value: "" }}
+        items={[{ role: "subagent_state", subagentId: "codex:root:child", summary: "기록 점검", state: "unknown", observationStatus: "limited" }]}
+        busy={false}
+        activity={null}
+        onRefreshDiff={() => {}}
+        onOpenSubagent={() => {}}
+      />,
+    );
+
+    expect(html).toContain("완료 확인 불가");
+    expect(html).not.toContain("턴 종료로 중단됨");
+  });
 });

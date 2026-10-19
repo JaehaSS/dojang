@@ -110,8 +110,8 @@ src/utils/date.ts 의 formatDate 가 UTC 기준으로 나오는데
 ### 이때 뒤에서 벌어지는 일
 
 ```
-<레포>/.praxis/worktrees/<작업명-타임스탬프>/   ← 여기에 worktree가 파집니다
-브랜치: praxis/<작업명>-<타임스탬프>            ← 여기에 커밋됩니다
+<레포>/.dojang/worktrees/<작업명-타임스탬프>/   ← 여기에 worktree가 파집니다
+브랜치: dojang/<작업명>-<타임스탬프>            ← 여기에 커밋됩니다
 ```
 
 에이전트는 **이 worktree 안에서만** 움직입니다. 원본 레포의 파일도, 현재 브랜치도 건드리지

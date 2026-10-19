@@ -22,6 +22,43 @@ fn checks_summary(outcomes: &[checks::CheckOutcome], empty_msg: &str) -> String 
     }
 }
 
+/// 기준선 실패 명령을 판정에서 제외한 검증 결과. 제외된 실패는 요약에 라벨을 달아 남긴다.
+fn baseline_verdict(outcomes: &[checks::CheckOutcome], baseline_failed: &[String]) -> VerifyOutput {
+    let empty_msg = "실행할 검증 명령이 없습니다(저장소 build/test 설정과 수용 명령이 모두 비어 있음)";
+    if baseline_failed.is_empty() || !outcomes.iter().any(|o| checks::is_baseline_excluded(o, baseline_failed)) {
+        return VerifyOutput { passed: checks::checks_passed(outcomes), summary: checks_summary(outcomes, empty_msg) };
+    }
+    let (excluded, judged): (Vec<_>, Vec<_>) =
+        outcomes.iter().cloned().partition(|o| checks::is_baseline_excluded(o, baseline_failed));
+    let note = excluded
+        .iter()
+        .map(|o| format!("$ {} (기준선에서도 실패 — 판정에서 제외)", o.command))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if judged.is_empty() {
+        return VerifyOutput {
+            passed: true,
+            summary: format!(
+                "판정 가능한 검증 명령이 없어 리뷰로 넘긴다. 저장소 검증이 변경 전 기준선에서도 실패했다:\n{note}"
+            ),
+        };
+    }
+    let passed = judged.iter().all(|o| o.ok);
+    let summary = if passed { note } else { format!("{}\n\n{note}", checks::failure_summary(&judged)) };
+    VerifyOutput { passed, summary }
+}
+
+/// 저장소 검증과 수용 명령을 돌리고 기준선을 반영해 판정한다. 티켓 검증·통합 검증·최종 자동 수정이 같은 판정을 쓴다.
+pub fn run_checks_with_baseline(
+    dir: &Path,
+    acceptance: &[String],
+    baseline_failed: &[String],
+    registrar: Option<&SharedProcessRegistrar>,
+) -> VerifyOutput {
+    let outcomes = checks::run_ticket_checks_with_baseline(dir, acceptance, baseline_failed, registrar);
+    baseline_verdict(&outcomes, baseline_failed)
+}
+
 /// 검증이 남긴 추적되지 않는 산출물을 지워 worktree를 현재 HEAD 커밋과 같게 만든다(ignored는 보존).
 fn restore_to_head(dir: &Path) -> Result<(), String> {
     let head = git_ops::head(dir).map_err(|e| e.to_string())?;
@@ -35,6 +72,7 @@ pub fn verify_ticket(
     fork: &str,
     allowed: &[String],
     acceptance: &[String],
+    baseline_failed: &[String],
     registrar: Option<&SharedProcessRegistrar>,
 ) -> Result<VerifyOutput, String> {
     git_ops::commit_all(dir, "티켓 작업 (파이프라인)").map_err(|e| e.to_string())?;
@@ -49,15 +87,8 @@ pub fn verify_ticket(
     if changed.is_empty() {
         return Ok(VerifyOutput { passed: false, summary: "변경이 하나도 없습니다. 티켓을 구현하라.".into() });
     }
-    let outcomes = checks::run_ticket_checks(dir, acceptance, registrar);
+    let out = run_checks_with_baseline(dir, acceptance, baseline_failed, registrar);
     let restored = restore_to_head(dir);
-    let out = VerifyOutput {
-        passed: checks::checks_passed(&outcomes),
-        summary: checks_summary(
-            &outcomes,
-            "실행할 검증 명령이 없습니다(저장소 build/test 설정과 수용 명령이 모두 비어 있음)",
-        ),
-    };
     restored?;
     Ok(out)
 }
@@ -69,6 +100,7 @@ pub fn apply_final_fix(
     pre: &str,
     allowed: &[String],
     acceptance: &[String],
+    baseline_failed: &[String],
     registrar: Option<&SharedProcessRegistrar>,
     agent: impl FnOnce() -> Result<String, String>,
 ) -> Result<(), String> {
@@ -83,9 +115,9 @@ pub fn apply_final_fix(
         if !outside.is_empty() {
             return Err(format!("자동 수정이 허용 경로 밖을 변경했습니다: {}", outside.join(", ")));
         }
-        let outcomes = checks::run_ticket_checks(dir, acceptance, registrar);
-        if !checks::checks_passed(&outcomes) {
-            return Err(format!("자동 수정 뒤 검증 실패:\n{}", checks_summary(&outcomes, "실행할 검증 명령이 없습니다")));
+        let verdict = run_checks_with_baseline(dir, acceptance, baseline_failed, registrar);
+        if !verdict.passed {
+            return Err(format!("자동 수정 뒤 검증 실패:\n{}", verdict.summary));
         }
         restore_to_head(dir)
     })();

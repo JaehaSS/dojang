@@ -109,7 +109,7 @@ function CrossAgentDraft({ agent, model, busy, allowed, onModelChange, onSubmit 
       <button
         type="button"
         className="rounded-md border border-primary/50 px-2 py-1 text-xs text-primary-bright hover:border-primary disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted"
-        disabled={busy || !allowed || !model.trim()}
+        disabled={busy || !allowed}
         onClick={onSubmit}
       >
         전환
@@ -119,7 +119,7 @@ function CrossAgentDraft({ agent, model, busy, allowed, onModelChange, onSubmit 
 }
 
 /** 세션 헤더의 모델 전환. 같은 에이전트의 모델은 즉시 저장하고, 다른 에이전트는 다음 메시지용
- * 대상 모델을 고른 뒤에만 전환한다. 작업·파일·표시 이력은 남지만 새 CLI의 네이티브 이력은 잇지 않는다. */
+ * 모델을 선택하거나 벤더 기본값으로 둔 뒤 전환한다. 작업·파일·표시 이력은 남지만 새 CLI의 네이티브 이력은 잇지 않는다. */
 export function SessionModelSwitch({ task, contextTokens, observedModel, inDebate = false, onChanged, onServiceTierChanged, onDebateStarted }: Props): ReactElement | null {
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -174,7 +174,7 @@ export function SessionModelSwitch({ task, contextTokens, observedModel, inDebat
     setDraftModel("");
   };
   const submitAgent = () => {
-    if (!canSwitchAgent || !crossAgent || busyRef.current || !draftModel.trim()) return;
+    if (!canSwitchAgent || !crossAgent || busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
     taskAgentSet(taskRef(task), draftAgent, draftModel)

@@ -6,8 +6,18 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const STDERR_TAIL_LINES: usize = 12;
 const STDERR_LINE_CHARS: usize = 400;
 
+/// 서버 일시 장애(503 UNAVAILABLE)로 출력 없이 끝난 턴의 재시도 대기. 자격 확인은 시작
+/// 직후 실패하므로 대기만 합쳐도 사용자가 느끼는 지연은 수십 초 이내다.
+pub const TRANSIENT_RETRY_DELAYS: [Duration; 3] =
+    [Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(10)];
+
+/// agy가 출력 없이 끝났을 때 stderr가 서버 일시 장애를 가리키는가.
+/// 쿼터 소진(`Individual quota reached`)·인증 실패·타임아웃은 기다려도 풀리지 않으므로 넣지 않는다.
+pub fn is_transient_failure(stderr_tail: &str) -> bool {
+    stderr_tail.contains("UNAVAILABLE") || stderr_tail.contains("code 503")
+}
+
 pub struct AgyProcessOutput {
-    pub stdout: String,
     pub timed_out: bool,
     pub exit_desc: String,
     pub stderr_tail: String,
@@ -20,6 +30,7 @@ pub fn capture(
     mut stderr: Option<ChildStderr>,
     pid: u32,
     idle_timeout_secs: u64,
+    mut on_line: impl FnMut(&str),
 ) -> Result<AgyProcessOutput, String> {
     set_nonblocking(&stdout)?;
     if let Some(pipe) = stderr.as_ref() {
@@ -32,6 +43,7 @@ pub fn capture(
     let status = loop {
         if read_available(&mut stdout, &mut stdout_bytes)? {
             last_output = Instant::now();
+            emit_lines(&mut stdout_bytes, &mut on_line);
         }
         if let Some(pipe) = stderr.as_mut() {
             read_available(pipe, &mut stderr_bytes)?;
@@ -49,7 +61,9 @@ pub fn capture(
         }
         std::thread::sleep(POLL_INTERVAL);
     };
-    Ok(output(stdout_bytes, stderr_bytes, timed_out, status))
+    emit_lines(&mut stdout_bytes, &mut on_line);
+    flush_line(stdout_bytes, &mut on_line);
+    Ok(output(stderr_bytes, timed_out, status))
 }
 
 #[cfg(unix)]
@@ -91,6 +105,7 @@ pub fn capture(
     stderr: Option<ChildStderr>,
     pid: u32,
     idle_timeout_secs: u64,
+    mut on_line: impl FnMut(&str),
 ) -> Result<AgyProcessOutput, String> {
     let stdout_rx = read_in_background(stdout);
     let stderr_rx = stderr.map(read_in_background);
@@ -101,6 +116,7 @@ pub fn capture(
     let status = loop {
         if drain_channel(&stdout_rx, &mut stdout_bytes) {
             last_output = Instant::now();
+            emit_lines(&mut stdout_bytes, &mut on_line);
         }
         if let Some(receiver) = stderr_rx.as_ref() {
             drain_channel(receiver, &mut stderr_bytes);
@@ -119,7 +135,9 @@ pub fn capture(
         }
         std::thread::sleep(POLL_INTERVAL);
     };
-    Ok(output(stdout_bytes, stderr_bytes, timed_out, status))
+    emit_lines(&mut stdout_bytes, &mut on_line);
+    flush_line(stdout_bytes, &mut on_line);
+    Ok(output(stderr_bytes, timed_out, status))
 }
 
 #[cfg(not(unix))]
@@ -148,8 +166,22 @@ fn drain_channel(receiver: &std::sync::mpsc::Receiver<Vec<u8>>, bytes: &mut Vec<
     read_any
 }
 
+/// 버퍼에서 완성된 줄(`\n` 종결)을 모두 꺼내 넘긴다. 미완성 꼬리는 다음 읽기를 기다린다.
+fn emit_lines(bytes: &mut Vec<u8>, on_line: &mut impl FnMut(&str)) {
+    while let Some(end) = bytes.iter().position(|byte| *byte == b'\n') {
+        let line: Vec<u8> = bytes.drain(..=end).collect();
+        on_line(String::from_utf8_lossy(&line[..end]).trim_end_matches('\r'));
+    }
+}
+
+/// 프로세스가 끝난 뒤 개행 없이 남은 마지막 줄.
+fn flush_line(bytes: Vec<u8>, on_line: &mut impl FnMut(&str)) {
+    if !bytes.is_empty() {
+        on_line(String::from_utf8_lossy(&bytes).trim_end_matches('\r'));
+    }
+}
+
 fn output(
-    stdout: Vec<u8>,
     stderr: Vec<u8>,
     timed_out: bool,
     status: ExitStatus,
@@ -166,7 +198,6 @@ fn output(
         .collect::<Vec<_>>()
         .join("\n");
     AgyProcessOutput {
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
         timed_out,
         exit_desc: exit_description(status),
         stderr_tail,
@@ -185,4 +216,33 @@ fn exit_description(status: ExitStatus) -> String {
         }
     }
     "unknown".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{emit_lines, flush_line, is_transient_failure};
+
+    #[test]
+    fn lines_are_emitted_as_they_complete_and_the_tail_on_exit() {
+        let mut lines = Vec::new();
+        let mut bytes = b"first\r\nsec".to_vec();
+        emit_lines(&mut bytes, &mut |line| lines.push(line.to_string()));
+        assert_eq!(lines, vec!["first"]);
+        bytes.extend_from_slice("ond\n한글 꼬리".as_bytes());
+        emit_lines(&mut bytes, &mut |line| lines.push(line.to_string()));
+        flush_line(bytes, &mut |line| lines.push(line.to_string()));
+        assert_eq!(lines, vec!["first", "second", "한글 꼬리"]);
+    }
+
+    #[test]
+    fn transient_failure_matches_only_server_unavailable() {
+        assert!(is_transient_failure(
+            "error: Eligibility check failed: UNAVAILABLE (code 503): The service is currently unavailable."
+        ));
+        assert!(!is_transient_failure(
+            "Error: Individual quota reached. Please upgrade your subscription to increase your limits."
+        ));
+        assert!(!is_transient_failure("Error: timeout waiting for response"));
+        assert!(!is_transient_failure(""));
+    }
 }

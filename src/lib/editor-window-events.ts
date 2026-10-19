@@ -37,12 +37,30 @@ export interface EditorSessionPayload {
   branch: string | null;
   /** 문서 링크의 절대 경로를 루트 기준으로 풀 때 쓴다. 창은 작업 목록이 없으므로 메인 창이 실어 보낸다. */
   worktree_path: string | null;
-  /** 팝아웃 시점에 메인 창이 열어 두었던 파일 — 창이 이어받는다. */
+  /** 팝아웃 시점에 메인 창이 열어 두었던 탭의 **키**(`src/lib/tab-key.ts`) — 창이 이어받는다.
+   *  파일 탭은 경로 그대로이고 diff 탭은 `diff:<path>`다. 이름이 `paths`인 것은 diff 탭이
+   *  창을 건너지 못하던 시절의 흔적이다(ADR 2026-10-08 결정 5). */
   open_paths: string[];
   active_path: string | null;
   /** 원격 워크트리는 언어 서버를 띄울 수 없다(`EditorPane.tsx:57`). false면 ⌘B를 걸지 않는다. */
   supports_lsp: boolean;
 }
+
+/** 홈에서 연 원본 폴더도 같은 에디터 창을 사용한다. 세션 ID를 만들지 않는다. */
+export interface EditorProjectPayload {
+  kind: "project";
+  root: string;
+  open_paths: string[];
+  active_path: string | null;
+}
+
+export type EditorWorkspacePayload = EditorSessionPayload | EditorProjectPayload;
+
+export function isProjectWorkspace(workspace: EditorWorkspacePayload): workspace is EditorProjectPayload {
+  return "kind" in workspace && workspace.kind === "project";
+}
+
+export type EditorWindowClosedPayload = EditorClosedPayload | { kind: "project"; root: string };
 
 /** 메인 창에서 클릭한 파일 링크. 창이 나가 있는 동안 대화의 링크는 전부 이리로 온다.
  *
@@ -55,6 +73,8 @@ export interface EditorRevealPayload {
   /** `src/App.tsx:1187` 표기로 온 링크의 착지 줄. null이면 파일만 연다. */
   line: number | null;
   column: number | null;
+  /** `"diff"`면 그 경로의 diff 탭을 연다 — 변경 목록의 행이 보내는 링크. 없으면 파일 탭이다. */
+  kind?: "diff";
 }
 
 /** 버블이 보내는 질문. 선택 코드와 질문 텍스트를 함께 싣는다. */
@@ -82,6 +102,7 @@ export type EditorStatus = "idle" | "busy" | "done" | "error";
 export interface EditorClosedPayload {
   task_id: number;
   host: string;
+  /** 탭 키 목록 — `EditorSessionPayload.open_paths`와 같은 꼴(diff 탭은 `diff:<path>`). */
   open_paths: string[];
   active_path: string | null;
   notification?: EditorNotificationPayload;
@@ -112,7 +133,7 @@ export interface EditorAutosavedPayload {
  * (원격 워크트리에서 흔하다). 어느 쪽이든 창은 이전 세션에 머문다.
  */
 export interface EditorAutosaveBlockedPayload {
-  task_id: number;
+  task_id: number | null;
   path: string;
   reason: "conflict" | "failed";
   detail: string | null;

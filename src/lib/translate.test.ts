@@ -46,6 +46,7 @@ describe("답변 문단 대역 분할", () => {
     expect(parseBlockTranslations('```json\n["가"]\n```', 1)).toEqual(["가"]);
     expect(parseBlockTranslations('["가"]', 2)).toBeNull();
     expect(parseBlockTranslations('["가", 1]', 2)).toBeNull();
+    expect(parseBlockTranslations('["가", "   "]', 2)).toBeNull();
     expect(parseBlockTranslations("가\n\n나", 2)).toBeNull();
   });
 });

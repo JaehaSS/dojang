@@ -536,10 +536,17 @@ pub async fn init_pool(db_path: &str) -> anyhow::Result<SqlitePool> {
     ] {
         sqlx::query(statement).execute(&pool).await?;
     }
+    // 2026-10-06 제거된 단어장 기능의 테이블을 지운다. 색인(`vocab_due`)은 테이블과 함께 사라지고,
+    // IF EXISTS라 새 DB에서도 무해하다. 실패해도 부팅을 막지 않는다 — attention과 달리 트리거가 없어
+    // 남은 테이블은 아무도 읽지 않고, 다음 실행에서 다시 지운다.
+    let _ = sqlx::query("DROP TABLE IF EXISTS vocab_entries")
+        .execute(&pool)
+        .await;
     crate::task_results::migrate(&pool).await?;
     crate::project_plan::migrate(&pool).await?;
     crate::pipeline::db::migrate(&pool).await?;
     crate::task_review::migrate(&pool).await?;
+    crate::know_cards::migrate(&pool).await?;
     Ok(pool)
 }
 

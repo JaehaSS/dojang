@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { copyText } from "../lib/clipboard";
 import { useHostScope } from "../lib/host-scope";
 import type { HostId } from "../lib/transport";
 import {
@@ -349,7 +350,7 @@ export function HarnessExperiencePanel({ repo, onOpenMemory }: Props) {
         setCopyState("원문이 변경되었습니다. 다시 확인한 뒤 복사하세요.");
         return;
       }
-      await navigator.clipboard.writeText(experienceDraft(document, fields));
+      await copyText(experienceDraft(document, fields));
       if (id === request.current) setCopyState("복사됨");
     } catch {
       if (id === request.current)
@@ -362,7 +363,7 @@ export function HarnessExperiencePanel({ repo, onOpenMemory }: Props) {
     if (!document || !canCopy) return;
     const id = request.current;
     try {
-      await navigator.clipboard.writeText(document.path);
+      await copyText(document.path);
       if (id === request.current) setCopyState("경로 복사됨");
     } catch {
       if (id === request.current) setCopyState("경로를 복사하지 못했습니다.");

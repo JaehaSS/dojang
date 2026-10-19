@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { copyText } from "../../lib/clipboard";
 import {
   todayAdd,
   todayClose,
@@ -190,7 +191,7 @@ export function TodaySection({
   // 폭 300px에 손잡이를 다 욱여넣으면 무엇 하나 제대로 눌리지 않는다.
   if (channel) {
     return (
-      <ChannelCard label="오늘 할 일" className="shrink-0 max-h-[45%]">
+      <ChannelCard label="오늘 할 일" className="shrink-0 max-h-[var(--channel-today-max-height,45%)]">
         <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2.5">
           <h2 className="text-xs font-medium text-text-secondary">오늘 할 일</h2>
           {total > 0 && (
@@ -491,7 +492,7 @@ export function TodaySection({
             <button
               type="button"
               className="text-xs text-text-muted hover:text-text"
-              onClick={() => void navigator.clipboard?.writeText(closing.draft)}
+              onClick={() => void copyText(closing.draft).catch(() => undefined)}
             >
               복사
             </button>

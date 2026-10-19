@@ -2,7 +2,7 @@
 //!
 //! Phase 1: 레포에 격리 worktree(+브랜치)를 만들고, 에이전트가 거기서 작업하게 한 뒤
 //! `git diff --stat`로 변경 요약을 보여주고, 승인(머지+정리) 또는 폐기(제거)한다.
-//! worktree는 `<repo>/.praxis/worktrees/<slug>` 에 생성한다(.praxis는 gitignore).
+//! worktree는 `<repo>/.dojang/worktrees/<slug>` 에 생성한다(.dojang은 gitignore).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -154,7 +154,7 @@ fn run_git_in_validation_index(
 }
 
 fn hook_validation_dir(git_dir: &Path) -> anyhow::Result<PathBuf> {
-    let root = git_dir.join("praxis-hook-validation");
+    let root = git_dir.join("dojang-hook-validation");
     std::fs::create_dir_all(&root)?;
     let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     let path = root.join(format!("{}-{}", std::process::id(), timestamp.as_nanos()));
@@ -447,10 +447,11 @@ fn ensure_git_info_lines(repo: &Path, file: &str, lines: &[&str]) -> anyhow::Res
 /// 선행 `/`로 루트 한정(하위 디렉터리의 동명 파일은 무관). ignore 규칙은 이미 tracked인
 /// 파일에는 효력이 없으므로, 컨텍스트 파일을 커밋해서 쓰는 레포의 동작은 바뀌지 않는다.
 fn ensure_context_files_excluded(repo: &Path) -> anyhow::Result<()> {
-    let lines: Vec<String> = crate::projector::all_targets()
+    let mut lines: Vec<String> = crate::projector::all_targets()
         .iter()
         .map(|t| format!("/{t}"))
         .collect();
+    lines.extend(crate::project_paths::DIRS.iter().map(|dir| format!("/{dir}/")));
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
     ensure_git_info_lines(repo, "exclude", &refs)
 }
@@ -631,10 +632,9 @@ pub fn create(
     };
 
     let dir_component = branch.replace('/', "-");
-    let path = repo.join(".praxis").join("worktrees").join(dir_component);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let root = crate::project_paths::ensure_dir(repo, &[crate::project_paths::DIR, "worktrees"])
+        .map_err(anyhow::Error::msg)?;
+    let path = root.join(dir_component);
     let path_str = path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("worktree 경로가 UTF-8이 아님"))?;
@@ -1090,7 +1090,7 @@ mod init_tests {
             &hook,
             "#!/bin/sh\n\
              case \"$GIT_DIR\" in\n\
-             *praxis-hook-validation*) printf 'mutated\\n' > hook-mutated.txt;;\n\
+             *dojang-hook-validation*) printf 'mutated\\n' > hook-mutated.txt;;\n\
              esac\n\
              exit 0\n",
         )

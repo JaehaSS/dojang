@@ -4,6 +4,7 @@ import {
   FLOATING_CHANNEL_MIN_CENTER,
   FLOATING_CHANNEL_RESERVED,
   FLOATING_CHANNEL_WIDTH,
+  channelHandleLabel,
   channelHandleVisible,
   channelPlacement,
   floatingChannelMinCenter,
@@ -109,5 +110,15 @@ describe("FLOATING_CHANNEL_RESERVED", () => {
 
   it("헤더 인셋은 같은 예약에서 헤더가 이미 가진 패딩만 뺀 값이다 — 손잡이 줄이 세션 끝에 선다", () => {
     expect(FLOATING_CHANNEL_HEADER_INSET).toBe(FLOATING_CHANNEL_RESERVED - 12);
+  });
+});
+
+describe("channelHandleLabel", () => {
+  it("안 읽은 카드가 없으면 원래 이름이다", () => {
+    expect(channelHandleLabel(0)).toBe("작업정보 열기");
+  });
+
+  it("안 읽은 카드가 있으면 그 수를 이름에 담는다 — 배지 숫자는 낭독되지 않는다", () => {
+    expect(channelHandleLabel(3)).toBe("작업정보 열기 · 안 읽은 알아둘 것 3장");
   });
 });

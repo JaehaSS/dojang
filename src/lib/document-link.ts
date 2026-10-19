@@ -48,13 +48,14 @@ function absoluteSibling(link: string, sourcePath: string, rootPath?: string | n
   return (rootPath ? relativeToWorktree(absolute, rootPath) : null) ?? absolute;
 }
 
-function relativePath(link: string, sourcePath: string, rootPath?: string | null): string | null {
+function relativePath(link: string, sourcePath: string, rootPath?: string | null, image = false): string | null {
   const withoutFragment = link.split("#", 1)[0];
-  const decoded = safeDecode(withoutFragment.replace(LINE_SUFFIX, "")).replace(/\\/g, "/");
+  const decoded = safeDecode(image ? withoutFragment : withoutFragment.replace(LINE_SUFFIX, "")).replace(/\\/g, "/");
   if (!decoded || /[\0-\x1f\x7f]/.test(decoded)) return null;
+  if (image && (decoded.startsWith("//") || decoded.endsWith("/"))) return null;
   // 절대 경로는 문서 위치와 무관하다 — 루트 안이냐만 따진다.
   if (isAbsolutePath(decoded)) {
-    return rootPath ? relativeToWorktree(decoded, rootPath) : null;
+    return (rootPath ? relativeToWorktree(decoded, rootPath) : null) ?? (image ? decoded : null);
   }
   if (decoded.startsWith("~") || URI_SCHEME.test(decoded)) return null;
 
@@ -65,6 +66,27 @@ function relativePath(link: string, sourcePath: string, rootPath?: string | null
   if (sourcePath.includes("\\") || parts.some((part) => !part || part === "." || part === "..")) return null;
   const walked = walk(parts, decoded, 0);
   return walked?.join("/") || null;
+}
+
+/** 이미지 파일도 문서 디렉터리 기준으로 푼다. 실제 읽기 권한은 해당 workspace의 reader가 검증한다.
+ *  이미지 이름의 `:12`는 줄 번호가 아니며, URL의 쿼리·fragment는 파일명에 포함하지 않는다. */
+export function resolveDocumentImagePath(
+  value: string,
+  sourcePath: string,
+  rootPath?: string | null,
+): string | null {
+  let link = value.trim();
+  if (!link || /[\0-\x1f\x7f]/.test(link)) return null;
+  if (/^file:/i.test(link)) {
+    try {
+      const url = new URL(link);
+      if (url.hostname && url.hostname !== "localhost") return null;
+      link = url.pathname;
+    } catch {
+      return null;
+    }
+  }
+  return relativePath(link.split("?", 1)[0], sourcePath, rootPath, true);
 }
 
 /** Markdown 문서 링크는 브라우저 출처가 아니라 링크가 적힌 문서의 디렉터리를 기준으로 푼다.

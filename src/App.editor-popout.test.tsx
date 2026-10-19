@@ -26,6 +26,7 @@ const tauri = vi.hoisted(() => {
   const TASKS = [task(2, "conversation"), task(3, "conversation")];
   const empty: Record<string, unknown> = {};
   return {
+    emitTo: vi.fn(async () => undefined),
     invoke: vi.fn(async (cmd: string) => {
       if (!(cmd in empty)) {
         empty[cmd] = cmd === "notification_source_page"
@@ -35,6 +36,7 @@ const tauri = vi.hoisted(() => {
             : cmd === "attention_snapshot" ? { source_id: "test", observed_at: 1, items: [] }
             : cmd === "usage_snapshot" ? { vendors: [] }
             : cmd === "task_list" ? TASKS
+            : cmd === "editor_project_prepare" ? { root: "/r", label: "editor", launch: false }
             : cmd === "interaction_snapshot" ? { enabled: false, phase: "idle", items: [] }
             : cmd.includes("diff_stat") ? ""
             // 작업 상세 패널이 여는 보고서들 — 없음(null)이 정상 응답이다.
@@ -47,7 +49,11 @@ const tauri = vi.hoisted(() => {
 vi.mock("@tauri-apps/api/core", () => ({ invoke: tauri.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: () => Promise.resolve(() => undefined),
-  emitTo: () => Promise.resolve(),
+  emitTo: tauri.emitTo,
+}));
+vi.mock("./components/ide/HomeProjectEditor", () => ({
+  HomeProjectEditor: ({ onOpen }: { onOpen: (root: string) => Promise<string> }) =>
+    <button aria-label="테스트 프로젝트 에디터" onClick={() => void onOpen("/r")}>프로젝트 에디터</button>,
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn(), openPath: vi.fn() }));
@@ -104,6 +110,20 @@ afterEach(async () => {
 });
 
 describe("에디터 팝아웃과 코드 열", () => {
+  it("홈 프로젝트도 같은 창으로 열고 직전에 보던 세션을 다시 선택하면 전환한다", async () => {
+    await click("홈");
+    await click("테스트 프로젝트 에디터");
+    expect(tauri.invoke).toHaveBeenCalledWith("editor_project_prepare", { root: "/r" });
+    expect(tauri.invoke).toHaveBeenCalledWith("editor_window_open");
+    expect(tauri.invoke).not.toHaveBeenCalledWith("project_editor_open", expect.anything());
+    expect(tauri.emitTo).toHaveBeenCalledWith("editor", "editor://session-changed",
+      expect.objectContaining({ kind: "project", root: "/r" }));
+    tauri.emitTo.mockClear();
+    await openTask(2);
+    expect(tauri.emitTo).toHaveBeenCalledWith("editor", "editor://session-changed",
+      expect.objectContaining({ task_id: 2, host: "local" }));
+  });
+
   it("파일 탭을 보던 코드 열은 팝아웃과 함께 닫힌다", async () => {
     await click("파일 보기");
     expect(codeColumnShown()).toBe(true);
@@ -116,12 +136,33 @@ describe("에디터 팝아웃과 코드 열", () => {
   });
 
   it("다른 탭을 보던 코드 열은 팝아웃해도 그대로 둔다", async () => {
-    await click("Diff 보기");
+    await click("파일 보기");
     expect(codeColumnShown()).toBe(true);
+    // 코드 열 탭줄에서 작업정보로 옮긴다 — 파일 탭이 아닌 탭을 보는 상태를 만든다.
+    const activityTab = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((el) => el.textContent?.trim() === "작업정보");
+    expect(activityTab, "작업정보 탭이 있어야 한다").not.toBeNull();
+    await act(async () => activityTab!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
 
     await click("에디터를 새 창으로");
 
     expect(codeColumnShown()).toBe(true);
+  });
+
+  it("변경 칩은 코드 열이 아니라 트리 열의 변경 렌즈를 연다", async () => {
+    expect(codeColumnShown()).toBe(false);
+
+    await click("변경 보기");
+
+    expect(codeColumnShown()).toBe(false);
+    const lens = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((el) => el.textContent?.trim() === "변경" && el.getAttribute("aria-selected") === "true");
+    expect(lens, "트리 열의 변경 렌즈가 선택돼야 한다").not.toBeNull();
+    expect(button("변경 닫기")).not.toBeNull();
+
+    await click("변경 닫기");
+    expect(button("변경 보기")).not.toBeNull();
+    expect(button("파일 트리 닫기")).toBeNull();
   });
 
   it("나가 있는 동안 파일 탭을 열어 두었던 세션으로 옮기면 그 세션의 코드 열도 닫힌다", async () => {

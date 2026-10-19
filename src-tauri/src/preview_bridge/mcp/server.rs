@@ -15,6 +15,7 @@ use super::dispatch::{is_loopback_origin, Command, Dispatcher};
 use super::protocol::{
     classify, handle_request, tool_error, tool_failure, tool_result, Request, Tools,
 };
+use super::review::{ReviewBridge, ReviewCommand};
 use super::tokens::ControlTokens;
 
 /// 페이지에서 온 텍스트는 데이터다. 지시문으로 읽히지 않도록 앞머리를 붙여 돌려준다.
@@ -24,6 +25,8 @@ pub struct McpState {
     pub instance: String,
     pub tokens: ControlTokens,
     pub dispatcher: Arc<dyn Dispatcher>,
+    /// 리뷰 노트·이동 툴의 실제 구현. 웹뷰가 아니라 주석 저장소와 Diff 탭으로 간다.
+    pub review: Arc<dyn ReviewBridge>,
     pub tools: Tools,
 }
 
@@ -83,10 +86,12 @@ async fn handle_post(
             let Some(lease) = bearer(&headers).and_then(|token| state.tokens.acquire(token)) else {
                 return StatusCode::UNAUTHORIZED.into_response();
             };
+            // 토큰의 라벨이 곧 노트의 작성자다 — 토큰은 스폰마다 벤더 이름으로 발급된다.
+            let author = lease.label.clone();
             // A disconnected HTTP request must not lose accounting for queued UI work.
             tokio::spawn(async move {
                 let _lease = lease;
-                tool_call(&state, task_id, id, &name, &arguments).await
+                tool_call(&state, task_id, &author, id, &name, &arguments).await
             }).await.unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         },
         classified => answer(&state, task_id, &request, &classified),
@@ -173,6 +178,7 @@ fn answer(state: &McpState, task_id: i64, request: &Value, classified: &Request)
 async fn tool_call(
     state: &McpState,
     task_id: i64,
+    author: &str,
     id: Value,
     name: &str,
     arguments: &Value,
@@ -187,6 +193,18 @@ async fn tool_call(
     // 승인 결정은 CLI가 텍스트 본문의 JSON으로 읽는다. 실패도 도구 오류로 돌려 CLI가 거부로 다루게 한다.
     if name == crate::convo::interaction::APPROVAL_TOOL {
         return match crate::convo::question_local::approve(task_id, arguments).await {
+            Ok(text) => json_body(StatusCode::OK, &tool_result(id, text)),
+            Err(error) => json_body(StatusCode::OK, &tool_failure(id, error)),
+        };
+    }
+    // 리뷰 툴도 웹뷰로 가지 않는다. 인자 오류는 프로토콜 오류로, 저장소·diff 쪽 실패는
+    // 에이전트가 읽고 고칠 수 있는 `isError` 결과로 돌려준다.
+    if ReviewCommand::is_review_tool(name) {
+        let cmd = match ReviewCommand::from_tool_call(name, arguments) {
+            Ok(cmd) => cmd,
+            Err((code, message)) => return json_body(StatusCode::OK, &tool_error(id, code, message)),
+        };
+        return match state.review.run(task_id, author, cmd).await {
             Ok(text) => json_body(StatusCode::OK, &tool_result(id, text)),
             Err(error) => json_body(StatusCode::OK, &tool_failure(id, error)),
         };

@@ -4,11 +4,6 @@ use std::path::{Path, PathBuf};
 const MAX_SESSION_ENTRIES: usize = 20_000;
 const MAX_MODEL_CHARS: usize = 160;
 
-pub(super) fn codex_model(session_id: &str) -> Option<String> {
-    let root = codex_sessions_root()?;
-    codex_model_in(&root, session_id)
-}
-
 /// claude 세션 트랜스크립트에서 마지막으로 응답한 모델을 읽는다 — 스트림 관측(`system/init`)이
 /// 실패했을 때의 2차 방어선. codex와 달리 claude는 스트림에 모델이 실리므로 **평소에는 쓰이지
 /// 않는다**; 스트림 파싱이 어긋난 턴에서만 호출된다.
@@ -61,16 +56,7 @@ fn latest_assistant_model(path: &Path) -> Option<String> {
     latest
 }
 
-pub(super) fn codex_sessions_root() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("CODEX_HOME") {
-        return Some(PathBuf::from(root).join("sessions"));
-    }
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| PathBuf::from(home).join(".codex").join("sessions"))
-}
-
-fn codex_model_in(root: &Path, session_id: &str) -> Option<String> {
+pub(super) fn codex_model_in(root: &Path, session_id: &str) -> Option<String> {
     if !safe_session_id(session_id) {
         return None;
     }

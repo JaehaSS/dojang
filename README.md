@@ -19,7 +19,7 @@ prompt  →  isolated worktree  →  agent runs  →  review diff  →  approve 
 ## Why Dojang
 
 - **Your original branch stays untouched.** Every task gets a worktree and a dedicated branch under
-  `.praxis/worktrees/`. Discarding removes the whole worktree; commits and merges happen only on approval.
+  `.dojang/worktrees/`. Discarding removes the whole worktree; commits and merges happen only on approval.
 - **Run many tasks at once.** Eight by default (configurable from 1 to 64), each in its own worktree
   and terminal session.
 - **Mix vendors.** Pick Claude Code, Codex, or Antigravity (Gemini) per task. Send the same prompt to
@@ -80,7 +80,7 @@ Windows builds are produced by CI and **have not been verified on a real Windows
 [Platform support](#platform-support) for what is known not to work.
 
 1. Install [Git for Windows](https://git-scm.com/download/win). Dojang drives git, and runs
-   `.praxis-env-setup.sh` with the `sh.exe` that ships with it.
+   `.dojang-env-setup.sh` with the `sh.exe` that ships with it.
 2. Download `Dojang_<version>_x64-setup.exe` (or the `.msi`) from the [releases page](https://github.com/JaehaSS/dojang/releases/latest)
    and run it. The installer fetches WebView2 if it is missing.
 3. The installer is not code-signed, so SmartScreen warns on first run — click **More info → Run anyway**.

@@ -53,11 +53,43 @@ fn temp_repo() -> PathBuf {
 #[test]
 fn create_makes_isolated_worktree_and_branch() {
     let repo = temp_repo();
-    let wt = worktree::create_plain(&repo, "praxis/feat-x", None).expect("create");
+    let wt = worktree::create_plain(&repo, "dojang/feat-x", None).expect("create");
     assert!(wt.path.exists(), "worktree dir should exist");
-    assert_eq!(worktree::current_branch(&wt.path).unwrap(), "praxis/feat-x");
+    assert_eq!(wt.path, repo.join(".dojang/worktrees/dojang-feat-x"));
+    assert!(!repo.join(".praxis").exists());
+    assert_eq!(worktree::current_branch(&wt.path).unwrap(), "dojang/feat-x");
+    assert!(run_git_output(&repo, &["status", "--porcelain"]).is_empty());
     assert_eq!(wt.base, "main");
     std::fs::remove_dir_all(&repo).ok();
+}
+
+#[test]
+fn an_existing_legacy_worktree_can_still_be_approved_and_removed() {
+    let repo = temp_repo();
+    let mut wt = worktree::create_plain(&repo, "praxis/legacy", None).unwrap();
+    let legacy = repo.join(".praxis/worktrees/praxis-legacy");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    git(&repo, &["worktree", "move", wt.path.to_str().unwrap(), legacy.to_str().unwrap()]);
+    wt.path = legacy;
+    std::fs::write(wt.path.join("legacy-result.txt"), "preserved\n").unwrap();
+    wt.approve().unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("legacy-result.txt")).unwrap(), "preserved\n");
+    assert!(!wt.path.exists());
+    std::fs::remove_dir_all(repo).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn create_refuses_a_symlinked_project_storage_root() {
+    use std::os::unix::fs::symlink;
+    let repo = temp_repo();
+    let outside = temp_root::dir().join("worktree-storage-outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, repo.join(".dojang")).unwrap();
+    assert!(worktree::create_plain(&repo, "dojang/unsafe-storage", None).is_err());
+    assert!(!outside.join("worktrees").exists());
+    std::fs::remove_dir_all(repo).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
 }
 
 #[test]

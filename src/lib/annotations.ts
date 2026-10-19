@@ -65,9 +65,18 @@ export function orphanedAnnotations(annotations: RematchedAnnotation[]): Rematch
   return annotations.filter((annotation) => annotation.orphaned);
 }
 
-/** 재전송 대상(draft 상태) id 목록 — 액션바 `[주석 n건 재전송]`이 사용. */
+export const HUMAN_AUTHOR = "human";
+
+/** 에이전트가 MCP `review_comment_add`로 남긴 노트인가. author가 없는 옛 응답은 사람 주석이다. */
+export function isAgentAnnotation(annotation: Pick<RematchedAnnotation, "author">): boolean {
+  return annotation.author !== undefined && annotation.author !== HUMAN_AUTHOR;
+}
+
+/** 재전송 대상 id 목록 — 액션바 `[주석 n건 재전송]`이 사용. 사람이 쓴 draft만이다.
+ *  에이전트 노트는 `sent`로 태어나지만, 여기서도 한 번 더 거른다 — 에이전트가 쓴 글이
+ *  에이전트에게 되돌아가는 경로는 서버(`annotations_resend`)와 화면 양쪽에서 막는다. */
 export function draftAnnotationIds(annotations: RematchedAnnotation[]): string[] {
   return annotations
-    .filter((annotation) => annotation.status === "draft")
+    .filter((annotation) => annotation.status === "draft" && !isAgentAnnotation(annotation))
     .map((annotation) => annotation.id);
 }

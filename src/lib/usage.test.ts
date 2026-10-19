@@ -98,6 +98,23 @@ describe("windowLabel", () => {
 });
 
 describe("summarize", () => {
+  it("Antigravity 칩은 Gemini 대표 창을 명시하고 다른 그룹과 합치지 않는다", () => {
+    const v = vendor({
+      vendor: "agy", five_hour: win(10), weekly: win(2, 10080),
+      quota_groups: [
+        { label: "Gemini Models", five_hour: win(10), weekly: win(2, 10080) },
+        { label: "Claude and GPT models", five_hour: win(75), weekly: null },
+      ],
+    });
+    expect(summarize(v).text).toBe("Gemini 90% · 주 98%");
+    expect(worstRemaining(v)).toBe(90);
+    expect(summarize({ ...v, status: "stale" }).tone).toBe("muted");
+  });
+
+  it("Gemini 창이 없어도 반환된 그룹의 값을 표시한다", () => {
+    const v = vendor({ quota_groups: [{ label: "Claude and GPT models", five_hour: win(75), weekly: null }] });
+    expect(summarize(v).text).toBe("Claude and GPT models 25%");
+  });
   it("ok면 남은 비율을 두 윈도로", () => {
     const v = vendor({ five_hour: win(14), weekly: win(25, 10080) });
     expect(summarize(v)).toEqual({ text: "86% · 주 75%", tone: "value" });
@@ -297,6 +314,8 @@ describe("sourceLabel", () => {
     expect(sourceLabel("statusline")).toBe("statusline 브리지");
     expect(sourceLabel("oauth")).toBe("사용량 API");
     expect(sourceLabel("manual-token")).toBe("등록한 조회 토큰");
+    expect(sourceLabel("antigravity-local")).toBe("Antigravity 앱");
+    expect(sourceLabel("antigravity-oauth")).toBe("Antigravity 사용량 API");
   });
 
   it("모르는 값/없음은 null", () => {

@@ -16,19 +16,11 @@ pub(super) fn invalid_event(source: &str) -> ConvoEvent {
     }
 }
 
-pub(super) fn codex_context(session_id: &str, started_at: i64) -> Option<ConvoEvent> {
-    if !model_observation::safe_session_id(session_id) {
-        return None;
-    }
-    let root = model_observation::codex_sessions_root()?;
+pub(super) fn codex_context_at_root(root: &Path, session_id: &str, started_at: i64) -> Option<ConvoEvent> {
+    if !model_observation::safe_session_id(session_id) { return None; }
     let suffix = format!("{session_id}.jsonl");
-    let path = model_observation::find_session_file(&root, |name| name.ends_with(&suffix))?;
-    codex_context_in(
-        &path,
-        session_id,
-        started_at,
-        chrono::Utc::now().timestamp_millis(),
-    )
+    let path = model_observation::find_session_file(root, |name| name.ends_with(&suffix))?;
+    codex_context_in(&path, session_id, started_at, chrono::Utc::now().timestamp_millis())
 }
 
 pub(super) fn codex_context_in(

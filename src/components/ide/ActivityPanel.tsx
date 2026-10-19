@@ -46,11 +46,14 @@ const colorForState = (busy: boolean, state: ConvoStatus["state"] | undefined) =
   return "text-status-done";
 };
 
-/** 서브 에이전트 1건의 상태 표기 — 턴이 끝났는데 running이면 "중단"으로 표면화
- *  (프린트 모드 벤더 CLI는 턴 종료 시 백그라운드 서브 에이전트를 남기지 않는다). */
+/** 서브 에이전트 1건의 상태 표기. Claude의 기존 부모-턴 종료 해석은 유지하고, Codex는
+ *  명시 관측이 없으면 완료 확인 불가로 남긴다. */
 const subagentStatus = (busy: boolean, s: SubagentEntry) => {
   if (s.state === "failed") return { mark: "×", color: "text-status-failed", note: "실패" };
   if (s.state === "done") return { mark: "✓", color: "text-status-done", note: "완료" };
+  if (s.state === "stopped") return { mark: "○", color: "text-status-awaiting", note: "중단됨" };
+  if (s.state === "unknown") return { mark: "?", color: "text-text-muted", note: "완료 확인 불가" };
+  if (s.vendor === "codex") return { mark: "→", color: "text-primary-bright", note: "작업 중" };
   if (!busy) return { mark: "○", color: "text-status-awaiting", note: "미완료 — 턴 종료로 중단됨" };
   return { mark: "→", color: "text-primary-bright", note: "작업 중" };
 };
@@ -59,11 +62,15 @@ const subagentStatus = (busy: boolean, s: SubagentEntry) => {
 const subagentSummary = (busy: boolean, list: SubagentEntry[]): string => {
   const done = list.filter((s) => s.state === "done").length;
   const failed = list.filter((s) => s.state === "failed").length;
-  const open = list.length - done - failed;
+  const stopped = list.filter((s) => s.state === "stopped").length;
+  const unknown = list.filter((s) => s.state === "unknown").length;
+  const open = list.length - done - failed - stopped - unknown;
   const parts: string[] = [];
   if (done > 0) parts.push(`완료 ${done}`);
   if (open > 0) parts.push(busy ? `진행 ${open}` : `미완료 ${open}`);
   if (failed > 0) parts.push(`실패 ${failed}`);
+  if (stopped > 0) parts.push(`중단 ${stopped}`);
+  if (unknown > 0) parts.push(`확인 불가 ${unknown}`);
   return parts.join(" · ");
 };
 

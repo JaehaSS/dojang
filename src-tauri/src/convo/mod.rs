@@ -1,14 +1,15 @@
 //! 구조화 대화 (Phase 2) — 에이전트를 **스트리밍 구조화 출력**으로 돌려 raw 터미널 대신
-//! 마크다운 답변 + 툴콜 카드로 렌더. 멀티벤더: claude/codex는 구조화 스트림, agy는 텍스트.
+//! 마크다운 답변 + 툴콜 카드로 렌더. 멀티벤더: claude/codex/agy 모두 구조화 스트림.
 //!
 //! - `parse_event`: claude stream-json 한 줄 → `ConvoEvent` (순수, cargo test).
 //! - `parse_codex_event`: codex `exec --json` JSONL 한 줄 → `ConvoEvent` (실측 fixture 기반).
 //! - `run_turn`: 벤더별 한 턴 실행 → 이벤트 콜백. 멀티턴 resume은 벤더별
-//!   (claude `--resume <uuid>` / codex `exec resume <uuid>` / agy `--continue`).
+//!   (claude `--resume <uuid>` / codex `exec resume <uuid>` / agy `--conversation <id>`).
 //!
 //! 보안: 격리 worktree cwd에서 실행. 자율 편집 위해 벤더별 권한 스킵 플래그(ensemble headless와 동일 전제).
 
 mod agy_process;
+mod agy_stream;
 mod claude_stream;
 pub mod app_server;
 pub mod cli_runtime;
@@ -23,6 +24,7 @@ mod child_reaper;
 mod event_frame;
 pub mod prompt_metrics;
 mod context_observation;
+mod codex_subagents;
 mod model_observation;
 mod process_cleanup;
 pub mod question;
@@ -38,7 +40,7 @@ use serde::Serialize;
 
 /// 대화 벤더 — `task.agent`로 선택.
 /// gemini는 Antigravity(agy)로 라우팅: 개인용 gemini CLI 인증이 폐기됨(IneligibleTierError,
-/// Google 안내가 Antigravity 이관). agy는 구조화 스트림이 없어 텍스트 1블록 + `--continue` resume.
+/// Google 안내가 Antigravity 이관). agy는 `--output-format stream-json` + `--conversation <id>` resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Vendor {
     Claude,
@@ -64,7 +66,8 @@ impl Vendor {
     }
 }
 
-/// agy `--continue` resume 센티널 — 대화 id를 print 모드에서 얻을 수 없어 "직전 대화 이어가기"로 저장.
+/// agy `--continue` resume 센티널 — stream-json 이전(텍스트 print) 시절에 대화 id를 얻을 수 없어
+/// "직전 대화 이어가기"로 저장했다. 이미 저장된 작업과 텍스트만 내는 구버전 CLI를 위해 남긴다.
 pub const AGY_CONTINUE: &str = "continue";
 
 /// agy print 모드 자체 타임아웃(`--print-timeout`, 기본 5m0s) 상향값. 기본값은 유휴 워치독
@@ -132,6 +135,32 @@ pub enum DebateEndReason {
     Error,
 }
 
+/// Flat wire metadata is boxed so ordinary text/tool events keep their existing size.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SubagentMetadata {
+    pub vendor: String,
+    pub root_thread_id: String,
+    pub parent_thread_id: String,
+    pub child_thread_id: String,
+    pub execution_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_turn_id: Option<String>,
+    pub source_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub state: String,
+    pub observation_source: String,
+    pub observation_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+}
+
 /// 프론트로 보낼 단순화 대화 이벤트.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -148,7 +177,12 @@ pub enum ConvoEvent {
     /// A replaceable message snapshot. Only complete snapshots enter history.
     TextUpdate { item_id: String, text: String, complete: bool },
     /// Rich output from Code Mode, native tools, or MCP. Preserved in history.
-    ToolOutput { tool_use_id: String, contents: Vec<tool_output::Content> },
+    ToolOutput {
+        tool_use_id: String,
+        contents: Vec<tool_output::Content>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+    },
     /// 툴 사용 (파일 편집/명령 등) — 이름 + 요약.
     /// `tool_id`: 벤더가 주는 tool_use id(서브 에이전트 Task 상관관계용) — 이벤트 페이로드가
     /// task `id`와 flatten되므로 `id`라는 이름을 피한다. `parent_id`: 이 호출이
@@ -181,6 +215,20 @@ pub enum ConvoEvent {
     /// 메인 세션 `ModelSnapshot`과 kind를 분리한다: 같은 kind로 흘리면 세션 모델 칩과
     /// ensemble 병합이 서브 에이전트 모델로 덮인다.
     SubagentModel { parent_id: String, model: String },
+    /// Codex 자식 세션의 수명주기 관측. 호출 도구의 완료와 자식 세션의 완료를 분리한다.
+    SubagentUpdate {
+        #[serde(flatten)]
+        metadata: Box<SubagentMetadata>,
+    },
+    /// 공개적으로 확인한 자식의 최종 메시지. 암호화된 세션 메시지와 reasoning은 투영하지 않는다.
+    SubagentMessage {
+        parent_id: String,
+        source_key: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        child_turn_id: Option<String>,
+        text: String,
+        is_error: bool,
+    },
     /// 실행 모델 관측 — 요청값과 공급자가 실제 사용한 resolved 값을 분리해 비교 재현성을 보존.
     ModelSnapshot {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -430,7 +478,7 @@ pub fn parse_events(line: &str) -> Vec<ConvoEvent> {
             out
         }
         "user" => {
-            // tool_result 블록 전부 — content는 문자열 또는 [{type:text, text}].
+            // tool_result 블록 전부 — 텍스트 요약과 공개 이미지 출력을 따로 보존한다.
             let blocks = v
                 .get("message")
                 .and_then(|m| m.get("content"))
@@ -470,6 +518,19 @@ pub fn parse_events(line: &str) -> Vec<ConvoEvent> {
                                 .map(str::to_string),
                             parent_id: parent_id.clone(),
                         });
+                        if let Some(tool_use_id) = b["tool_use_id"].as_str() {
+                            let contents: Vec<_> = tool_output::contents(&b["content"])
+                                .into_iter()
+                                .filter(|content| matches!(content, tool_output::Content::Image { .. }))
+                                .collect();
+                            if !contents.is_empty() {
+                                out.push(ConvoEvent::ToolOutput {
+                                    tool_use_id: tool_use_id.to_string(),
+                                    contents,
+                                    parent_id: parent_id.clone(),
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -668,9 +729,10 @@ pub fn parse_codex_event(line: &str) -> ConvoEvent {
     }
 }
 
-/// 벤더별 한 턴 실행. 멀티턴이면 `resume`(claude/codex: id, agy: continue 센티널) 전달.
+/// 벤더별 한 턴 실행. 멀티턴이면 `resume`(claude/codex/agy: id, 구 agy: continue 센티널) 전달.
 /// 벤더별 실행 인자 구성 — run_turn에서 분리(벤더 분기 격리 + run_turn 축소).
-/// resume 규약: claude `--resume <id>`, codex `exec resume <id>`(서브커맨드), agy `--continue`(센티널).
+/// resume 규약: claude `--resume <id>`, codex `exec resume <id>`(서브커맨드),
+/// agy `--conversation <id>`(센티널이면 `--continue`).
 /// 자율 편집 권한 플래그는 ensemble headless와 동일 전제(격리 worktree).
 /// `model`: 설정된 벤더 기본 모델(`None`/빈 문자열이면 미주입) — claude `--model`, codex는 `exec` 뒤 `-m`, agy `--model`.
 #[cfg(test)]
@@ -792,9 +854,17 @@ fn vendor_command_with_contract(
                 "--dangerously-skip-permissions",
                 "--print-timeout",
                 AGY_PRINT_TIMEOUT,
+                "--output-format",
+                "stream-json",
             ]);
-            if resume.is_some() {
-                c.arg("--continue"); // print 모드에선 대화 id를 못 얻어 "직전 이어가기"로 resume.
+            match resume {
+                Some(AGY_CONTINUE) => {
+                    c.arg("--continue"); // 대화 id 없이 저장된 옛 작업 — "직전 이어가기".
+                }
+                Some(id) => {
+                    c.args(["--conversation", id]);
+                }
+                None => {}
             }
             if let Some(m) = model {
                 // agy CLI는 `-m` 단축 플래그가 없다(`--model`만 지원) — `-m`이면
@@ -885,7 +955,7 @@ pub fn run_turn(
     vendor: Vendor,
     bin: &str,
     model: Option<&str>,
-    on_spawn: impl FnOnce(u32),
+    on_spawn: impl FnMut(u32),
     on_event: impl FnMut(ConvoEvent),
 ) -> Result<TurnOutcome, String> {
     run_turn_with_effort(
@@ -920,7 +990,7 @@ pub fn run_turn_with_effort(
     image_paths: &[String],
     session_name: Option<&str>,
     mcp: Option<&crate::preview_bridge::mcp::McpInjection>,
-    on_spawn: impl FnOnce(u32),
+    on_spawn: impl FnMut(u32),
     on_event: impl FnMut(ConvoEvent),
 ) -> Result<TurnOutcome, String> {
     run_turn_with_contract(cwd, message, resume, idle_timeout_secs, vendor, bin, model,
@@ -942,6 +1012,55 @@ pub(super) fn run_turn_with_contract(
     session_name: Option<&str>,
     mcp: Option<&crate::preview_bridge::mcp::McpInjection>,
     questions: bool,
+    mut on_spawn: impl FnMut(u32),
+    mut on_event: impl FnMut(ConvoEvent),
+) -> Result<TurnOutcome, String> {
+    // agy의 서버 일시 장애(503)만 같은 턴 안에서 다시 띄운다. 출력이 없었으므로 대화에
+    // 남은 것이 없고, 매 시도의 pgid를 `on_spawn`으로 다시 알려 중단이 새 프로세스에 닿는다.
+    let mut delays = agy_process::TRANSIENT_RETRY_DELAYS.iter();
+    loop {
+        let mut transient = false;
+        let result = run_turn_once(
+            cwd,
+            message,
+            resume,
+            idle_timeout_secs,
+            vendor,
+            bin,
+            model,
+            reasoning_effort,
+            service_tier,
+            image_paths,
+            session_name,
+            mcp,
+            questions,
+            &mut transient,
+            &mut on_spawn,
+            &mut on_event,
+        );
+        match delays.next() {
+            Some(delay) if transient => std::thread::sleep(*delay),
+            _ => return result,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_turn_once(
+    cwd: &str,
+    message: &str,
+    resume: Option<&str>,
+    idle_timeout_secs: u64,
+    vendor: Vendor,
+    bin: &str,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    service_tier: Option<&str>,
+    image_paths: &[String],
+    session_name: Option<&str>,
+    mcp: Option<&crate::preview_bridge::mcp::McpInjection>,
+    questions: bool,
+    transient: &mut bool,
     on_spawn: impl FnOnce(u32),
     mut on_event: impl FnMut(ConvoEvent),
 ) -> Result<TurnOutcome, String> {
@@ -981,6 +1100,11 @@ pub(super) fn run_turn_with_contract(
     }
     // 아래 경로들이 `?`로 이탈해도 자식은 회수된다 — 가드가 없으면 좀비로 남는다.
     let observation_started_at = chrono::Utc::now().timestamp_millis();
+    // The observer uses the environment that will be applied to this Command, including a
+    // per-invocation CODEX_HOME override injected by the runtime.
+    let codex_sessions = (vendor == Vendor::Codex)
+        .then(|| codex_subagents::sessions_root_from_command(&c, cwd))
+        .flatten();
     let mut child = match c.spawn() {
         Ok(child) => child_reaper::ReapOnDrop::new(child),
         Err(e) => {
@@ -1011,35 +1135,7 @@ pub(super) fn run_turn_with_contract(
     };
     let stderr = child.stderr.take();
     if vendor == Vendor::Agy {
-        let output = agy_process::capture(&mut child, stdout, stderr, pid, idle_timeout_secs)?;
-        let text = output.stdout.trim();
-        if text.is_empty() {
-            return Err(format!(
-                "agy 출력이 없습니다 (인증/모델 설정 확인, {}){}",
-                output.exit_desc,
-                fmt_stderr(&output.stderr_tail)
-            ));
-        }
-        on_event(ConvoEvent::Text {
-            text: text.to_string(),
-            parent_id: None,
-        });
-        on_event(ConvoEvent::Result {
-            text: String::new(),
-            is_error: false,
-            session_id: AGY_CONTINUE.into(),
-            cost_usd: 0.0,
-            num_turns: 0,
-            tokens_in: 0,
-            tokens_out: 0,
-        });
-        return Ok(TurnOutcome {
-            session_id: AGY_CONTINUE.into(),
-            timed_out: output.timed_out,
-            exit_desc: output.exit_desc,
-            stderr_tail: output.stderr_tail,
-            halted: None,
-        });
+        return finish_agy_turn(&mut child, stdout, stderr, pid, idle_timeout_secs, resume, transient, on_event);
     }
 
     // stderr 테일 수집 — 프로세스가 result 없이 죽었을 때 진짜 사인(ENOSPC, resume 실패,
@@ -1068,7 +1164,7 @@ pub(super) fn run_turn_with_contract(
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let timed_out_flag = timed_out.clone();
     let (beat_tx, beat_rx) = std::sync::mpsc::channel::<Beat>();
-    std::thread::spawn(move || loop {
+    let watchdog_handle = std::thread::spawn(move || loop {
         match beat_rx.recv_timeout(std::time::Duration::from_secs(idle_timeout_secs.max(1))) {
             Ok(Beat::Line) => {}     // 활동 → 데드라인 리셋
             Ok(Beat::Done) => break, // 정상 종료 → 워치독 해제 (kill 금지 — pid 재사용 방지)
@@ -1127,6 +1223,11 @@ pub(super) fn run_turn_with_contract(
     }
 
     let mut last_session = resume.unwrap_or("").to_string();
+    let mut codex_observer = (vendor == Vendor::Codex)
+        .then(|| codex_subagents::Observer::new(codex_sessions.clone(), observation_started_at));
+    if let (Some(observer), Some(session_id)) = (codex_observer.as_mut(), resume) {
+        observer.set_root(session_id);
+    }
     // 스트림에서 실제 모델을 확보했는지 — 못 했을 때만 트랜스크립트 폴백을 탄다.
     let mut stream_model_seen = false;
     let mut subagent_guard = turn_guard::SubagentTurnGuard::default();
@@ -1138,20 +1239,45 @@ pub(super) fn run_turn_with_contract(
     // 마지막 `result` 줄 시점의 생존자 스냅샷. EOF에서만 보면 놓친다 — 탈출한 자식이 vendor의
     // stdout을 물려받고 있으면 그 자식이 죽어야 EOF가 오고, 그때는 이미 잡을 것이 없다.
     let mut survivors_at_result: Vec<process_cleanup::Survivor> = Vec::new();
-    let mut stdout = BufReader::new(stdout);
+    // stdout may be quiet while Codex flushes a child session.  A tiny transport reader keeps the
+    // existing serial event callback on this thread available for bounded observer ticks.
+    enum StdoutRead { Line(String), Eof, Error(String) }
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::sync_channel::<StdoutRead>(4);
+    let stdout_handle = std::thread::spawn(move || {
+        let mut stdout = BufReader::new(stdout);
+        loop {
+            match event_frame::read_line(&mut stdout) {
+                Ok(Some(line)) => if stdout_tx.send(StdoutRead::Line(line)).is_err() { break; },
+                Ok(None) => { let _ = stdout_tx.send(StdoutRead::Eof); break; }
+                Err(error) => { let _ = stdout_tx.send(StdoutRead::Error(error.to_string())); break; }
+            }
+        }
+    });
     let mut stream_error = None;
     let mut text_stream = claude_stream::TextStream::default();
     loop {
-        let line = match event_frame::read_line(&mut stdout) {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(error) => {
+        let line = match stdout_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(StdoutRead::Line(line)) => line,
+            Ok(StdoutRead::Eof) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(StdoutRead::Error(error)) => {
                 stream_error = Some(format!("{} 출력 읽기 실패: {error}", vendor.bin()));
                 crate::verify::kill_group(pid);
                 break;
             }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(observer) = codex_observer.as_mut() {
+                    let events = observer.tick();
+                    if !events.is_empty() { let _ = beat_tx.send(Beat::Line); }
+                    for event in events { on_event(event); }
+                }
+                continue;
+            }
         };
         let _ = beat_tx.send(Beat::Line);
+        if let Some(observer) = codex_observer.as_mut() {
+            for event in observer.tick() { on_event(event); }
+            for event in observer.observe_stream_line(&line) { on_event(event); }
+        }
         if let Some(event) = subagent_guard.observe_raw_line(&line) {
             on_event(event);
         }
@@ -1171,7 +1297,10 @@ pub(super) fn run_turn_with_contract(
             subagent_guard.observe_event(&ev);
             ev = subagent_guard.sanitize_event(ev);
             match &ev {
-                ConvoEvent::SessionInit { session_id } => last_session = session_id.clone(),
+                ConvoEvent::SessionInit { session_id } => {
+                    last_session = session_id.clone();
+                    if let Some(observer) = codex_observer.as_mut() { observer.set_root(session_id); }
+                }
                 ConvoEvent::Result { session_id, .. } if !session_id.is_empty() => {
                     last_session = session_id.clone()
                 }
@@ -1193,7 +1322,12 @@ pub(super) fn run_turn_with_contract(
         }
     }
     let _ = beat_tx.send(Beat::Done);
+    let _ = watchdog_handle.join();
     let (exit_desc, stderr_tail) = finalize(&mut child, stderr_handle);
+    let _ = stdout_handle.join();
+    if let Some(observer) = codex_observer.as_mut() {
+        for event in observer.finish() { on_event(event); }
+    }
     if let Some(error) = stream_error {
         return Err(error);
     }
@@ -1212,14 +1346,14 @@ pub(super) fn run_turn_with_contract(
     }
     if vendor == Vendor::Codex {
         // codex는 스트림에 모델을 싣지 않아 트랜스크립트가 유일한 관측원이다.
-        if let Some(resolved) = model_observation::codex_model(&last_session) {
+        if let Some(resolved) = codex_sessions.as_deref().and_then(|root| model_observation::codex_model_in(root, &last_session)) {
             on_event(ConvoEvent::ModelSnapshot {
                 requested: None,
                 resolved: Some(resolved),
                 source: "codex_session".into(),
             });
         }
-        let observation = context_observation::codex_context(&last_session, observation_started_at)
+        let observation = codex_sessions.as_deref().and_then(|root| context_observation::codex_context_at_root(root, &last_session, observation_started_at))
             .unwrap_or_else(|| context_observation::invalid_event("codex_session"));
         on_event(observation);
     } else if vendor == Vendor::Claude && !stream_model_seen {
@@ -1249,6 +1383,73 @@ pub(super) fn run_turn_with_contract(
             halted: None,
         })
     }
+}
+
+/// agy 턴 — 줄이 오는 대로 이벤트로 흘린다. 읽기 종료는 EOF가 아니라 CLI 본체의 종료다:
+/// agy가 남긴 분리 자식이 stdout을 물고 있으면 EOF가 오지 않는다(`agy_process::capture`).
+/// Result는 프로세스가 끝날 때까지 붙들어, 출력 없는 503 실패를 재시도할지 먼저 판정한다.
+#[allow(clippy::too_many_arguments)]
+fn finish_agy_turn(
+    child: &mut std::process::Child,
+    stdout: std::process::ChildStdout,
+    stderr: Option<std::process::ChildStderr>,
+    pid: u32,
+    idle_timeout_secs: u64,
+    resume: Option<&str>,
+    transient: &mut bool,
+    mut on_event: impl FnMut(ConvoEvent),
+) -> Result<TurnOutcome, String> {
+    let mut stream = agy_stream::AgyStream::default();
+    let mut held_result = None;
+    let mut route = |event: ConvoEvent, held: &mut Option<ConvoEvent>| match event {
+        ConvoEvent::Result { .. } => *held = Some(event),
+        event => on_event(event),
+    };
+    let output = agy_process::capture(child, stdout, stderr, pid, idle_timeout_secs, |line| {
+        for event in stream.observe_line(line) {
+            route(event, &mut held_result);
+        }
+    })?;
+    for event in stream.finish() {
+        route(event, &mut held_result);
+    }
+    let session_id = stream
+        .session_id()
+        .or(resume)
+        .unwrap_or_default()
+        .to_string();
+    let failure = match &held_result {
+        Some(ConvoEvent::Result { is_error: false, .. }) => None,
+        Some(ConvoEvent::Result { text, .. }) => Some(text.clone()),
+        _ => Some(String::new()),
+    };
+    if let Some(failure) = failure.as_deref() {
+        *transient = !output.timed_out
+            && !stream.produced_output()
+            && (agy_process::is_transient_failure(failure)
+                || agy_process::is_transient_failure(&output.stderr_tail));
+        // 대화 id조차 없으면 이어갈 것이 없다 — 첫 턴이 시작도 못 한 실패로 노출한다.
+        if *transient || session_id.is_empty() {
+            let stderr = match output.stderr_tail.trim() {
+                "" => String::new(),
+                tail => format!("\nstderr: {tail}"),
+            };
+            return Err(match failure.trim() {
+                "" => format!("agy 출력이 없습니다 (인증/모델 설정 확인, {}){stderr}", output.exit_desc),
+                reason => format!("{reason} ({}){stderr}", output.exit_desc),
+            });
+        }
+    }
+    if let Some(result) = held_result {
+        on_event(result);
+    }
+    Ok(TurnOutcome {
+        session_id,
+        timed_out: output.timed_out,
+        exit_desc: output.exit_desc,
+        stderr_tail: output.stderr_tail,
+        halted: None,
+    })
 }
 
 #[cfg(test)]
@@ -1319,6 +1520,56 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("exit 3"), "err={err}");
         assert!(err.contains("no space left"), "err={err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// agy 자격 확인이 503으로 실패하면 같은 턴 안에서 다시 띄우고, 매 시도의 pgid를 알린다.
+    #[test]
+    #[cfg(unix)]
+    fn agy_retries_transient_unavailable_and_reports_each_spawn() {
+        let dir = crate::testtmp::dir().join(format!("praxis-turn-agy-503-{}", std::process::id()));
+        let counter = dir.join("count");
+        let script = write_stub(
+            &dir,
+            &format!(
+                "#!/bin/sh\nif [ ! -f '{c}' ]; then touch '{c}'; echo 'error: Eligibility check failed: UNAVAILABLE (code 503): The service is currently unavailable.' >&2; exit 1; fi\necho answer\n",
+                c = counter.display()
+            ),
+        );
+        let mut pids = Vec::new();
+        let mut texts = Vec::new();
+        let out = run_turn(
+            dir.to_str().unwrap(), "hi", None, 60,
+            Vendor::Agy, script.to_str().unwrap(), None,
+            |pid| pids.push(pid),
+            |event| if let ConvoEvent::Text { text, .. } = event { texts.push(text) },
+        )
+        .expect("두 번째 시도는 성공해야 함");
+        assert_eq!(out.session_id, AGY_CONTINUE);
+        assert_eq!(pids.len(), 2);
+        assert_ne!(pids[0], pids[1]);
+        assert_eq!(texts, vec!["answer".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 쿼터 소진은 기다려도 풀리지 않는다 — 재시도 없이 한 번에 실패한다.
+    #[test]
+    #[cfg(unix)]
+    fn agy_does_not_retry_quota_exhaustion() {
+        let dir = crate::testtmp::dir().join(format!("praxis-turn-agy-quota-{}", std::process::id()));
+        let script = write_stub(
+            &dir,
+            "#!/bin/sh\necho 'Error: Individual quota reached. Resets in 42h.' >&2\nexit 1\n",
+        );
+        let mut spawns = 0;
+        let err = run_turn(
+            dir.to_str().unwrap(), "hi", None, 60,
+            Vendor::Agy, script.to_str().unwrap(), None,
+            |_| spawns += 1, |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(spawns, 1);
+        assert!(err.contains("Individual quota reached"), "err={err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1402,6 +1653,43 @@ mod tests {
                 parent_id: None,
             }
         );
+    }
+
+    #[test]
+    fn claude_tool_images_survive_storage_and_keep_subagent_ownership() {
+        let line = serde_json::json!({
+            "type": "user", "parent_tool_use_id": "parent-1",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "image-1",
+                "content": [
+                    {"type": "text", "text": "도표"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AQ=="}},
+                    {"type": "image", "source": {"type": "base64", "media_type": "text/html", "data": "AQ=="}},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "%%"}}
+                ]
+            }]}
+        }).to_string();
+        let events = parse_events(&line);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], ConvoEvent::ToolResult { summary, .. } if summary == "도표"));
+        let stored: serde_json::Value = serde_json::from_str(&stored_event_json(&events[1], None).unwrap()).unwrap();
+        assert_eq!(stored, serde_json::json!({
+            "kind": "tool_output", "tool_use_id": "image-1", "parent_id": "parent-1",
+            "contents": [{"type": "image", "url": "data:image/png;base64,AQ=="}]
+        }));
+    }
+
+    #[test]
+    fn claude_image_only_tool_result_is_visible_in_the_main_session() {
+        let line = serde_json::json!({
+            "type": "user", "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "image-1",
+                "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "AQ=="}}]
+            }]}
+        }).to_string();
+        let events = parse_events(&line);
+        assert!(matches!(&events[1], ConvoEvent::ToolOutput { parent_id: None, .. }));
+        assert!(!stored_event_json(&events[1], None).unwrap().contains("parent_id"));
     }
 
     /// TodoWrite는 작업 계획을 통째로 다시 보내는 툴이라 캔버스 노드의 원천이 된다.
@@ -2276,6 +2564,24 @@ mod tests {
                 .expect("--print-timeout 주입");
             assert_eq!(args[pos + 1], AGY_PRINT_TIMEOUT);
         }
+    }
+
+    #[test]
+    fn vendor_command_agy_streams_json_and_resumes_by_conversation_id() {
+        let args = cmd_args(&vendor_command("agy", Vendor::Agy, "hi", None, None));
+        let pos = args.iter().position(|a| a == "--output-format").expect("stream-json 주입");
+        assert_eq!(args[pos + 1], "stream-json");
+        assert!(!args.iter().any(|a| a == "--continue" || a == "--conversation"));
+
+        let args = cmd_args(&vendor_command("agy", Vendor::Agy, "hi", Some("c-1"), None));
+        let pos = args.iter().position(|a| a == "--conversation").expect("대화 id resume");
+        assert_eq!(args[pos + 1], "c-1");
+        assert!(!args.iter().any(|a| a == "--continue"));
+
+        // 대화 id 없이 저장된 옛 작업은 "직전 대화 이어가기"로만 이을 수 있다.
+        let args = cmd_args(&vendor_command("agy", Vendor::Agy, "hi", Some(AGY_CONTINUE), None));
+        assert!(args.iter().any(|a| a == "--continue"));
+        assert!(!args.iter().any(|a| a == "--conversation"));
     }
 
     #[test]

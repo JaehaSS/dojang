@@ -86,9 +86,13 @@ pub fn fingerprint_with_base(
     let Ok(mut paths) = parse_paths(&tracked) else {
         return unknown("path");
     };
-    let Ok(untracked_paths) = parse_paths(&untracked) else {
+    let Ok(mut untracked_paths) = parse_paths(&untracked) else {
         return unknown("path");
     };
+    // Tracked configuration files remain source input.  Ignore only untracked
+    // alternatives so the selected config below is the sole project setting
+    // that influences the fingerprint.
+    untracked_paths.retain(|path| !is_validate_config_path(path));
     paths.extend(untracked_paths);
     paths.sort();
     paths.dedup();
@@ -97,17 +101,13 @@ pub fn fingerprint_with_base(
             return unknown("content");
         }
     }
-    let validate = root.join(".praxis/validate.toml");
-    if validate.exists()
-        && hash_path(
-            &root,
-            Path::new(".praxis/validate.toml"),
-            &mut digest,
-            &mut total,
-        )
-        .is_err()
-    {
-        return unknown("validate");
+    if let Some(validate) = crate::verify::validate_config_path(&root) {
+        let Ok(relative) = validate.strip_prefix(&root) else {
+            return unknown("validate");
+        };
+        if hash_path(&root, relative, &mut digest, &mut total).is_err() {
+            return unknown("validate");
+        }
     }
     feed(
         &mut digest,
@@ -123,6 +123,12 @@ pub fn fingerprint_with_base(
         fingerprint: Some(format!("git-v1:sha256:{:x}", digest.finalize())),
         reason: None,
     }
+}
+
+fn is_validate_config_path(path: &Path) -> bool {
+    crate::project_paths::DIRS
+        .iter()
+        .any(|dir| path == Path::new(dir).join("validate.toml"))
 }
 fn unknown(reason: &'static str) -> FingerprintObservation {
     FingerprintObservation {
@@ -251,10 +257,41 @@ mod tests {
         std::fs::remove_file(root.join("tracked.txt")).unwrap();
         let deleted = fingerprint(&root, &spec).fingerprint().unwrap();
         assert_ne!(untracked, deleted);
-        std::fs::create_dir_all(root.join(".praxis")).unwrap();
-        std::fs::write(root.join(".praxis/validate.toml"), "test = \"true\"\n").unwrap();
+        std::fs::create_dir_all(root.join(crate::project_paths::DIR)).unwrap();
+        std::fs::write(
+            root.join(crate::project_paths::DIR).join("validate.toml"),
+            "test = \"true\"\n",
+        )
+        .unwrap();
         let with_validate = fingerprint(&root, &spec).fingerprint().unwrap();
         assert_ne!(deleted, with_validate);
+    }
+
+    #[test]
+    fn hashes_only_the_selected_validate_config() {
+        let root = fixture("validate-priority");
+        std::fs::create_dir_all(root.join(crate::project_paths::LEGACY_DIR)).unwrap();
+        let legacy = root
+            .join(crate::project_paths::LEGACY_DIR)
+            .join("validate.toml");
+        std::fs::write(&legacy, "test = \"legacy\"\n").unwrap();
+        let legacy_selected = fingerprint(&root, &ValidateSpec::default())
+            .fingerprint()
+            .unwrap();
+
+        std::fs::create_dir_all(root.join(crate::project_paths::DIR)).unwrap();
+        let new = root.join(crate::project_paths::DIR).join("validate.toml");
+        std::fs::write(&new, "test = \"new\"\n").unwrap();
+        let new_selected = fingerprint(&root, &ValidateSpec::default())
+            .fingerprint()
+            .unwrap();
+        assert_ne!(legacy_selected, new_selected);
+
+        std::fs::write(&legacy, "test = \"changed legacy\"\n").unwrap();
+        let legacy_changed = fingerprint(&root, &ValidateSpec::default())
+            .fingerprint()
+            .unwrap();
+        assert_eq!(new_selected, legacy_changed);
     }
 
     #[test]

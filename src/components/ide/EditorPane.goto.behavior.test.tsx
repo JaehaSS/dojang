@@ -35,6 +35,15 @@ interface StubProvider {
   provideReferences?: (model: unknown, position: unknown) => Promise<unknown[]>;
 }
 
+interface SemanticProvider {
+  getLegend: () => { tokenTypes: string[]; tokenModifiers: string[] };
+  provideDocumentSemanticTokens: (
+    model: unknown,
+    lastResultId: string | null,
+    token: { isCancellationRequested: boolean },
+  ) => Promise<unknown>;
+}
+
 const h = vi.hoisted(() => ({
   commands: new Map<number, () => void>(),
   // 우클릭 메뉴에 걸리는 동작 — 단축키는 commands에도 함께 꽂는다.
@@ -44,6 +53,13 @@ const h = vi.hoisted(() => ({
   providers: {} as Record<string, StubProvider>,
   // 분할에서는 칸마다 프로바이더가 하나씩 걸린다 — 몇 개가 걸렸고 누가 답하는지를 봐야 한다.
   definitionProviders: [] as StubProvider[],
+  semanticProviders: [] as SemanticProvider[],
+  semanticDisposals: [] as ReturnType<typeof vi.fn>[],
+  deferMount: false,
+  mount: null as (() => void) | null,
+  monaco: null as unknown,
+  modelsByPath: new Map<string, unknown>(),
+  options: null as Record<string, unknown> | null,
   opener: null as {
     openCodeEditor: (src: unknown, uri: unknown) => boolean;
   } | null,
@@ -94,11 +110,16 @@ const h = vi.hoisted(() => ({
 vi.mock("@monaco-editor/react", async () => {
   const React = await import("react");
   return {
-    default: ({ onMount }: { onMount: (ed: unknown, m: unknown) => void }) => {
+    default: ({ onMount, options, path }: { onMount: (ed: unknown, m: unknown) => void; options?: Record<string, unknown>; path?: string }) => {
       React.useEffect(() => {
-        onMount(h.editor, {
+        if (h.monaco == null) h.monaco = {
           KeyMod: { CtrlCmd: CTRL_CMD, Alt: ALT, Shift: SHIFT },
           KeyCode: { KeyS: 49, KeyB: KEY_B, KeyL: KEY_L, F7: KEY_F7, F12: KEY_F12 },
+          Emitter: class {
+            event = () => ({ dispose: () => undefined });
+            fire() {}
+            dispose() {}
+          },
           Uri: {
             parse: (p: string) => ({ toString: () => `file://${p}` }),
             file: (p: string) => ({ toString: () => `abs://${p}` }),
@@ -128,6 +149,12 @@ vi.mock("@monaco-editor/react", async () => {
               h.providers.references = p;
               return { dispose: () => undefined };
             },
+            registerDocumentSemanticTokensProvider: (_lang: string, p: SemanticProvider) => {
+              h.semanticProviders.push(p);
+              const dispose = vi.fn();
+              h.semanticDisposals.push(dispose);
+              return { dispose };
+            },
           },
           editor: {
             MouseTargetType: { CONTENT_TEXT: 6 },
@@ -139,8 +166,15 @@ vi.mock("@monaco-editor/react", async () => {
               return { dispose: () => undefined };
             },
           },
-        });
+        };
+        const editor = path != null && h.modelsByPath.has(path)
+          ? { ...h.editor, getModel: () => h.modelsByPath.get(path) }
+          : h.editor;
+        const mount = () => onMount(editor, h.monaco);
+        h.mount = mount;
+        if (!h.deferMount) mount();
       }, [onMount]);
+      h.options = options ?? null;
       return React.createElement("div", { "data-testid": "monaco" });
     },
   };
@@ -164,7 +198,11 @@ vi.mock("../../lib/composer-focus", async (original) => ({
 // lib/monaco는 monaco-editor 번들 전체(클립보드 기여 등 DOM API 의존)를 끌어온다 —
 // jsdom에서는 로드 자체가 실패하므로 여기서 필요한 것만 대신 내놓는다.
 vi.mock("../../lib/monaco", () => ({
-  langFromPath: (path: string) => (path.endsWith(".rs") ? "rust" : "plaintext"),
+  langFromPath: (path: string) => {
+    if (path.endsWith(".rs")) return "rust";
+    if (path.endsWith(".java")) return "java";
+    return "plaintext";
+  },
 }));
 
 import { EditorPane, type OpenFile } from "./EditorPane";
@@ -248,9 +286,10 @@ function click(
 }
 
 /** Monaco가 ⌘클릭·⌘hover에서 넘겨주는 모델 스텁. */
-const model = (path = FILE.path, text = "편집 중") => ({
+const model = (path = FILE.path, text = "편집 중", version = 1) => ({
   uri: { toString: () => `file://${path}` },
   getValue: () => text,
+  getVersionId: () => version,
 });
 
 beforeEach(() => {
@@ -260,6 +299,13 @@ beforeEach(() => {
   h.mouseUp = [];
   h.providers = {};
   h.definitionProviders = [];
+  h.semanticProviders = [];
+  h.semanticDisposals = [];
+  h.deferMount = false;
+  h.mount = null;
+  h.monaco = null;
+  h.modelsByPath.clear();
+  h.options = null;
   h.opener = null;
   h.editor.revealLineInCenter.mockClear();
   h.editor.setPosition.mockClear();
@@ -277,6 +323,295 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+});
+
+const JAVA_SEMANTIC_TOKENS = {
+  legend: {
+    token_types: ["class", "method", "variable"],
+    token_modifiers: [],
+  },
+  data: [0, 0, 5, 0, 0],
+};
+
+describe("EditorPane 의미 토큰과 언어 상태", () => {
+  it("첫 파일이 늦게 mount되어도 Java semantic provider를 등록한다", async () => {
+    const javaFile: OpenFile = {
+      ...FILE,
+      key: fileTabKey("src/Main.java"),
+      path: "src/Main.java",
+      content: "class Main { void run() { int value = 1; } }",
+    };
+    const onSemanticTokens = vi.fn().mockResolvedValue(JAVA_SEMANTIC_TOKENS);
+    h.deferMount = true;
+    h.editor.getModel.mockReturnValue(model(javaFile.path));
+    render({
+      files: [javaFile],
+      activeKey: javaFile.key,
+      retainedPaths: [javaFile.path],
+      onSemanticTokens,
+    });
+
+    expect(onSemanticTokens).not.toHaveBeenCalled();
+    await act(async () => h.mount?.());
+    await act(async () => {});
+
+    expect(onSemanticTokens).toHaveBeenCalledWith(javaFile.path, javaFile.content);
+    expect(h.semanticProviders).toHaveLength(1);
+    expect(h.semanticProviders[0].getLegend().tokenTypes).toEqual(
+      expect.arrayContaining(["class", "method", "variable"]),
+    );
+  });
+
+  it("첫 legend 조회 중 편집해도 최신 버퍼의 의미 강조를 연결한다", async () => {
+    const javaFile: OpenFile = {
+      ...FILE,
+      key: fileTabKey("src/Main.java"),
+      path: "src/Main.java",
+      content: "class Main {}",
+    };
+    let version = 1;
+    let text = javaFile.content;
+    let resolveFirst: (tokens: typeof JAVA_SEMANTIC_TOKENS) => void = () => undefined;
+    const onSemanticTokens = vi.fn()
+      .mockImplementationOnce(() => new Promise<typeof JAVA_SEMANTIC_TOKENS>((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValue(JAVA_SEMANTIC_TOKENS);
+    const semanticModel = {
+      ...model(javaFile.path),
+      getValue: () => text,
+      getVersionId: () => version,
+    };
+    h.editor.getModel.mockReturnValue(semanticModel);
+    render({
+      files: [javaFile],
+      activeKey: javaFile.key,
+      retainedPaths: [javaFile.path],
+      onLspStatus: vi.fn().mockResolvedValue({ available: true, phase: "ready", server: "jdtls", detail: null }),
+      onSemanticTokens,
+    });
+    await act(async () => {});
+    expect(onSemanticTokens).toHaveBeenCalledTimes(1);
+
+    version += 1;
+    text = "class Main { void latest() {} }";
+    await act(async () => resolveFirst({ ...JAVA_SEMANTIC_TOKENS, data: [99, 0, 5, 0, 0] }));
+    expect(h.semanticProviders).toHaveLength(1);
+    const result = await h.semanticProviders[0].provideDocumentSemanticTokens(
+      semanticModel, null, { isCancellationRequested: false },
+    );
+    expect(onSemanticTokens).toHaveBeenLastCalledWith(javaFile.path, text);
+    expect(result).toMatchObject({ data: new Uint32Array([0, 0, 5, 2, 0]) });
+  });
+
+  it("프로젝트 범위를 바꾸면 늦은 semantic 응답을 버리고 기존 provider를 해제한다", async () => {
+    const resolvers: ((value: typeof JAVA_SEMANTIC_TOKENS | null) => void)[] = [];
+    const onSemanticTokens = vi.fn(
+      () => new Promise<typeof JAVA_SEMANTIC_TOKENS | null>((resolve) => resolvers.push(resolve)),
+    );
+    h.editor.getModel.mockReturnValue(model());
+    render({ lspScopeKey: "local:project:a", onSemanticTokens });
+    await act(async () => {});
+    render({ lspScopeKey: "local:project:b", onSemanticTokens });
+    await act(async () => {});
+
+    expect(resolvers.length).toBeGreaterThanOrEqual(2);
+    for (const resolve of resolvers.slice(0, -1))
+      await act(async () => resolve(JAVA_SEMANTIC_TOKENS));
+    expect(h.semanticProviders).toHaveLength(0);
+
+    await act(async () => resolvers[resolvers.length - 1](JAVA_SEMANTIC_TOKENS));
+    expect(h.semanticProviders).toHaveLength(1);
+    render({ lspScopeKey: "local:project:c", onSemanticTokens });
+    expect(h.semanticDisposals[0]).toHaveBeenCalledOnce();
+  });
+
+  it("첫 pane의 legend 조회가 실패해도 다른 Java pane의 dispatcher 응답은 유지한다", async () => {
+    const first: OpenFile = {
+      ...FILE,
+      key: fileTabKey("src/First.java"),
+      path: "src/First.java",
+      content: "class First {}",
+    };
+    const second: OpenFile = {
+      ...FILE,
+      key: fileTabKey("src/Second.java"),
+      path: "src/Second.java",
+      content: "class Second {}",
+    };
+    const firstModel = model(first.path, first.content);
+    const secondModel = model(second.path, second.content);
+    h.modelsByPath.set(first.path, firstModel);
+    h.modelsByPath.set(second.path, secondModel);
+    const onSemanticTokens = vi.fn((path: string) =>
+      Promise.resolve(path === first.path ? null : JAVA_SEMANTIC_TOKENS),
+    );
+    const props = (file: OpenFile): PaneProps => ({
+      taskId: 1,
+      files: [file],
+      activeKey: file.key,
+      retainedPaths: [file.path],
+      dark: false,
+      onSelect: () => undefined,
+      onClose: () => undefined,
+      onChange: () => undefined,
+      onSave: () => undefined,
+      onReload: () => undefined,
+      onOpenPath: () => undefined,
+      onRevealPath: () => undefined,
+      onSemanticTokens,
+    });
+    act(() => {
+      root.render(<><EditorPane {...props(first)} /><EditorPane {...props(second)} /></>);
+    });
+    await act(async () => {});
+    await act(async () => {});
+
+    expect(h.semanticProviders).toHaveLength(1);
+    await expect(
+      h.semanticProviders[0].provideDocumentSemanticTokens(
+        firstModel,
+        null,
+        { isCancellationRequested: false },
+      ),
+    ).resolves.toBeNull();
+    await expect(
+      h.semanticProviders[0].provideDocumentSemanticTokens(
+        secondModel,
+        null,
+        { isCancellationRequested: false },
+      ),
+    ).resolves.toMatchObject({ data: expect.any(Uint32Array) });
+  });
+
+  it("모델 편집 또는 Monaco 취소 뒤 도착한 semantic 응답을 적용하지 않는다", async () => {
+    let version = 1;
+    const semanticModel = {
+      ...model(),
+      getVersionId: () => version,
+    };
+    const resolvers: ((value: typeof JAVA_SEMANTIC_TOKENS | null) => void)[] = [];
+    let calls = 0;
+    const onSemanticTokens = vi.fn(() => {
+      calls += 1;
+      if (calls <= 2) return Promise.resolve(JAVA_SEMANTIC_TOKENS);
+      return new Promise<typeof JAVA_SEMANTIC_TOKENS | null>((resolve) => resolvers.push(resolve));
+    });
+    h.editor.getModel.mockReturnValue(semanticModel);
+    render({ onSemanticTokens });
+    await act(async () => {});
+    await act(async () => {});
+
+    const provider = h.semanticProviders[0];
+    const editedToken = { isCancellationRequested: false };
+    const edited = provider.provideDocumentSemanticTokens(semanticModel, null, editedToken);
+    version += 1;
+    await act(async () => resolvers[0](JAVA_SEMANTIC_TOKENS));
+    await expect(edited).resolves.toBeNull();
+
+    const cancelledToken = { isCancellationRequested: false };
+    const cancelled = provider.provideDocumentSemanticTokens(semanticModel, null, cancelledToken);
+    cancelledToken.isCancellationRequested = true;
+    await act(async () => resolvers[1](JAVA_SEMANTIC_TOKENS));
+    await expect(cancelled).resolves.toBeNull();
+  });
+
+  it("dispatcher legend에 없는 token은 Monarch에 남기고 뒤의 알려진 위치를 보존한다", async () => {
+    const semanticModel = model();
+    let calls = 0;
+    const onSemanticTokens = vi.fn(() => {
+      calls += 1;
+      if (calls <= 2) return Promise.resolve(JAVA_SEMANTIC_TOKENS);
+      return Promise.resolve({
+        legend: { token_types: ["class", "serverOnly", "method"], token_modifiers: [] },
+        // class@0, 알 수 없는 serverOnly@2, method@4. 가운데 token을 빼도 method는 4에 남아야 한다.
+        data: [0, 0, 1, 0, 0, 0, 2, 1, 1, 0, 0, 2, 1, 2, 0],
+      });
+    });
+    h.editor.getModel.mockReturnValue(semanticModel);
+    render({ onSemanticTokens });
+    await act(async () => {});
+    await act(async () => {});
+
+    const result = await h.semanticProviders[0].provideDocumentSemanticTokens(
+      semanticModel,
+      null,
+      { isCancellationRequested: false },
+    );
+    expect(result).toMatchObject({
+      // 공통 legend: class=2, method=13. 두 번째 token의 delta character는 4다.
+      data: new Uint32Array([0, 0, 1, 2, 0, 0, 4, 1, 13, 0]),
+    });
+  });
+
+  it("분석 중 null이었던 첫 semantic 요청을 준비됨 전환 뒤 다시 시도한다", async () => {
+    vi.useFakeTimers();
+    try {
+      const onLspStatus = vi
+        .fn()
+        .mockResolvedValueOnce({ available: true, phase: "analyzing", server: "jdtls", detail: null })
+        .mockResolvedValueOnce({ available: true, phase: "ready", server: "jdtls", detail: null });
+      const onSemanticTokens = vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(JAVA_SEMANTIC_TOKENS);
+      h.editor.getModel.mockReturnValue(model());
+      render({ onLspStatus, onSemanticTokens });
+      await act(async () => {});
+      expect(onSemanticTokens).toHaveBeenCalledTimes(1);
+      expect(h.semanticProviders).toHaveLength(0);
+
+      await act(async () => vi.advanceTimersByTimeAsync(2_000));
+      expect(onSemanticTokens).toHaveBeenCalledTimes(2);
+      expect(h.semanticProviders).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("분석 상태를 설치 여부와 구분해 표시하고 유휴 상태를 연결됨으로 부르지 않는다", async () => {
+    render({
+      onLspStatus: vi.fn().mockResolvedValue({
+        available: true,
+        phase: "idle",
+        server: "jdtls",
+        detail: null,
+      }),
+    });
+    await act(async () => {});
+
+    const badge = container.querySelector('[aria-label="코드 탐색 사용 가능"]');
+    expect(badge).not.toBeNull();
+    expect(container.textContent).not.toContain("언어 서버 연결됨");
+  });
+
+  it("분석 중 상태는 제한된 갱신 뒤 준비됨으로 바뀐다", async () => {
+    vi.useFakeTimers();
+    try {
+      const onLspStatus = vi
+        .fn()
+        .mockResolvedValueOnce({ available: true, phase: "analyzing", server: "jdtls", detail: null })
+        .mockResolvedValueOnce({ available: true, phase: "ready", server: "jdtls", detail: null });
+      render({ onLspStatus });
+      await act(async () => {});
+      expect(container.querySelector('[aria-label="프로젝트 분석 중"]')).not.toBeNull();
+
+      await act(async () => vi.advanceTimersByTimeAsync(2_000));
+      expect(onLspStatus).toHaveBeenCalledTimes(2);
+      expect(container.querySelector('[aria-label="분석 준비됨"]')).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("저장한 글꼴 크기를 유지하면서 읽기 쉬운 행간과 semantic highlighting을 켠다", () => {
+    render({ codeFontSize: 13, codeFontFamily: "Saved Font" });
+
+    expect(h.options).toMatchObject({
+      fontSize: 13,
+      fontFamily: "Saved Font",
+      lineHeight: 21,
+      "semanticHighlighting.enabled": true,
+    });
+  });
 });
 
 describe("EditorPane ⌘B", () => {
@@ -398,6 +733,21 @@ describe("EditorPane ⌘B", () => {
 });
 
 describe("EditorPane references", () => {
+  it("사용처 조회 중에는 빈 결과 목록 대신 진행 상태를 보인다", async () => {
+    let resolve: ((targets: LspTarget[]) => void) | undefined;
+    render({
+      onGoto: () => new Promise((done) => { resolve = done; }),
+      onOpenTarget: vi.fn(),
+    });
+
+    await act(async () => h.commands.get(SHIFT | KEY_F12)?.());
+
+    expect(container.querySelector('[role="dialog"][aria-label="사용처"]')).toBeNull();
+    expect(container.querySelector('[role="dialog"][aria-label="정의 이동 결과"]')?.textContent)
+      .toContain("찾는 중");
+    await act(async () => resolve?.([]));
+  });
+
   it("⌥B는 저장하지 않은 버퍼의 사용처를 열고 선택한 결과로 이동한다", async () => {
     const onGoto = vi.fn().mockResolvedValue([target()]);
     const onOpenTarget = vi.fn();

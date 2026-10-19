@@ -3,7 +3,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConversationView, type ConvoItem } from "./ConversationView";
+import { clearConversationScrollMemory } from "./conversationScroll";
+import { appendConvoEvent, ConversationView, type ConvoItem } from "./ConversationView";
+import { subagentThreads } from "../../lib/activity";
+import { SessionImageScope } from "./SessionImageContext";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -41,13 +44,102 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  clearConversationScrollMemory();
   await act(async () => root?.unmount());
   container?.remove();
   root = null;
   container = null;
 });
 
+describe("ConversationView Codex 서브에이전트 카드", () => {
+  it("상태 갱신이 여러 번 있어도 메타데이터 앵커는 카드 하나만 렌더한다", async () => {
+    const first = {
+      kind: "subagent_update",
+      vendor: "codex" as const,
+      root_thread_id: "root",
+      parent_thread_id: "root",
+      child_thread_id: "child",
+      execution_id: "exec-1",
+      source_key: "state-1",
+      title: "Codex UI 점검",
+      state: "done" as const,
+      observation_source: "session_log" as const,
+      observation_status: "available" as const,
+    };
+    const items = appendConvoEvent(appendConvoEvent([], first), { ...first, source_key: "state-2", state: "running" });
+    const threads = new Map(subagentThreads(items).map((thread) => [thread.id, thread]));
+
+    await act(async () => {
+      root?.render(<ConversationView conversationId={1} items={items} busy={false} subagents={threads} />);
+    });
+
+    expect(container?.textContent?.match(/Codex UI 점검/g)).toHaveLength(1);
+    expect(container?.textContent).toContain("작업 중");
+  });
+});
+
 describe("ConversationView scroll lifecycle", () => {
+  it("뷰가 다시 마운트돼도 보던 자리에서 시작한다", async () => {
+    // 세션 전환·서브 에이전트 탭 왕복·토론 종료는 뷰를 새로 마운트한다. 새 영역은 마운트 직후
+    // layout effect에서 바로 높이를 가져야 하므로 프로토타입에서 높이를 준다.
+    Object.defineProperties(HTMLElement.prototype, {
+      clientHeight: { configurable: true, get: () => 500 },
+      scrollHeight: { configurable: true, get: () => 1_000 },
+    });
+    try {
+      await renderConversation(1, "첫 번째 세션");
+      const first = container?.firstElementChild?.firstElementChild as HTMLDivElement;
+      first.scrollTop = 100;
+      first.dispatchEvent(new Event("scroll"));
+
+      await act(async () => root?.unmount());
+      root = createRoot(container!);
+      await renderConversation(1, "첫 번째 세션");
+
+      const remounted = container?.firstElementChild?.firstElementChild as HTMLDivElement;
+      expect(remounted).not.toBe(first);
+      expect(remounted.scrollTop).toBe(100);
+    } finally {
+      delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
+      delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+    }
+  });
+
+  it("다시 마운트된 화면이 기억한 자리보다 짧아도 맨 위에 두지 않고, 그 뒤 사용자 스크롤을 기억한다", async () => {
+    // 펼친 번역·카드는 다시 마운트되면 접혀 높이가 줄어든다. 기억한 scrollTop에 닿지 못한다고
+    // 0에 두면 맨 위로 튀고, 사용자가 다시 내려가도 clamp로 오인해 무시하면 다음 왕복에도 맨 위다.
+    let scrollHeight = 1_500;
+    Object.defineProperties(HTMLElement.prototype, {
+      clientHeight: { configurable: true, get: () => 500 },
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+    });
+    const remount = async (): Promise<HTMLDivElement> => {
+      await act(async () => root?.unmount());
+      root = createRoot(container!);
+      await renderConversation(1, "첫 번째 세션");
+      return container?.firstElementChild?.firstElementChild as HTMLDivElement;
+    };
+    try {
+      await renderConversation(1, "첫 번째 세션");
+      const first = container?.firstElementChild?.firstElementChild as HTMLDivElement;
+      first.scrollTop = 900;
+      first.dispatchEvent(new Event("scroll"));
+
+      scrollHeight = 1_000;
+      const shorter = await remount();
+      expect(shorter.scrollTop).toBe(500);
+
+      shorter.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
+      shorter.dispatchEvent(new Event("scroll"));
+
+      const back = await remount();
+      expect(back.scrollTop).toBe(1_000);
+    } finally {
+      delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
+      delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+    }
+  });
+
   it("다른 세션을 본 뒤 돌아오면 이전 세션의 스크롤 위치를 복원한다", async () => {
     await renderConversation(1, "첫 번째 세션");
     const scrollContainer = scrollAwayFromBottom();
@@ -371,6 +463,27 @@ describe("ConversationView — 공백 없는 긴 줄은 가로로 넘치지 않�
 });
 
 describe("ConversationView — 구조화된 도구 미디어", () => {
+  it("renders local images in a restored assistant message", async () => {
+    const readFile = vi.fn(async () => ({ kind: "image" as const, content: "data:image/png;base64,cG5n", mtime: 1 }));
+    const items = appendConvoEvent([], { kind: "text", text: "![결과](/workspace/result.png)" });
+    await act(async () => root?.render(<SessionImageScope rootPath="/workspace" readFile={readFile}>
+      <ConversationView conversationId={1} items={items} busy={false} />
+    </SessionImageScope>));
+    expect(readFile).toHaveBeenCalledWith("result.png");
+    expect(container?.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,cG5n");
+  });
+
+  it("keeps a restored subagent image inside the expanded subagent card", async () => {
+    let items = appendConvoEvent([], { kind: "tool_use", name: "Task", tool_id: "parent-1", summary: "그림 확인" });
+    items = appendConvoEvent(items, { kind: "tool_output", tool_use_id: "image-1", parent_id: "parent-1", contents: [{ type: "image", url: "data:image/png;base64,cG5n" }] });
+    const threads = new Map(subagentThreads(items).map(thread => [thread.id, thread]));
+    const main = items.filter(item => !("parentId" in item && item.parentId));
+    await act(async () => root?.render(<ConversationView conversationId={1} items={main} busy={false} subagents={threads} />));
+    expect(container?.querySelector("img")).toBeNull();
+    await act(async () => container?.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click());
+    expect(container?.querySelector("section img")?.getAttribute("src")).toBe("data:image/png;base64,cG5n");
+  });
+
   it("allowlist된 data 이미지·음성을 표시하고 리소스는 사용자 클릭으로만 연다", async () => {
     const onOpenLink = vi.fn();
     const image = "data:image/png;base64,aGVsbG8=";

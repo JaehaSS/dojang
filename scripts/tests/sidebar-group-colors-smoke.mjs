@@ -5,7 +5,7 @@ import { chromium } from "playwright";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
-const directory = path.resolve(".praxis/verification/sidebar-group-colors-smoke");
+const directory = path.resolve(".dojang/verification/sidebar-group-colors-smoke");
 const fixture = path.join(directory, "ui-fixture");
 const storageKey = "praxis-project-groups";
 const alpha = "/workspace/alpha";

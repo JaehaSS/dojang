@@ -1,8 +1,11 @@
 //! 리뷰어 헤드리스 호출 (Framein delegate 이식) — Tauri 비의존.
 //!
 //! 보안: 리뷰어를 **빈 temp 디렉터리**에서 실행(worktree 아님)해 리뷰어가 툴을 써도
-//! worktree를 못 건드리게 한다. 프롬프트는 기본적으로 stdin으로 전달하지만, agy는 CLI 계약상
-//! `-p <prompt>` 값으로 전달한다. 타임아웃 시 프로세스 그룹 kill.
+//! worktree를 못 건드리게 한다. 그 위에 CLI 플래그로 도구를 한 번 더 막는다 — claude는 `--tools ""`,
+//! codex는 `--sandbox read-only`. 빈 디렉터리만으로는 부족했다: 리뷰 콘텐츠에 저장소 절대 경로가 있으면
+//! 리뷰어가 그 경로로 가서 `git status`를 돌리고, 사용자 작업 사본의 상태를 근거로 blocking을 냈다(원장 #599).
+//! 프롬프트는 기본적으로 stdin으로 전달하지만, agy는 CLI 계약상 `-p <prompt>` 값으로 전달한다.
+//! agy에는 도구 차단 플래그가 없어 프롬프트 지시로만 막는다. 타임아웃 시 프로세스 그룹 kill.
 
 use crate::managed_process::SharedProcessRegistrar;
 
@@ -56,7 +59,7 @@ fn invocation<'a>(model: &str, prompt: &'a str) -> ReviewerInvocation<'a> {
     match model {
         "codex" => ReviewerInvocation {
             bin: "codex",
-            args: args(&["exec", "--skip-git-repo-check"]),
+            args: args(&["exec", "--skip-git-repo-check", "--sandbox", "read-only"]),
             stdin_prompt: Some(prompt),
         },
         // agy 1.1.8의 `-p`는 stdin 스위치가 아니라 프롬프트 값을 요구하는 플래그다.
@@ -65,9 +68,10 @@ fn invocation<'a>(model: &str, prompt: &'a str) -> ReviewerInvocation<'a> {
             args: args(&["-p", prompt]),
             stdin_prompt: None,
         },
+        // `--tools ""`는 모든 도구를 끈다. 리뷰어는 프롬프트에 든 콘텐츠만 보고 판단해야 한다.
         _ => ReviewerInvocation {
             bin: "claude",
-            args: args(&["-p", "--output-format", "text"]),
+            args: args(&["-p", "--output-format", "text", "--tools", ""]),
             stdin_prompt: Some(prompt),
         },
     }
@@ -122,7 +126,7 @@ pub fn run_repair_agent(
         .ok_or_else(|| "에이전트 실행 설정이 없습니다".to_string())?;
     let bin = which(&bin).ok_or_else(|| format!("{bin} 실행 파일을 찾을 수 없습니다"))?;
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    process::run_in_directory(&bin, &args, "", 600, Some(registrar), cwd)
+    process::run_in_directory(&bin, &args, "", 600, Some(registrar), cwd, process::Expect::SideEffect)
 }
 
 /// claude를 read-only 도구(Read,Grep,Glob)만 허용해 `cwd`에서 실행한다. (bin, args) — 단위 테스트용 순수 헬퍼.
@@ -140,7 +144,7 @@ pub fn run_claude_readonly_in(
     let (bin, args) = readonly_claude_command();
     let bin = which(bin).ok_or_else(|| "claude 실행 파일을 찾을 수 없습니다".to_string())?;
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    process::run_in_directory(&bin, &args, prompt, timeout_secs, registrar, cwd)
+    process::run_in_directory(&bin, &args, prompt, timeout_secs, registrar, cwd, process::Expect::Output)
 }
 
 /// `git status --porcelain`이 비어 있으면 true (추적·미추적 변경 없음).
@@ -179,6 +183,18 @@ mod tests {
         // 미지/기본은 claude 폴백.
         assert_eq!(invocation("claude", "prompt").bin, "claude");
         assert_eq!(invocation("anything-else", "prompt").bin, "claude");
+    }
+
+    #[test]
+    fn invocation_blocks_reviewer_tools() {
+        // 리뷰어는 콘텐츠만 보고 판단한다 — claude는 도구 전부 차단, codex는 read-only 샌드박스.
+        let claude = invocation("claude", "prompt");
+        let i = claude.args.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(claude.args[i + 1], "");
+        let codex = invocation("codex", "prompt");
+        let i = codex.args.iter().position(|a| a == "--sandbox").unwrap();
+        assert_eq!(codex.args[i + 1], "read-only");
+        assert!(describe_invocation("claude").contains("--tools"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ Dojang에 있는 기능을 도메인별로 정리했습니다. **전부 쓸 필�
 
 여러 에이전트를 동시에 굴리는 본체입니다.
 
-- **격리 실행** — 작업마다 `.praxis/worktrees/` 아래 git worktree를 파고 `praxis/<이름>-<나노초>`
+- **격리 실행** — 작업마다 `.dojang/worktrees/` 아래 git worktree를 파고 `dojang/<이름>-<나노초>`
   브랜치에 커밋합니다. 승인 전까지 원본 브랜치는 그대로입니다 (`src-tauri/src/worktree/mod.rs`).
 - **동시 실행 상한** — 기본 8개, 설정에서 1~64까지. 한도에 닿으면 생성이 거부됩니다
   (`src-tauri/src/commands.rs`, 설정 키 `max_concurrent`).
@@ -72,7 +72,7 @@ Dojang에 있는 기능을 도메인별로 정리했습니다. **전부 쓸 필�
   자동 승인은 없습니다.
 - **충돌 해소기** — 파일별로 내 작업 / 기준 브랜치 / 양쪽 합치기를 고르고, 중단해 되돌릴 수
   있습니다. 충돌은 worktree 안에만 남습니다 (`src/components/ide/ConflictResolver.tsx`).
-- **검증 게이트** — `.praxis/validate.toml` 또는 자동 탐지로 build/test를 돌립니다. 검사가 하나도
+- **검증 게이트** — `.dojang/validate.toml` 또는 자동 탐지로 build/test를 돌립니다. 검사가 하나도
   없으면 "통과"가 아니라 **미검증**으로 판정합니다. 승인은 기본 소프트 게이트이고, 설정에서
   "검증 실패 시 Approve 차단"을 켜면 하드 게이트가 됩니다.
 - **목표 계약** — 목표·수용 기준·중단 조건·보호 경로를 작업에 고정합니다. 이 중 **보호 경로만

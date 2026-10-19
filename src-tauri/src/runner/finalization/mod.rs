@@ -235,8 +235,7 @@ fn worktree(config: &RunnerConfig, task: &db::Task) -> anyhow::Result<crate::wor
         super::auth::authorize_repository_path(&config.repository_roots, &stored)
             .map_err(anyhow::Error::msg)?
     } else {
-        let expected = repo.join(".praxis").join("worktrees");
-        if !stored.starts_with(expected) {
+        if !crate::project_paths::is_worktree_path(&repo, &stored) {
             anyhow::bail!("stored worktree path escaped the authorized repository");
         }
         stored

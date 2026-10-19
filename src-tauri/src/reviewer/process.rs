@@ -5,6 +5,16 @@ use std::time::Duration;
 
 use crate::managed_process::{ProcessLease, SharedProcessRegistrar, SpawnedProcess};
 
+/// 호출자가 stdout을 어떻게 쓰는지. 리뷰·판정은 stdout이 결과라 비면 실패이고, 쓰기 에이전트는
+/// 파일을 고치는 것이 결과라 stdout이 비어도 정상이다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Expect {
+    /// stdout에 결과(nonce + JSON)가 있어야 한다. 빈 출력은 stderr를 담아 Err.
+    Output,
+    /// stdout은 참고용. 종료 코드만 본다.
+    SideEffect,
+}
+
 pub(super) fn run(
     bin: &str,
     args: &[&str],
@@ -13,14 +23,14 @@ pub(super) fn run(
     registrar: Option<&SharedProcessRegistrar>,
 ) -> Result<String, String> {
     let tmp = temporary_directory()?;
-    let result = run_in_directory(bin, args, prompt, timeout_secs, registrar, &tmp);
+    let result = run_in_directory(bin, args, prompt, timeout_secs, registrar, &tmp, Expect::Output);
     let _ = std::fs::remove_dir_all(&tmp);
     result
 }
 
 pub(super) fn run_in_directory(
     bin: &str, args: &[&str], prompt: &str, timeout_secs: u64,
-    registrar: Option<&SharedProcessRegistrar>, cwd: &std::path::Path,
+    registrar: Option<&SharedProcessRegistrar>, cwd: &std::path::Path, expect: Expect,
 ) -> Result<String, String> {
     let args = args.iter().map(OsString::from).collect::<Vec<_>>();
     let spawned = crate::managed_process::spawn_registered(bin, &args, registrar, |command| {
@@ -33,7 +43,7 @@ pub(super) fn run_in_directory(
     .map_err(|error| format!("{bin} 실행 실패: {error} (설치/PATH 확인)"));
     spawned.and_then(|mut spawned| {
         write_prompt(&mut spawned, prompt)?;
-        await_output(spawned, timeout_secs)
+        await_output(spawned, timeout_secs, expect)
     })
 }
 
@@ -82,7 +92,7 @@ fn abort_spawned(spawned: &mut SpawnedProcess, detail: String) -> Result<(), Str
     Err(detail)
 }
 
-fn await_output(mut spawned: SpawnedProcess, timeout_secs: u64) -> Result<String, String> {
+fn await_output(mut spawned: SpawnedProcess, timeout_secs: u64, expect: Expect) -> Result<String, String> {
     let lease = spawned.lease.take();
     let pid = spawned.pid;
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -90,7 +100,7 @@ fn await_output(mut spawned: SpawnedProcess, timeout_secs: u64) -> Result<String
         let _ = sender.send(spawned.child.wait_with_output());
     });
     match receiver.recv_timeout(Duration::from_secs(timeout_secs.max(1))) {
-        Ok(Ok(output)) => finish_output(output, lease),
+        Ok(Ok(output)) => finish_output(output, lease, expect),
         Ok(Err(error)) => {
             quarantine(lease, &format!("reviewer wait failed: {error}"));
             Err(format!("리뷰어 오류: {error}"))
@@ -102,16 +112,29 @@ fn await_output(mut spawned: SpawnedProcess, timeout_secs: u64) -> Result<String
 fn finish_output(
     output: std::process::Output,
     lease: Option<Box<dyn ProcessLease>>,
+    expect: Expect,
 ) -> Result<String, String> {
     complete(lease)?;
-    if !output.status.success() {
-        return Err(format!(
-            "리뷰어 비정상 종료(code {:?}): {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    classify_output(output.status.success(), output.status.code(), &output.stdout, &output.stderr, expect)
+}
+
+/// 종료 코드와 stdout·stderr로 결과를 가른다. **stdout이 비면 exit 0이어도 실패다** — agy는 헤드리스에서
+/// 도구 권한이 거부되면 아무것도 출력하지 않고 0으로 끝나며 사유는 stderr에만 남긴다. 빈 문자열을 Ok로
+/// 돌리면 호출자는 "출력에 nonce가 없습니다"만 보고 stderr의 진짜 사유는 사라진다.
+fn classify_output(success: bool, code: Option<i32>, stdout: &[u8], stderr: &[u8], expect: Expect) -> Result<String, String> {
+    let stderr_text = || {
+        let s = String::from_utf8_lossy(stderr);
+        let s = s.trim();
+        if s.is_empty() { "(stderr 없음)".to_string() } else { s.chars().take(2000).collect() }
+    };
+    if !success {
+        return Err(format!("리뷰어 비정상 종료(code {:?}): {}", code, stderr_text()));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let out = String::from_utf8_lossy(stdout);
+    if expect == Expect::Output && out.trim().is_empty() {
+        return Err(format!("리뷰어가 아무 출력 없이 종료했습니다: {}", stderr_text()));
+    }
+    Ok(out.into_owned())
 }
 
 fn timeout(
@@ -140,5 +163,26 @@ fn complete(lease: Option<Box<dyn ProcessLease>>) -> Result<(), String> {
 fn quarantine(lease: Option<Box<dyn ProcessLease>>, detail: &str) {
     if let Some(lease) = lease {
         let _ = lease.quarantine(detail);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_output, Expect};
+
+    #[test]
+    fn empty_stdout_is_an_error_with_stderr_reason() {
+        let err = classify_output(true, Some(0), b"  \n", b"Tool run_shell_command denied\n", Expect::Output).unwrap_err();
+        assert!(err.contains("아무 출력 없이"), "{err}");
+        assert!(err.contains("denied"), "stderr 사유를 보존해야 한다: {err}");
+        assert!(classify_output(true, Some(0), b"", b"", Expect::Output).unwrap_err().contains("stderr 없음"));
+        // 쓰기 에이전트는 파일이 결과라 빈 stdout이 정상이다.
+        assert_eq!(classify_output(true, Some(0), b"", b"", Expect::SideEffect).unwrap(), "");
+    }
+
+    #[test]
+    fn nonzero_exit_and_normal_output() {
+        assert!(classify_output(false, Some(2), b"x", b"bad flag", Expect::SideEffect).unwrap_err().contains("code Some(2)"));
+        assert_eq!(classify_output(true, Some(0), b"NONCE\n{}", b"warn", Expect::Output).unwrap(), "NONCE\n{}");
     }
 }

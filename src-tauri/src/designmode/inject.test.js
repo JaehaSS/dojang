@@ -25,6 +25,10 @@ describe("designmode inject.js", () => {
     dm.setEnabled(false);
   });
 
+  it("raw selector injection alone does not mark a page as a native canvas", () => {
+    expect(window.__dojangCanvasNative).toBeUndefined();
+  });
+
   it("whitelistComputedStyle은 화이트리스트 속성만 남긴다", () => {
     const computed = {
       getPropertyValue: (prop) => (prop === "color" ? "rgb(0, 0, 0)" : prop === "__proto__" ? "polluted" : ""),
@@ -103,5 +107,77 @@ describe("designmode inject.js", () => {
     expect(dm.isEnabled()).toBe(false);
     dm.setEnabled(true);
     expect(dm.isEnabled()).toBe(true);
+  });
+
+  it("캔버스 선택기는 iframe 문서의 정적 태그와 CSS/rect를 camelCase로 전달한다", () => {
+    document.documentElement.innerHTML = [
+      "<body><button id=\"target\" class=\"p-4 text-sm\"",
+      " data-praxis-src=\"src/design/card.tsx:12:4\"",
+      " data-praxis-class-kind=\"static\">Click</button></body>"
+    ].join("");
+    const selected = [];
+    const controller = dm.bindCanvasDocument(document, (payload) => selected.push(payload));
+    controller.setEnabled(true);
+    document.getElementById("target").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+    expect(selected).toHaveLength(1);
+    expect(selected[0]).toEqual(expect.objectContaining({
+      version: 1,
+      source: "src/design/card.tsx:12:4",
+      className: "p-4 text-sm",
+      classKind: "static",
+      tagName: "button",
+      suggestedAncestor: null,
+      computedCss: expect.any(Object),
+      boundingRect: expect.objectContaining({ x: expect.any(Number), width: expect.any(Number) })
+    }));
+    expect(document.getElementById("__praxis_designmode_highlight__")).not.toBeNull();
+    controller.dispose();
+  });
+
+  it("태그 없는 클릭은 대상은 유지하고 가장 가까운 태그 조상만 제안한다", () => {
+    document.documentElement.innerHTML = [
+      "<body><section id=\"ancestor\" class=\"flex\"",
+      " data-praxis-src=\"src/design/card.tsx:9:2\" data-praxis-class-kind=\"dynamic\">",
+      "<span id=\"target\" class=\"inner\">Click</span></section></body>"
+    ].join("");
+    const selected = [];
+    const controller = dm.bindCanvasDocument(document, (payload) => selected.push(payload));
+    controller.setEnabled(true);
+    document.getElementById("target").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+    expect(selected[0]).toEqual(expect.objectContaining({
+      source: null,
+      className: "inner",
+      classKind: "unknown",
+      tagName: "span",
+      suggestedAncestor: {
+        instanceSource: null,
+        source: "src/design/card.tsx:9:2",
+        className: "flex",
+        classKind: "dynamic",
+        tagName: "section"
+      }
+    }));
+    expect(controller.selectSuggestedAncestor()).toEqual(expect.objectContaining({
+      source: "src/design/card.tsx:9:2",
+      suggestedAncestor: null
+    }));
+    expect(selected).toHaveLength(2);
+    controller.dispose();
+  });
+
+  it("캔버스 클릭은 한 번만 선택하고 dispose 뒤에는 문서 리스너를 제거한다", () => {
+    const selected = [];
+    const controller = dm.bindCanvasDocument(document, (payload) => selected.push(payload));
+    const target = document.getElementById("target");
+    controller.setEnabled(true);
+    target.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    target.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(selected).toHaveLength(1);
+    controller.dispose();
+    controller.setEnabled(true);
+    target.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(selected).toHaveLength(1);
   });
 });

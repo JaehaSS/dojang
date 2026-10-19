@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { studyExpressionsOn, translateReply, useTranslateSettings, type ReplyTranslation } from "../../lib/translate";
-import { ExpressionList, ExpressionMark, useExpressions, useVisibleExpressions } from "./ExpressionStudy";
+import { ExpressionList, ExpressionMark, useExpressions } from "./ExpressionStudy";
 import { Markdown } from "./Markdown";
 
 /** 원문에 표현 밑줄을 긋는 손잡이 — `Markdown`의 `highlights`·`renderHighlight`로 그대로 넘긴다. */
@@ -59,18 +59,16 @@ export function TranslatableReply({
   const shown = open && ready;
   // 표현은 번역과 나란히 부른다 — 번역을 기다린 뒤 부르면 그만큼 늦게 뜬다.
   const study = studyExpressionsOn(useTranslateSettings());
-  const expressions = useVisibleExpressions(useExpressions(text, shown && study));
+  const expressions = useExpressions(text, shown && study);
   const phrases = useMemo(() => expressions.map((expr) => expr.phrase), [expressions]);
   const render = useCallback(
     (index: number, children: ReactNode) =>
       expressions[index] ? (
-        <ExpressionMark expression={expressions[index]} context={text}>
-          {children}
-        </ExpressionMark>
+        <ExpressionMark expression={expressions[index]}>{children}</ExpressionMark>
       ) : (
         children
       ),
-    [expressions, text],
+    [expressions],
   );
   const highlights = useMemo(() => (phrases.length > 0 ? { phrases, render } : undefined), [phrases, render]);
   const bilingual = shown && status.kind === "done" && status.value.kind === "bilingual" ? status.value.blocks : null;
@@ -90,7 +88,7 @@ export function TranslatableReply({
           ))
         : // 번역이 오기 전에는 긋지 않는다 — 대역이 도착하면 블록별로 다시 그려져, 그 사이 고정한 카드가 닫힌다.
           renderMarkdown(text, status.kind === "done" && shown ? highlights : undefined)}
-      {shown && <ExpressionList expressions={expressions} context={text} />}
+      {shown && <ExpressionList expressions={expressions} />}
       {actions}
       <button
         type="button"

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveDocumentLink } from "./document-link";
+import { resolveDocumentImagePath, resolveDocumentLink } from "./document-link";
 
 describe("resolveDocumentLink", () => {
   const source = "docs/discovery/example.md";
@@ -97,5 +97,28 @@ describe("resolveDocumentLink", () => {
       expect(resolveDocumentLink("#part", external)).toBeNull();
       expect(resolveDocumentLink("~/private.md", external)).toBeNull();
     });
+  });
+});
+
+describe("resolveDocumentImagePath", () => {
+  it.each([
+    ["./images/chart.png", "docs/note.md", "docs/images/chart.png"],
+    ["../assets/%ED%95%9C%EA%B8%80%20chart.png?v=2#preview", "docs/note.md", "assets/한글 chart.png"],
+    ["images/chart%23draft%3F1.png", "docs/note.md", "docs/images/chart#draft?1.png"],
+    ["images/chart:12", "docs/note.md", "docs/images/chart:12"],
+    ["../chart.png", "/Users/test/notes/note.md", "/Users/test/chart.png"],
+    ["/workspace/docs/chart.png", "docs/note.md", "docs/chart.png"],
+    ["file:///workspace/docs/chart%20one.png", "docs/note.md", "docs/chart one.png"],
+    ["file://localhost/workspace/docs/chart.png", "docs/note.md", "docs/chart.png"],
+    ["/Users/test/images/chart.png", "docs/note.md", "/Users/test/images/chart.png"],
+  ])("resolves %s relative to %s for the workspace reader", (link, source, expected) => {
+    expect(resolveDocumentImagePath(link, source, "/workspace")).toBe(expected);
+  });
+
+  it.each([
+    "../../outside.png", "https://example.test/chart.png", "//example.test/chart.png",
+    "file://example.test/chart.png", "file:", "javascript:alert(1)", "chart%00.png", "~/chart.png", "#chart",
+  ])("does not turn %s into a local read", (link) => {
+    expect(resolveDocumentImagePath(link, "docs/note.md", "/workspace")).toBeNull();
   });
 });

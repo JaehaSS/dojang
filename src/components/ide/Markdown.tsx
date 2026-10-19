@@ -5,11 +5,13 @@ import remarkGfm from "remark-gfm";
 import { remarkFilePathLinks } from "../../lib/file-path-links";
 import { getActiveTheme, subscribeTheme } from "../../lib/themes";
 import { looksLikeHtml } from "../../lib/looks-like-html";
-import { rehypeExpressions } from "../../lib/vocab";
+import { rehypeExpressions } from "../../lib/expressions";
 import { CodeCopyButton } from "./CodeCopyButton";
 import { HtmlDoc } from "./HtmlDoc";
 import { extractText, type CodeChild } from "./markdown-code";
 import { Mermaid } from "./Mermaid";
+import { MarkdownImage } from "./MarkdownImage";
+import { useSessionImages } from "./SessionImageContext";
 
 function SessionMermaid({ chart }: { chart: string }) {
   const theme = useSyncExternalStore(subscribeTheme, getActiveTheme, getActiveTheme);
@@ -56,15 +58,15 @@ interface Props {
   /** 이 텍스트가 더 자라지 않는가. 스트리밍 중이면 거짓을 준다 — 아래 HTML 분기 주석 참조. */
   stable?: boolean;
   /**
-   * 공부할 표현 — 글자 노드에서 찾아 `renderHighlight`로 감싼다(`src/lib/vocab.ts`). 코드·링크 안은 긋지 않는다.
+   * 공부할 표현 — 글자 노드에서 찾아 `renderHighlight`로 감싼다(`src/lib/expressions.ts`). 코드·링크 안은 긋지 않는다.
    * 배열 정체성이 바뀌면 다시 파싱하므로 부모가 고정해서 준다.
    */
   highlights?: string[];
   renderHighlight?: (index: number, children: ReactNode) => ReactNode;
 }
 
-const agentUrlTransform = (value: string) =>
-  /^file:/i.test(value) ? value : defaultUrlTransform(value);
+const agentUrlTransform = (value: string, key: string) =>
+  /^file:/i.test(value) || (key === "src" && /^data:image\//i.test(value)) ? value : defaultUrlTransform(value);
 
 /** 평문 경로 링크화는 열어줄 손잡이(onOpenLink)가 있을 때만 켠다 —
  *  없으면 클릭해도 아무 일이 없거나 상대 URL을 브라우저로 던지는 죽은 링크가 된다. */
@@ -79,6 +81,7 @@ export const Markdown = memo(function Markdown({
   highlights,
   renderHighlight,
 }: Props) {
+  const images = useSessionImages();
   const rehypePlugins = useMemo(
     () => (highlights && highlights.length > 0 && renderHighlight ? [rehypeExpressions(highlights)] : undefined),
     [highlights, renderHighlight],
@@ -109,8 +112,18 @@ export const Markdown = memo(function Markdown({
       <ReactMarkdown
         remarkPlugins={onOpenLink ? AGENT_PLUGINS : PLAIN_PLUGINS}
         rehypePlugins={rehypePlugins}
-        urlTransform={onOpenLink ? agentUrlTransform : undefined}
+        urlTransform={(value, key) => key === "src" || onOpenLink ? agentUrlTransform(value, key) : defaultUrlTransform(value)}
         components={{
+          img: ({ src, alt, title }) => <MarkdownImage
+            src={typeof src === "string" ? src : undefined}
+            alt={alt}
+            title={title}
+            // Session-relative image paths start at the workspace root.
+            documentPath="session.md"
+            rootPath={images.rootPath}
+            readFile={images.readFile}
+            className="my-2 max-h-80 max-w-full rounded object-contain"
+          />,
           pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
           p: ({ children }) => <p className="my-1">{children}</p>,
           h1: ({ children }) => <h1 className="mt-2 mb-1 text-base font-semibold">{children}</h1>,

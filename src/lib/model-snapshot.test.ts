@@ -7,6 +7,10 @@ const snap = (over: Record<string, unknown> = {}) => ({
 });
 
 describe("foldModelSnapshot", () => {
+  it("keeps the main model when a debate peer or child reports a different tier", () => {
+    const main = { resolved: "claude-opus-5", requested: "opus" };
+    expect(foldModelSnapshot(main, [snap({ resolved: "claude-opus-5[1m]", speaker: "right" }), snap({ resolved: "child", parent_id: "child" }), { kind: "context_cleared", speaker: "right" }])).toEqual(main);
+  });
   it("requested만 실은 이벤트가 앞선 resolved를 지우지 않는다", () => {
     // 정상 턴의 순서가 바로 이것이다 — invocation(requested) 다음 claude_stream(resolved).
     // 덮어쓰기로 처리하면 둘 중 하나가 매 턴 사라진다.
@@ -37,6 +41,18 @@ describe("foldModelSnapshot", () => {
         { kind: "result" },
       ]),
     ).toEqual(prev);
+  });
+
+  it("Codex 자식 상태와 본문이 메인 모델을 덮어쓰지 않는다", () => {
+    const parent = { resolved: "parent-observed-model", requested: "parent-requested-model" };
+    const child = {
+      kind: "subagent_update",
+      model: "child-observed-model",
+      resolved: "child-observed-model",
+      requested: "child-requested-model",
+      state: "done",
+    };
+    expect(foldModelSnapshot(parent, [child, { kind: "subagent_message" }])).toEqual(parent);
   });
 
   it("빈 열이면 이전 스냅샷을 그대로 돌려준다 — 원격 이어읽기의 빈 배치", () => {

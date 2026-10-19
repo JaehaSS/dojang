@@ -166,11 +166,25 @@ fn cleanup_path(worktree: &Worktree, path: &Path) -> anyhow::Result<()> {
 
 pub(super) fn temporary_path(worktree: &Worktree, create: bool) -> anyhow::Result<PathBuf> {
     let repo = canonical(&worktree.repo)?;
-    let praxis = repo.join(".praxis");
-    managed_dir(&repo, &praxis, create)?;
-    let approval = praxis.join("approval");
+    let name = format!("{:x}", Sha256::digest(worktree.branch.as_bytes()));
+    let legacy = repo.join(crate::project_paths::LEGACY_DIR).join("approval").join(&name);
+    let current = repo.join(crate::project_paths::DIR).join("approval").join(&name);
+    let legacy_present = std::fs::symlink_metadata(&legacy).is_ok() || registered(worktree, &legacy)?;
+    let current_present = std::fs::symlink_metadata(&current).is_ok() || registered(worktree, &current)?;
+    if legacy_present && current_present {
+        anyhow::bail!("승인용 임시 워크트리가 새 경로와 기존 경로에 모두 남아 있습니다");
+    }
+    // Resume a legacy residual, but never create a new legacy storage directory.
+    let dir = if legacy_present {
+        crate::project_paths::LEGACY_DIR
+    } else {
+        crate::project_paths::DIR
+    };
+    let storage = repo.join(dir);
+    managed_dir(&repo, &storage, create && !legacy_present)?;
+    let approval = storage.join("approval");
     managed_dir(&repo, &approval, create)?;
-    Ok(approval.join(format!("{:x}", Sha256::digest(worktree.branch.as_bytes()))))
+    Ok(approval.join(name))
 }
 
 pub(super) fn holders(worktree: &Worktree, base: &str) -> anyhow::Result<Vec<PathBuf>> {
@@ -304,19 +318,23 @@ fn managed_dir(repo: &Path, path: &Path, create: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn approval_lock(worktree: &Worktree) -> anyhow::Result<File> {
+fn approval_lock(worktree: &Worktree) -> anyhow::Result<Vec<File>> {
     let common = run_git(&worktree.repo, &["rev-parse", "--git-common-dir"])?;
     let common = canonical_git(&worktree.repo, common.trim())?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(common.join("praxis-direct-branch.lock"))?;
-    lock.try_lock_exclusive().map_err(|_| {
-        anyhow::anyhow!("다른 승인 또는 브랜치 전환이 진행 중입니다. 완료된 뒤 다시 승인하세요.")
-    })?;
-    Ok(lock)
+    let mut locks = Vec::new();
+    for path in super::direct_checkout_lock::branch_lock_paths(&common)? {
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        lock.try_lock_exclusive().map_err(|_| {
+            anyhow::anyhow!("다른 승인 또는 브랜치 전환이 진행 중입니다. 완료된 뒤 다시 승인하세요.")
+        })?;
+        locks.push(lock);
+    }
+    Ok(locks)
 }
 
 pub(super) fn same_path(left: &Path, right: &Path) -> bool {

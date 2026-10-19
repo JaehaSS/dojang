@@ -141,6 +141,13 @@ impl Tools {
         tools
     }
 
+    /// 리뷰 노트·이동 툴을 얹은 사본. 브라우저 단계와 별개라 `phase_*`에 섞지 않는다 —
+    /// 저장소가 있는 서버만 켠다(`McpState::review`가 `NoReview`면 호출이 실패로 돌아간다).
+    pub fn with_review(mut self) -> Self {
+        self.descriptors.extend(super::review::descriptors());
+        self
+    }
+
     pub fn phase_c() -> Self {
         Self {
             descriptors: vec![

@@ -10,11 +10,13 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import { isMacPlatform } from "../../lib/hotkey";
 import { looksLikeHtml } from "../../lib/looks-like-html";
+import type { HtmlAssetReader } from "../../lib/html-preview-assets";
 import { langFromPath } from "../../lib/monaco";
 import { useTheme } from "../../lib/use-theme";
 import { Icon } from "./icons";
 import { fileIcon } from "./file-icons";
 import { MarkdownDoc } from "./MarkdownDoc";
+import type { DocumentImageReader } from "./MarkdownImage";
 import { HtmlDoc } from "./HtmlDoc";
 import { DiffTab } from "./DiffTab";
 import { TableView } from "./TableView";
@@ -31,6 +33,7 @@ import type {
   LspGotoKind,
   LspStatusInfo,
   LspTarget,
+  SemanticTokens,
 } from "../../lib/ipc";
 import type { TabKey } from "../../lib/tab-key";
 import { lspSemanticTokens } from "../../lib/ipc";
@@ -67,6 +70,8 @@ export interface OpenFile {
   baseContent: string;
   /** 디스크에서 읽은 시점의 mtime(ms) — 외부 변경 감지 기준. */
   mtime: number;
+  /** 내용·mtime이 같은 재읽기도 관련 정적 리소스를 갱신한다. */
+  reloadRevision?: number;
   dirty: boolean;
   /** 작업 폴더 밖에서 읽은 파일은 탭 정체성은 그대로 두고 수정만 막는다. */
   readOnly?: boolean;
@@ -85,6 +90,9 @@ type MonacoInst = Parameters<OnMount>[1];
 
 export interface EditorPaneProps {
   taskId: number | null;
+  /** HTML의 정적 리소스를 기존 워크스페이스 읽기 경계로 가져온다. */
+  readHtmlAsset?: HtmlAssetReader;
+  htmlAssetRoot?: string | null;
   files: OpenFile[];
   /** 지금 보고 있는 탭의 키. 실경로가 필요한 동작은 그 탭의 `path`를 쓴다. */
   activeKey: TabKey | null;
@@ -104,6 +112,9 @@ export interface EditorPaneProps {
   /** 렌더된 문서의 링크를 왼쪽 클릭했다. 링크를 푸는 것도 여는 것도 배치의 몫이다
    *  — 이 칸은 자기 id를 모르므로 "어디에 열지"를 답할 수 없다. */
   onOpenLink?: (sourceKey: TabKey, sourcePath: string, link: string) => void;
+  /** 문서 이미지의 실제 읽기는 파일 탭과 같은 workspace 경계를 사용한다. */
+  readFile?: DocumentImageReader;
+  rootPath?: string | null;
   /** 원격 파일은 클라이언트 OS 경로가 없으므로 기본 앱/Finder 동작을 숨긴다. */
   supportsExternalPath?: boolean;
   /** ⇧⏎ — 선택 영역(없으면 커서 줄)을 Python 콘솔로 보낸다. Python 파일에서만 걸린다.
@@ -161,6 +172,10 @@ export interface EditorPaneProps {
   navigationScope?: string;
   /** 이 파일에서 정의 이동을 쓸 수 있는지 물어본다. 없으면 상태 배지를 띄우지 않는다. */
   onLspStatus?: (path: string) => Promise<LspStatusInfo>;
+  /** 현재 작업 또는 프로젝트 범위에서 Java 등의 역할 기반 토큰을 가져온다. */
+  onSemanticTokens?: (path: string, text: string) => Promise<SemanticTokens | null>;
+  /** 서버·프로젝트가 바뀌면 같은 taskId라도 이전 LSP 응답을 버린다. */
+  lspScopeKey?: string;
   /** App이 지시하는 커서 이동 지점. 대상 파일 탭이 활성화된 뒤에 적용된다. */
   reveal?: {
     path: string;
@@ -256,6 +271,145 @@ const base = (p: string) => p.split("/").pop() ?? p;
  */
 const paneOrder: symbol[] = [];
 const paneFiles = new Map<symbol, () => OpenFile[]>();
+const paneSemanticModels = new Map<
+  symbol,
+  () => { scopeKey: string; path: string | null; modelUri: string | null }
+>();
+
+/** Monaco standalone provider는 언어별 전역이며 여러 provider의 결과를 합치지 않는다.
+ *
+ * pane마다 Java provider를 등록하면 마지막 pane의 provider가 다른 pane 모델에도 먼저 호출돼
+ * null을 돌리고, Monaco가 앞 provider로 되돌아가지 않는다. 언어별 dispatcher 하나가 현재
+ * 모델 URI를 가진 등록만 고르게 한다. LSP 서버마다 legend 순서가 다를 수 있으므로 응답은
+ * 공통 LSP legend로 다시 인코딩한다. */
+const DISPATCH_SEMANTIC_TYPES = [
+  "namespace", "type", "class", "enum", "interface", "struct", "typeParameter",
+  "parameter", "variable", "property", "enumMember", "event", "function", "method",
+  "macro", "keyword", "modifier", "comment", "string", "number", "regexp", "operator",
+  "decorator",
+];
+const DISPATCH_SEMANTIC_MODIFIERS = [
+  "declaration", "definition", "readonly", "static", "deprecated", "abstract", "async",
+  "modification", "documentation", "defaultLibrary",
+];
+const dispatchSemanticLegend = {
+  tokenTypes: DISPATCH_SEMANTIC_TYPES,
+  tokenModifiers: DISPATCH_SEMANTIC_MODIFIERS,
+};
+
+type SemanticDispatchHandler = {
+  matches: (modelUri: string) => boolean;
+  provide: (
+    model: Monaco.editor.ITextModel,
+    cancellationToken: Monaco.CancellationToken,
+  ) => Promise<Uint32Array | null>;
+};
+type SemanticDispatcher = {
+  handlers: Map<symbol, SemanticDispatchHandler>;
+  disposable: { dispose: () => void };
+  changed: Monaco.Emitter<void>;
+};
+const semanticDispatchers = new WeakMap<object, Map<string, SemanticDispatcher>>();
+
+function normalizeSemanticTokens(tokens: SemanticTokens): Uint32Array {
+  const types = new Map(DISPATCH_SEMANTIC_TYPES.map((type, index) => [type, index]));
+  const modifiers = new Map(DISPATCH_SEMANTIC_MODIFIERS.map((modifier, index) => [modifier, index]));
+  const data: number[] = [];
+  let sourceLine = 0;
+  let sourceCharacter = 0;
+  let emittedLine = 0;
+  let emittedCharacter = 0;
+  for (let offset = 0; offset < tokens.data.length; offset += 5) {
+    const deltaLine = tokens.data[offset];
+    const deltaCharacter = tokens.data[offset + 1];
+    const line = sourceLine + deltaLine;
+    const character = deltaLine === 0 ? sourceCharacter + deltaCharacter : deltaCharacter;
+    sourceLine = line;
+    sourceCharacter = character;
+    const type = tokens.legend.token_types[tokens.data[offset + 3]];
+    const typeIndex = type == null ? undefined : types.get(type);
+    // Dispatcher legend에 없는 서버 전용 token은 임의의 variable 색으로 바꾸지 않는다.
+    // source 위치는 이미 갱신했으므로 다음 알려진 token의 delta는 마지막으로 낸 token에서
+    // 다시 계산된다. 제외된 부분은 Monaco의 Monarch 구문 강조가 그대로 맡는다.
+    if (typeIndex == null) continue;
+    let modifierBits = 0;
+    const sourceModifierBits = tokens.data[offset + 4];
+    for (let index = 0; index < tokens.legend.token_modifiers.length; index += 1) {
+      if ((sourceModifierBits & (1 << index)) === 0) continue;
+      const target = modifiers.get(tokens.legend.token_modifiers[index]);
+      if (target != null) modifierBits |= 1 << target;
+    }
+    const emittedDeltaLine = line - emittedLine;
+    data.push(
+      emittedDeltaLine,
+      emittedDeltaLine === 0 ? character - emittedCharacter : character,
+      tokens.data[offset + 2],
+      typeIndex,
+      modifierBits,
+    );
+    emittedLine = line;
+    emittedCharacter = character;
+  }
+  return new Uint32Array(data);
+}
+
+function registerSemanticDispatcher(
+  m: MonacoInst,
+  language: string,
+  token: symbol,
+  handler: SemanticDispatchHandler,
+): { dispose: () => void } {
+  let byLanguage = semanticDispatchers.get(m);
+  if (byLanguage == null) {
+    byLanguage = new Map();
+    semanticDispatchers.set(m, byLanguage);
+  }
+  let dispatcher = byLanguage.get(language);
+  if (dispatcher == null) {
+    const handlers = new Map<symbol, SemanticDispatchHandler>();
+    const changed = new m.Emitter<void>();
+    const disposable = m.languages.registerDocumentSemanticTokensProvider(language, {
+      onDidChange: changed.event,
+      getLegend: () => dispatchSemanticLegend,
+      provideDocumentSemanticTokens: async (
+        model: Monaco.editor.ITextModel,
+        _lastResultId: string | null,
+        cancellationToken: Monaco.CancellationToken,
+      ) => {
+        const handler = [...handlers.values()].find((candidate) => candidate.matches(model.uri.toString()));
+        if (handler == null || cancellationToken.isCancellationRequested) return null;
+        const data = await handler.provide(model, cancellationToken);
+        return data == null ? null : { data, resultId: undefined };
+      },
+      releaseDocumentSemanticTokens: () => {},
+    });
+    dispatcher = { handlers, disposable, changed };
+    byLanguage.set(language, dispatcher);
+  }
+  dispatcher.handlers.set(token, handler);
+  // 이미 열린 다른 모델이 provider를 한 번 호출해 null을 받았을 수 있다. handler가 늦게
+  // 들어오면 Monaco에 다시 물어 보라고 알려 해당 모델을 편집하지 않아도 토큰을 채운다.
+  dispatcher.changed.fire();
+  return {
+    dispose: () => {
+      const current = byLanguage?.get(language);
+      if (current == null || current.handlers.get(token) !== handler) return;
+      current.handlers.delete(token);
+      if (current.handlers.size !== 0) {
+        current.changed.fire();
+        return;
+      }
+      current.disposable.dispose();
+      current.changed.dispose();
+      byLanguage?.delete(language);
+      if (byLanguage?.size === 0) semanticDispatchers.delete(m);
+    },
+  };
+}
+
+function refreshSemanticDispatcher(m: MonacoInst, language: string): void {
+  semanticDispatchers.get(m)?.get(language)?.changed.fire();
+}
 
 /** 이 칸이 그 경로의 조회를 맡는가. 아무 칸도 안 들고 있으면 누구도 답하지 않는다.
  *  모델을 가진 칸만 후보다 — diff 탭은 같은 경로를 갖지만 Monaco 모델이 없다. */
@@ -273,6 +427,8 @@ function ownsGoto(token: symbol, path: string): boolean {
 /** 탭 바 + Monaco 멀티파일 에디터. Cmd/Ctrl+S 저장. */
 export function EditorPane({
   taskId,
+  readHtmlAsset,
+  htmlAssetRoot,
   files,
   activeKey,
   dark,
@@ -285,6 +441,8 @@ export function EditorPane({
   onRevealPath,
   onLinkMenu,
   onOpenLink,
+  readFile,
+  rootPath,
   supportsExternalPath = true,
   onRunSelection,
   onOpenInRepl,
@@ -299,6 +457,8 @@ export function EditorPane({
   sourceVersion,
   navigationScope = String(taskId),
   onLspStatus,
+  onSemanticTokens,
+  lspScopeKey: suppliedLspScopeKey,
   reveal = null,
   onRevealed,
   onAsk,
@@ -395,6 +555,9 @@ export function EditorPane({
   const monacoRef = useRef<MonacoInst | null>(null);
   /** 시맨틱 토큰 프로바이더를 이미 건 언어 — 언어당 한 번만 등록한다. */
   const semanticLangsRef = useRef<Set<string>>(new Set());
+  const semanticDisposablesRef = useRef<{ dispose: () => void }[]>([]);
+  const semanticRequestRef = useRef(0);
+  const [monacoMountEpoch, setMonacoMountEpoch] = useState(0);
   const paneRef = useRef<HTMLDivElement>(null);
   /** 마크다운 프리뷰의 스크롤 컨테이너. ⌘L이 "이 문서 안의 선택인가"를 여기로 판정한다. */
   const docRef = useRef<HTMLDivElement>(null);
@@ -406,7 +569,7 @@ export function EditorPane({
   const tokenRef = useRef<symbol | null>(null);
   if (tokenRef.current === null) tokenRef.current = Symbol("editor-pane");
   const token = tokenRef.current;
-  const lspScopeKey = String(taskId);
+  const lspScopeKey = suppliedLspScopeKey ?? String(taskId);
   const [lspState, setLspState] = useState<LspInfoState>({
     scopeKey: lspScopeKey,
     path: null,
@@ -414,17 +577,48 @@ export function EditorPane({
     value: null,
   });
   const lspRequestRef = useRef(0);
+  const lspPollCountRef = useRef(0);
+  const [lspRefreshEpoch, setLspRefreshEpoch] = useState(0);
+  const requestLspRefreshRef = useRef<() => void>(() => undefined);
   const lspPath = active?.kind === "text" && !active.readOnly ? active.path : null;
   const lspCurrent =
     lspState.scopeKey === lspScopeKey && lspState.path === lspPath;
   const lspInfo =
-    lspCurrent && lspState.state === "ready" ? lspState.value : null;
+    lspCurrent ? lspState.value : null;
+  const lspScopeRef = useRef(lspScopeKey);
+  lspScopeRef.current = lspScopeKey;
+  const semanticTokensRef = useRef(onSemanticTokens);
+  semanticTokensRef.current = onSemanticTokens;
+  const semanticSupportedRef = useRef(true);
+  semanticSupportedRef.current =
+    !onLspStatus ||
+    (lspCurrent && lspState.state === "ready" && lspInfo?.available !== false);
+
+  const lspPhase = lspInfo?.phase ?? (lspInfo?.available ? "idle" : "unavailable");
+  const lspLabel =
+    lspPhase === "idle"
+      ? "코드 탐색 사용 가능"
+      : lspPhase === "starting"
+        ? "언어 서버 시작 중"
+        : lspPhase === "analyzing"
+          ? "프로젝트 분석 중"
+          : lspPhase === "ready"
+            ? "분석 준비됨"
+            : lspPhase === "error"
+              ? "언어 서버 오류"
+              : "정의 이동 불가";
 
   useEffect(() => {
     paneFiles.set(token, () => filesRef.current);
+    paneSemanticModels.set(token, () => ({
+      scopeKey: lspScopeRef.current,
+      path: activeRef.current,
+      modelUri: editorRef.current?.getModel()?.uri.toString() ?? null,
+    }));
     paneOrder.push(token);
     return () => {
       paneFiles.delete(token);
+      paneSemanticModels.delete(token);
       const at = paneOrder.indexOf(token);
       if (at >= 0) paneOrder.splice(at, 1);
     };
@@ -687,6 +881,8 @@ export function EditorPane({
         label: GOTO_LABEL[kind],
         message: String(e),
       });
+    } finally {
+      requestLspRefreshRef.current();
     }
   }, []);
   const runGotoRef = useRef(runGoto);
@@ -812,6 +1008,9 @@ export function EditorPane({
     (ed, m) => {
       editorRef.current = ed;
       monacoRef.current = m;
+      // 첫 파일은 effect보다 Monaco mount가 늦을 수 있다. 이 세대가 없으면 ref만 채워지고
+      // semantic effect는 다시 실행되지 않아 Java 토큰 provider가 등록되지 않는다.
+      setMonacoMountEpoch((epoch) => epoch + 1);
       registerLanguageFeatures(m);
       ed.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.KeyS, () => {
         const p = activeRef.current;
@@ -941,7 +1140,9 @@ export function EditorPane({
   // diff 탭은 파일을 편집하는 자리가 아니다 — 키로 물으면 `diff:` 접두가 그대로 IPC로 나간다.
   useEffect(() => {
     const request = ++lspRequestRef.current;
+    let poll: ReturnType<typeof setTimeout> | undefined;
     if (!onLspStatus || !lspPath) {
+      lspPollCountRef.current = 0;
       setLspState({
         scopeKey: lspScopeKey,
         path: lspPath,
@@ -965,6 +1166,21 @@ export function EditorPane({
           state: "ready",
           value: info,
         });
+        // 시작과 인덱싱은 끝난 뒤 한 번 더 확인해야 하지만, 유휴 상태를 계속 물으면
+        // 열린 파일마다 IPC 요청이 남는다. 한 파일·범위에서 최대 5분 동안만 갱신한다.
+        if (
+          info.available &&
+          (info.phase === "starting" || info.phase === "analyzing") &&
+          lspPollCountRef.current < 150
+        ) {
+          lspPollCountRef.current += 1;
+          poll = setTimeout(() => {
+            if (request === lspRequestRef.current)
+              setLspRefreshEpoch((epoch) => epoch + 1);
+          }, 2_000);
+        } else {
+          lspPollCountRef.current = 0;
+        }
       })
       .catch(() => {
         if (request !== lspRequestRef.current) return;
@@ -977,8 +1193,31 @@ export function EditorPane({
       });
     return () => {
       if (request === lspRequestRef.current) lspRequestRef.current += 1;
+      if (poll != null) clearTimeout(poll);
     };
-  }, [lspPath, lspScopeKey, onLspStatus]);
+  }, [lspPath, lspScopeKey, onLspStatus, lspRefreshEpoch]);
+
+  // 완료된 탐색 뒤에는 진행 상태가 준비됨으로 바뀌었는지 한 번 다시 읽는다. 이 함수는
+  // 상태를 묻는 것만 하며 언어 서버를 시작하지 않는 status 경로를 전제로 한다.
+  requestLspRefreshRef.current = () => {
+    if (onLspStatus && lspPath)
+      setLspRefreshEpoch((epoch) => epoch + 1);
+  };
+
+  // 프로젝트 범위가 바뀌면 이전 범위의 provider와 in-flight 응답을 모두 무효화한다.
+  // 정의 provider는 Monaco 언어 기능과 별도 수명을 가지므로 여기서 건드리지 않는다.
+  useEffect(() => {
+    semanticRequestRef.current += 1;
+    semanticLangsRef.current.clear();
+    semanticDisposablesRef.current.forEach((disposable) => disposable.dispose());
+    semanticDisposablesRef.current = [];
+    return () => {
+      semanticRequestRef.current += 1;
+      semanticLangsRef.current.clear();
+      semanticDisposablesRef.current.forEach((disposable) => disposable.dispose());
+      semanticDisposablesRef.current = [];
+    };
+  }, [lspScopeKey]);
 
   /**
    * 시맨틱 토큰 프로바이더 — **활성 파일의 언어에 대해, legend를 받아 본 뒤에** 건다.
@@ -995,55 +1234,108 @@ export function EditorPane({
   useEffect(() => {
     const m = monacoRef.current;
     if (!m || !active || active.kind !== "text" || active.readOnly) return;
+    // status callback이 있는 범위에서는 지원 여부가 확인된 뒤에만 semantic 요청을 보낸다.
+    // 지원하지 않는 파일에서 이 요청이 서버 시작의 계기가 되면 안 된다.
+    if (!semanticSupportedRef.current) return;
+    // 프리뷰 전용 Monaco mount나 원격·읽기 전용 경로는 semantic 요청 자체를 만들지 않는다.
+    // 특히 HTML 소스 미리보기는 언어 서버 기능을 넘기지 않으므로 모델을 읽을 이유도 없다.
+    if (semanticTokensRef.current == null && (taskIdRef.current == null || !gotoRef.current)) return;
     const language = langFromPath(active.path);
-    if (semanticLangsRef.current.has(language)) return;
+    if (semanticLangsRef.current.has(language)) {
+      // 분석 중 서버가 legend만 빈 data와 함께 돌려줄 수 있다. ready 전환은 한 번만 effect를
+      // 다시 실행하므로, 이미 등록한 dispatcher에 현재 모델을 편집하지 않고 다시 물어 본다.
+      if (lspPhase === "ready") refreshSemanticDispatcher(m, language);
+      return;
+    }
 
     let cancelled = false;
     const path = active.path;
+    const scope = lspScopeKey;
+    const request = ++semanticRequestRef.current;
     void (async () => {
       try {
-        const taskId = taskIdRef.current;
-        if (taskId == null) return;
-        const first = await lspSemanticTokens(
-          taskId,
-          path,
-          active.content ?? "",
-        );
-        if (cancelled || !first || first.legend.token_types.length === 0)
+        const ask = semanticTokensRef.current ?? ((nextPath: string, text: string) => {
+          const taskId = taskIdRef.current;
+          return taskId == null || !gotoRef.current
+            ? Promise.resolve(null)
+            : lspSemanticTokens(taskId, nextPath, text);
+        });
+        // 최초 응답은 서버의 legend 지원만 확인하며 data는 화면에 적용하지 않는다.
+        // 부팅 중 편집했어도 연결하고, 실제 토큰은 아래 provider가 최신 모델 값과 버전으로 조회한다.
+        const first = await ask(path, active.content ?? "");
+        if (
+          cancelled ||
+          request !== semanticRequestRef.current ||
+          lspScopeRef.current !== scope ||
+          activeRef.current !== path ||
+          !first ||
+          first.legend.token_types.length === 0
+        )
           return;
         if (semanticLangsRef.current.has(language)) return;
         semanticLangsRef.current.add(language);
-        const legend = {
-          tokenTypes: first.legend.token_types,
-          tokenModifiers: first.legend.token_modifiers,
-        };
-        disposablesRef.current.push(
-          m.languages.registerDocumentSemanticTokensProvider(language, {
-            getLegend: () => legend,
-            provideDocumentSemanticTokens: async (
+        semanticDisposablesRef.current.push(
+          registerSemanticDispatcher(m, language, token, {
+            matches: (modelUri) => {
+              const state = paneSemanticModels.get(token)?.();
+              return (
+                state?.scopeKey === scope &&
+                state.path != null &&
+                state.modelUri === modelUri &&
+                langFromPath(state.path) === language
+              );
+            },
+            provide: async (
               model: Monaco.editor.ITextModel,
+              cancellationToken: Monaco.CancellationToken,
             ) => {
               const file = filesRef.current.find(
                 (f) => m.Uri.parse(f.path).toString() === model.uri.toString(),
               );
-              if (!file || file.readOnly) return null;
+              if (
+                !file ||
+                file.readOnly ||
+                !semanticSupportedRef.current ||
+                lspScopeRef.current !== scope ||
+                cancellationToken.isCancellationRequested ||
+                activeRef.current !== file.path
+              )
+                return null;
+              const providerRequest = ++semanticRequestRef.current;
+              const version = model.getVersionId();
               try {
-                const nextTaskId = taskIdRef.current;
-                if (nextTaskId == null) return null;
-                const res = await lspSemanticTokens(
-                  nextTaskId,
-                  file.path,
-                  model.getValue(),
-                );
+                const ask = semanticTokensRef.current ?? ((nextPath: string, text: string) => {
+                  const taskId = taskIdRef.current;
+                  return taskId == null || !gotoRef.current
+                    ? Promise.resolve(null)
+                    : lspSemanticTokens(taskId, nextPath, text);
+                });
+                const res = await ask(file.path, model.getValue());
+                if (
+                  providerRequest !== semanticRequestRef.current ||
+                  lspScopeRef.current !== scope ||
+                  cancellationToken.isCancellationRequested ||
+                  model.getVersionId() !== version ||
+                  activeRef.current !== file.path
+                )
+                  return null;
                 return res
-                  ? { data: new Uint32Array(res.data), resultId: undefined }
+                  ? normalizeSemanticTokens(res)
                   : null;
               } catch {
                 // 서버가 죽었거나 파일이 지원 밖 — Monarch 색으로 후퇴한다.
                 return null;
+              } finally {
+                if (
+                  providerRequest === semanticRequestRef.current &&
+                  lspScopeRef.current === scope &&
+                  !cancellationToken.isCancellationRequested &&
+                  model.getVersionId() === version &&
+                  activeRef.current === file.path
+                )
+                  requestLspRefreshRef.current();
               }
             },
-            releaseDocumentSemanticTokens: () => {},
           }),
         );
       } catch {
@@ -1053,7 +1345,7 @@ export function EditorPane({
     return () => {
       cancelled = true;
     };
-  }, [active?.path, active?.kind]);
+  }, [active?.path, active?.kind, active?.readOnly, lspScopeKey, monacoMountEpoch, lspPhase]);
 
   // 모델 누수 방지: 닫힌 파일의 Monaco 모델을 dispose.
   //
@@ -1190,19 +1482,25 @@ export function EditorPane({
             {lspInfo?.server && (
               <span
                 className={`flex items-center gap-1 px-1 text-xs ${
-                  lspInfo.available ? "text-text-muted" : "text-status-awaiting"
+                  lspInfo.available && lspPhase !== "error"
+                    ? "text-text-muted"
+                    : "text-status-awaiting"
                 }`}
                 title={
-                  lspInfo.available
-                    ? `${lspInfo.server} — ⌘클릭·F12로 정의, ⌥⌘B로 구현, ⇧F12·선언 위 ⌘클릭으로 사용처`
-                    : (lspInfo.detail ?? "정의 이동을 쓸 수 없습니다")
+                  lspPhase === "idle" || lspPhase === "ready"
+                    ? [
+                        `${lspInfo.server} — ⌘클릭·F12로 정의, ⌥⌘B로 구현, ⇧F12·선언 위 ⌘클릭으로 사용처`,
+                        // 준비는 됐지만 결과가 온전하지 않을 수 있는 사유(프로젝트 컴파일 오류 등)
+                        lspInfo.detail,
+                      ]
+                        .filter(Boolean)
+                        .join("\n")
+                    : (lspInfo.detail ?? lspLabel)
                 }
-                aria-label={
-                  lspInfo.available ? "언어 서버 연결됨" : "언어 서버 사용 불가"
-                }
+                aria-label={lspInfo.detail ? `${lspLabel}: ${lspInfo.detail}` : lspLabel}
               >
                 <Icon name="plug" size={13} />
-                {!lspInfo.available && <span>정의 이동 불가</span>}
+                <span>{lspLabel}</span>
               </span>
             )}
             {/* 마크다운·HTML: 프리뷰 ⇄ 소스 토글 */}
@@ -1331,6 +1629,8 @@ export function EditorPane({
             options={{
               fontSize: codeFontSize,
               fontFamily: codeFontFamily,
+              lineHeight: Math.round(codeFontSize * 1.6),
+              "semanticHighlighting.enabled": true,
               minimap: { enabled: settings.minimap },
               scrollBeyondLastLine: false,
               automaticLayout: true,
@@ -1393,7 +1693,8 @@ export function EditorPane({
       ) : active.kind === "text" && activeIsHtml ? (
         // HTML 프리뷰 — iframe이 자체 스크롤을 가지므로 바깥에 overflow·패딩을 두지 않는다.
         <div className="flex-1 min-h-0">
-          <HtmlDoc html={active.content} title={base(active.path)} retainKeyboardFocus={shortcutsActive} />
+          <HtmlDoc html={active.content} title={base(active.path)} retainKeyboardFocus={shortcutsActive}
+            sourcePath={active.path} rootPath={htmlAssetRoot} readAsset={readHtmlAsset} revision={`${active.mtime}:${active.reloadRevision ?? 0}`} />
         </div>
       ) : active.kind === "text" ? (
         // 마크다운 프리뷰 (활성 마크다운 + 소스 모드 아님)
@@ -1401,6 +1702,9 @@ export function EditorPane({
           <MarkdownDoc
             text={active.content}
             dark={dark}
+            documentPath={active.path}
+            rootPath={rootPath}
+            readFile={readFile}
             onLinkMenu={onLinkMenu ? openMarkdownLinkMenu : undefined}
             onOpenLink={onOpenLink ? openMarkdownLink : undefined}
           />

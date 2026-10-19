@@ -17,8 +17,13 @@ dist-ssr
 .env.*
 !.env.example
 
-# Praxis worktrees (격리 작업 디렉터리)
+# Dojang project artifacts (격리 작업 디렉터리 포함)
+.dojang/
+# Existing worktrees remain excluded until they are retired.
 .praxis/
+
+# Dojang local verification artifacts
+.dojang/verification/
 
 # 임베딩 모델 캐시 (fastembed 자동 다운로드 — repo에 두지 않음, 100MB+)
 .fastembed_cache/

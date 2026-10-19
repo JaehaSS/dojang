@@ -188,6 +188,41 @@ describe("subagentThreads", () => {
   });
 });
 
+describe("Codex 서브에이전트 카드 투영", () => {
+  const rootId = "codex:root-a:child-a";
+  const nestedId = "codex:root-a:child-b";
+
+  it("중첩 메타데이터가 먼저 와도 부모 체인을 따라 루트 카드와 탭에 묶는다", () => {
+    const items: ActivityItem[] = [
+      { role: "subagent_state", subagentId: nestedId, parentId: rootId, state: "done", summary: "중첩 작업", model: "gpt-6.1-mini" },
+      { role: "text", parentId: nestedId, text: "중첩 결과" },
+      { role: "tool", parentId: nestedId, name: "Read", summary: "nested.ts" },
+      { role: "subagent_state", subagentId: rootId, state: "running", title: "관측한 루트 이름", summary: "루트 작업", model: "gpt-6.1-sol", observationStatus: "available" },
+      { role: "text", parentId: rootId, text: "루트 결과" },
+    ];
+
+    expect(subagentRootMap(items).get(nestedId)).toBe(rootId);
+    const threads = subagentThreads(items);
+    expect(threads).toHaveLength(1);
+    expect(threads[0]).toMatchObject({
+      id: rootId,
+      title: "관측한 루트 이름",
+      state: "running",
+      vendor: "codex",
+      model: "gpt-6.1-sol",
+      lastOp: "Read · nested.ts",
+    });
+    expect(threads[0].items.filter((item) => item.role === "text").map((item) => item.text)).toEqual(["중첩 결과", "루트 결과"]);
+  });
+
+  it("Codex의 명시 상태는 부모 busy 해제와 무관하게 보존한다", () => {
+    const entries = subagentEntries([
+      { role: "subagent_state", subagentId: rootId, state: "unknown", summary: "관측 부족", observationStatus: "unreadable" },
+    ]);
+    expect(entries[0]).toMatchObject({ state: "unknown", vendor: "codex", observationStatus: "unreadable" });
+  });
+});
+
 describe("activityEntries (서브 에이전트 제외)", () => {
   it("서브 에이전트 소속(parented) 이벤트는 메인 타임라인에서 제외한다", () => {
     const entries = activityEntries([taskSpawn, subTool, subToolResult, taskDone]);

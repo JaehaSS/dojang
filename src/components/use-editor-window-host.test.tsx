@@ -24,10 +24,12 @@ const mocks = vi.hoisted(() => {
       open_paths: [] as string[],
       active_path: null as string | null,
     })),
+    editorProjectPrepare: vi.fn(async (root: string) => ({ root, label: "editor", launch: false })),
   };
 });
 
 vi.mock("@tauri-apps/api/event", () => ({ emitTo: mocks.emitTo, listen: mocks.listen }));
+vi.mock("../lib/project-editor-ipc", () => ({ editorProjectPrepare: mocks.editorProjectPrepare }));
 vi.mock("../lib/ipc", () => ({
   editorWindowOpen: mocks.editorWindowOpen,
   editorWindowHide: mocks.editorWindowHide,
@@ -145,6 +147,7 @@ const fire = async <T,>(name: string, payload: T) => {
 };
 
 beforeEach(() => {
+  localStorage.clear();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -161,6 +164,73 @@ afterEach(async () => {
 });
 
 describe("useEditorWindowHost", () => {
+  it("홈 프로젝트도 공용 창에 열고 다음 세션 선택을 따라간다", async () => {
+    await render({ taskId: null });
+    await act(async () => { await host?.openProject("/repo/first"); });
+    expect(mocks.editorWindowOpen).toHaveBeenCalledOnce();
+    expect(host?.poppedOut).toBe(true);
+    expect(mocks.emitTo).toHaveBeenCalledWith(EDITOR_WINDOW_LABEL, EDITOR_SESSION_EVENT, {
+      kind: "project", root: "/repo/first", open_paths: [], active_path: null,
+    });
+    mocks.emitTo.mockClear();
+    await render({ taskId: 43 });
+    expect(mocks.emitTo).toHaveBeenCalledWith(EDITOR_WINDOW_LABEL, EDITOR_SESSION_EVENT,
+      expect.objectContaining({ task_id: 43 }));
+  });
+
+  it("홈 프로젝트를 다시 고르면 같은 창에 새 루트를 보낸다", async () => {
+    await render({ taskId: null });
+    await act(async () => { await host?.openProject("/repo/first"); });
+    await act(async () => { await host?.openProject("/repo/second"); });
+    mocks.emitTo.mockClear();
+    await fire(EDITOR_READY_EVENT, null);
+    expect(mocks.emitTo).toHaveBeenCalledWith(EDITOR_WINDOW_LABEL, EDITOR_SESSION_EVENT,
+      expect.objectContaining({ kind: "project", root: "/repo/second" }));
+  });
+
+  it("프로젝트마다 저장한 탭을 다시 열고 닫을 때 세션 탭으로 섞지 않는다", async () => {
+    localStorage.setItem("praxis-project-editor:/repo/first", JSON.stringify({ paths: ["notes.md"], active: "notes.md" }));
+    const onPopIn = vi.fn();
+    await render({ taskId: null, onPopIn });
+    await act(async () => { await host?.openProject("/repo/first"); });
+    expect(mocks.emitTo).toHaveBeenCalledWith(EDITOR_WINDOW_LABEL, EDITOR_SESSION_EVENT, {
+      kind: "project", root: "/repo/first", open_paths: ["notes.md"], active_path: "notes.md",
+    });
+    await fire(EDITOR_CLOSED_EVENT, { kind: "project", root: "/repo/first" });
+    expect(host?.poppedOut).toBe(false);
+    expect(mocks.editorWindowHide).toHaveBeenCalledOnce();
+    expect(onPopIn).not.toHaveBeenCalled();
+  });
+
+  it("홈 프로젝트 준비 중 세션을 고르면 늦은 프로젝트가 선택을 덮지 않는다", async () => {
+    let finish!: (info: { root: string; label: string; launch: boolean }) => void;
+    mocks.editorProjectPrepare.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await render({ taskId: null });
+    let opening!: Promise<string>;
+    act(() => { opening = host!.openProject("/repo/first"); });
+    await render({ taskId: 77 });
+    await act(async () => { finish({ root: "/repo/first", label: "editor", launch: false }); await opening; });
+    expect(mocks.editorWindowOpen).not.toHaveBeenCalled();
+    expect(mocks.emitTo).not.toHaveBeenCalledWith(EDITOR_WINDOW_LABEL, EDITOR_SESSION_EVENT,
+      expect.objectContaining({ kind: "project" }));
+  });
+
+  it("프로젝트 열기가 실패하면 팝아웃으로 바꾸지 않는다", async () => {
+    await render({ taskId: null });
+    mocks.editorWindowOpen.mockRejectedValueOnce(new Error("open failed"));
+    await act(async () => { await expect(host!.openProject("/repo/first")).rejects.toThrow("open failed"); });
+    expect(host?.poppedOut).toBe(false);
+  });
+
+  it("같은 세션 번호여도 호스트를 바꾸면 공용 창이 새 호스트를 따른다", async () => {
+    await render({ taskId: 42, host: "local" });
+    await act(async () => { await host?.popOut(); });
+    mocks.emitTo.mockClear();
+    await render({ taskId: 42, host: "remote" });
+    expect(mocks.emitTo).toHaveBeenCalledWith(EDITOR_WINDOW_LABEL, EDITOR_SESSION_EVENT,
+      expect.objectContaining({ task_id: 42, host: "remote" }));
+  });
+
   it("창을 보인 다음에 팝아웃 상태가 된다", async () => {
     // 탭을 먼저 지우고 창 열기에 실패하면 에디터가 어디에도 없게 된다.
     await render();

@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
+import { copyText } from "../../lib/clipboard";
 import {
   fsCreateDir,
   fsCreateFile,
@@ -171,7 +172,7 @@ export function useTreeFileOps({
               onSelect: () => trash(node),
             },
             null,
-            { key: "copyPath", label: "경로 복사", onSelect: () => void navigator.clipboard?.writeText(node.path).catch(() => undefined) },
+            { key: "copyPath", label: "경로 복사", onSelect: () => void copyText(node.path).catch(() => undefined) },
             ...(onCopyAbsPath == null
               ? []
               : [{ key: "copyAbsPath", label: "절대 경로 복사", onSelect: () => onCopyAbsPath(node.path) }]),

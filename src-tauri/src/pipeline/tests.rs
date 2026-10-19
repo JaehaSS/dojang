@@ -159,6 +159,7 @@ fn valid_split() -> SplitOutput {
             out_of_scope: vec![],
         },
         tickets: vec![ticket("T1", &[], &["R1"]), ticket("T2", &["T1"], &["R2"])],
+        ..Default::default()
     }
 }
 
@@ -238,6 +239,43 @@ fn validate_split_error_kinds() {
     let mut o = valid_split();
     o.tickets[0].title = s(" ");
     assert!(has(&errs_of(&o), "제목이 비어"));
+}
+
+#[test]
+fn validate_split_intake_decisions() {
+    // clarify·decline은 스펙·티켓 없이도 유효하다. 대신 질문·사유가 있어야 한다.
+    let mut o = SplitOutput { decision: SplitDecision::Clarify, ..Default::default() };
+    assert!(has(&errs_of(&o), "questions가 비어"));
+    o.questions = sv(&["무엇을 만들 건가?"]);
+    assert!(validate_split(&o, VENDORS, MAX_TICKETS).is_ok());
+    let mut d = SplitOutput { decision: SplitDecision::Decline, ..Default::default() };
+    assert!(has(&errs_of(&d), "reason이 비어"));
+    d.reason = s("다른 저장소 대상");
+    assert!(validate_split(&d, VENDORS, MAX_TICKETS).is_ok());
+    // split은 기존 규칙 그대로.
+    assert!(has(&errs_of(&SplitOutput::default()), "요구사항이 하나도 없다"));
+}
+
+#[test]
+fn clarification_from_output_and_answer_feedback() {
+    assert!(Clarification::from_output(&valid_split()).is_none());
+    let o = SplitOutput {
+        decision: SplitDecision::Clarify,
+        questions: sv(&[" 어떤 기능? ", "", "범위는?", "넷째", "다섯째"]),
+        reason: s(" 브레인스토밍 요청 "),
+        ..Default::default()
+    };
+    let c = Clarification::from_output(&o).unwrap();
+    assert_eq!(c.questions, sv(&["어떤 기능?", "범위는?", "넷째"]), "빈 질문 제거, 최대 3개");
+    assert_eq!(c.reason, "브레인스토밍 요청");
+    let fb = c.feedback_for_answer("  로그인 화면을 만든다 ");
+    assert!(fb.contains("다시 질문하지 말고") && fb.contains("- 어떤 기능?") && fb.ends_with("로그인 화면을 만든다"));
+    let d = Clarification { decision: SplitDecision::Decline, questions: vec![], reason: s("대상 없음") };
+    assert!(d.feedback_for_answer("그래도 진행").contains("이전 판정 사유: 대상 없음"));
+    // JSON은 lowercase 판정으로 오간다.
+    let j = serde_json::to_string(&c).unwrap();
+    assert!(j.contains("\"decision\":\"clarify\""));
+    assert_eq!(serde_json::from_str::<Clarification>(&j).unwrap(), c);
 }
 
 #[test]
@@ -401,6 +439,9 @@ fn split_prompt_contains_contract() {
     assert!(p.contains("로그인 추가"));
     assert!(p.contains("최대 8개"));
     assert!(p.contains("main"));
+    // intake 게이트: 구현 요청이 아니면 티켓 대신 질문을 내게 한다.
+    assert!(p.contains("clarify") && p.contains("decline") && p.contains("슬래시 명령"));
+    assert!(p.contains(r#""decision":"split|clarify|decline""#));
     assert!(!p.contains("=== 이전 안에 대한 지적"));
     let p2 = build_split_prompt("g", "main", VENDORS, "N", Some("T1이 너무 크다"));
     assert!(p2.contains("=== 이전 안에 대한 지적"));
@@ -420,6 +461,10 @@ fn parse_split_output_cases() {
     assert!(parse_split_output(SPLIT_JSON, "NN")
         .unwrap_err()
         .contains("nonce"));
+    let clarify = parse_split_output("NN\n{\"decision\":\"clarify\",\"questions\":[\"q\"]}", "NN").unwrap();
+    assert_eq!(clarify.decision, SplitDecision::Clarify);
+    assert!(clarify.tickets.is_empty());
+    assert_eq!(parse_split_output(&format!("NN\n{SPLIT_JSON}"), "NN").unwrap().decision, SplitDecision::Split, "decision 생략은 split");
     assert!(parse_split_output("NN\n{not json", "NN").is_err());
     assert!(parse_split_output("NN\n{\"tickets\": 3}", "NN").is_err());
     assert!(parse_split_output("NN no json", "NN").is_err());
@@ -705,6 +750,34 @@ async fn reject_plan_returns_to_drafting_with_feedback() {
 }
 
 #[tokio::test]
+async fn clarification_pauses_from_drafting_and_answer_returns_with_feedback() {
+    let p = pool().await;
+    let run = insert_run(&p, "/repo", "main", "g", 1).await.unwrap();
+    set_run_feedback(&p, run, Some("옛 피드백"), 1).await.unwrap();
+    assert!(set_run_clarification(&p, run, r#"{"decision":"clarify","questions":["q"]}"#, "질문 1건", 2).await.unwrap());
+    let r = get_run(&p, run).await.unwrap().unwrap();
+    assert_eq!((r.state.as_str(), r.paused_from.as_deref(), r.paused_reason.as_deref()), ("paused", Some("drafting"), Some("질문 1건")));
+    assert_eq!(r.spec_revision, 1, "캐시된 split 토큰을 피하려고 revision을 올린다");
+    assert!(r.feedback.is_none(), "옛 피드백은 소비된다");
+    assert!(r.clarification_json.as_deref().unwrap().contains("clarify"));
+    // 이미 멈춘 뒤 다시 적용(재시작 캐시)하면 질문만 갱신하고 revision은 그대로.
+    assert!(!set_run_clarification(&p, run, r#"{"decision":"clarify","questions":["q2"]}"#, "질문", 3).await.unwrap());
+    let r = get_run(&p, run).await.unwrap().unwrap();
+    assert_eq!(r.spec_revision, 1);
+    assert!(r.clarification_json.as_deref().unwrap().contains("q2"));
+
+    assert!(answer_clarification(&p, run, "답변 피드백", 4).await.unwrap());
+    let r = get_run(&p, run).await.unwrap().unwrap();
+    assert_eq!(r.state, "drafting");
+    assert!(r.paused_from.is_none() && r.paused_reason.is_none() && r.clarification_json.is_none());
+    assert_eq!(r.feedback.as_deref(), Some("답변 피드백"));
+    // Drafting에서는 답할 수 없고, 질문 없이 멈춘 실행도 답할 수 없다.
+    assert!(!answer_clarification(&p, run, "x", 5).await.unwrap());
+    assert!(pause_run(&p, run, RunState::Drafting, "내부 오류", 6).await.unwrap());
+    assert!(!answer_clarification(&p, run, "x", 7).await.unwrap());
+}
+
+#[tokio::test]
 async fn retry_and_skip_ticket_follow_escalation() {
     let p = pool().await;
     let run = insert_run(&p, "/repo", "main", "g", 1).await.unwrap();
@@ -784,10 +857,69 @@ async fn guard_blocks_pipeline_managed_tasks_until_g2() {
 }
 
 #[tokio::test]
+async fn integration_task_redirects_to_its_active_run_only() {
+    let p = pool().await;
+    let run = insert_run(&p, "/repo", "main", "g", 1).await.unwrap();
+    let o = valid_split();
+    replace_tickets(&p, run, &o.tickets, 2).await.unwrap();
+    let t = list_tickets(&p, run).await.unwrap().remove(0);
+    set_ticket_task(&p, t.id, Some(101), 3).await.unwrap();
+    assert!(claim_run_integration(&p, run, 100, "br", "/wt", 4).await.unwrap());
+
+    // 일반 작업과 티켓 작업은 실행으로 돌리지 않는다 — 티켓은 파이프라인 화면의 재시도·건너뛰기가 맡는다.
+    assert_eq!(active_run_for_integration_task(&p, 555).await.unwrap(), None);
+    assert_eq!(active_run_for_integration_task(&p, 101).await.unwrap(), None);
+    // 통합 작업은 가드가 막는 상태마다 실행으로 돌린다(실행 #1이 멈춰 있던 계획 승인 대기 포함).
+    for active in ["drafting", "plan_review", "awaiting_plan_approval", "executing", "final_review", "paused"] {
+        sqlx::query("UPDATE pipeline_runs SET state = ? WHERE id = ?").bind(active).bind(run).execute(&p).await.unwrap();
+        assert_eq!(active_run_for_integration_task(&p, 100).await.unwrap(), Some(run), "{active}");
+        assert!(pipeline_guard_for_task(&p, 100).await.unwrap().is_some(), "{active}");
+    }
+    // 가드가 푸는 곳에서는 돌리지 않는다 — 일반 승인·폐기·삭제 경로가 그대로 처리한다.
+    for open in ["awaiting_merge_approval", "done", "cancelled", "failed"] {
+        sqlx::query("UPDATE pipeline_runs SET state = ? WHERE id = ?").bind(open).bind(run).execute(&p).await.unwrap();
+        assert_eq!(active_run_for_integration_task(&p, 100).await.unwrap(), None, "{open}");
+        assert_eq!(pipeline_guard_for_task(&p, 100).await.unwrap(), None, "{open}");
+    }
+}
+
+#[tokio::test]
 async fn claim_integration_refuses_cancelled_run() {
     let p = pool().await;
     let run = insert_run(&p, "/repo", "main", "g", 1).await.unwrap();
     assert!(cancel_run(&p, run, 2).await.unwrap());
     assert!(!claim_run_integration(&p, run, 100, "br", "/wt", 3).await.unwrap());
     assert_eq!(get_run(&p, run).await.unwrap().unwrap().integration_task_id, None);
+}
+
+#[tokio::test]
+async fn list_runs_summary_aggregates_tickets_and_active_step() {
+    let p = pool().await;
+    let run = insert_run(&p, "/repo", "main", "g", 1).await.unwrap();
+    let empty = insert_run(&p, "/repo", "main", "g2", 1).await.unwrap();
+    replace_tickets(&p, run, &valid_split().tickets, 2).await.unwrap();
+    let ts = list_tickets(&p, run).await.unwrap();
+    sqlx::query("UPDATE pipeline_tickets SET state = 'integrated' WHERE id = ?")
+        .bind(ts[0].id)
+        .execute(&p)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE pipeline_tickets SET state = 'escalated' WHERE id = ?")
+        .bind(ts[1].id)
+        .execute(&p)
+        .await
+        .unwrap();
+    let key = step_key(run, "baseline", None, 0);
+    begin_step(&p, run, None, "baseline", None, &key, "", 3).await.unwrap();
+
+    let rows = list_runs_summary(&p, Some("/repo")).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    let r = rows.iter().find(|r| r.run.id == run).unwrap();
+    assert_eq!((r.tickets_total, r.tickets_integrated, r.tickets_escalated), (2, 1, 1));
+    assert_eq!(r.active_step_kind.as_deref(), Some("baseline"));
+    let e = rows.iter().find(|r| r.run.id == empty).unwrap();
+    assert_eq!((e.tickets_total, e.active_step_kind.clone()), (0, None));
+    let json = serde_json::to_value(r).unwrap();
+    assert_eq!(json["repo"], "/repo");
+    assert_eq!(json["tickets_total"], 2);
 }

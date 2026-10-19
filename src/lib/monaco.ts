@@ -9,6 +9,14 @@ import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
 import { installPythonHighlighting } from "./python-highlighting";
 import { getActiveTheme, subscribeTheme, THEMES, type Theme } from "./themes";
+import { selectAllInFocusedSurface } from "./select-all";
+import { syntaxTokenRules } from "./monaco-theme-rules";
+import { setDiffTokenizer, type TokenSpan } from "./diff-highlight";
+
+window.addEventListener("dojang:select-all", (event) => {
+  event.preventDefault();
+  selectAllInFocusedSurface(monaco.editor.getEditors(), document);
+});
 
 (self as unknown as { MonacoEnvironment: monaco.Environment }).MonacoEnvironment = {
   getWorker(_workerId, label) {
@@ -20,62 +28,16 @@ import { getActiveTheme, subscribeTheme, THEMES, type Theme } from "./themes";
   },
 };
 
-const hex = (c: string) => c.replace("#", "");
-
 // 앱 색 토큰에 맞춘 표면색 + 테마가 선언한 구문색.
 // Monaco 테마 이름 = themes.ts의 테마 id — EditorPane이 활성 테마 id를 그대로 넘긴다.
 /** 같은 이름 defineTheme은 덮어쓰기이므로 커스텀/드래프트 재정의에도 그대로 쓴다. */
 export function defineMonacoTheme(theme: Theme) {
   const t = theme.tokens;
-  const s = theme.syntax;
-  const pythonFunction = theme.kind === "dark" ? "DCDCAA" : "795E26";
   monaco.editor.defineTheme(theme.id, {
     base: theme.kind === "dark" ? "vs-dark" : "vs",
     inherit: true,
-    // syntax 없는 테마는 Monaco 기본색을 상속하되 Python 함수만 구분한다.
-    // 기본 Praxis 2종은 syntax 팔레트가 없으므로 이 규칙이 def·호출 이름을 분리한다.
-    //
-    // syntax 팔레트에서는 `identifier`도 명시해 색의 출처를 테마로 고정한다.
-    // 팔레트 없는 테마의 identifier는 Monaco 본문색을 그대로 상속한다.
-    rules: s
-      ? [
-          { token: "keyword", foreground: hex(s.keyword) },
-          { token: "string", foreground: hex(s.string) },
-          { token: "string.escape", foreground: hex(s.string) },
-          { token: "number", foreground: hex(s.number) },
-          { token: "comment", foreground: hex(s.comment) },
-          { token: "comment.doc", foreground: hex(s.comment) },
-          { token: "type", foreground: hex(s.type) },
-          { token: "type.identifier", foreground: hex(s.type) },
-          { token: "namespace", foreground: hex(s.type) },
-          { token: "function", foreground: hex(s.func) },
-          { token: "annotation", foreground: hex(s.func) },
-          { token: "variable", foreground: hex(s.variable) },
-          { token: "variable.predefined", foreground: hex(s.variable) },
-          { token: "constant", foreground: hex(s.constant) },
-          { token: "regexp", foreground: hex(s.constant) },
-          { token: "operator", foreground: hex(s.operator) },
-          { token: "delimiter", foreground: hex(s.operator) },
-          { token: "tag", foreground: hex(s.tag) },
-          { token: "attribute.name", foreground: hex(s.tag) },
-          { token: "metatag", foreground: hex(s.tag) },
-          // Monarch가 언어마다 다른 이름으로 내보내는 것들. 여기 없으면 그 언어에서만
-          // 색이 빠져 "TS는 되는데 Rust는 안 된다" 같은 증상이 된다.
-          { token: "identifier", foreground: hex(s.variable) },
-          { token: "entity.name.function", foreground: hex(s.func) },
-          { token: "support.function", foreground: hex(s.func) },
-          { token: "entity.name.type", foreground: hex(s.type) },
-          { token: "entity.name.type.class", foreground: hex(s.type) },
-          { token: "entity.name.type.interface", foreground: hex(s.type), fontStyle: "italic" },
-          { token: "support.type", foreground: hex(s.type) },
-          { token: "storage.type", foreground: hex(s.keyword) },
-          { token: "keyword.control", foreground: hex(s.keyword) },
-          { token: "constant.language", foreground: hex(s.constant) },
-          { token: "constant.numeric", foreground: hex(s.number) },
-          { token: "variable.parameter", foreground: hex(s.variable), fontStyle: "italic" },
-          { token: "variable.other.constant", foreground: hex(s.constant) },
-        ]
-      : [{ token: "function.python", foreground: pythonFunction }],
+    // 규칙 표는 monaco-theme-rules.ts가 소유한다 — diff 구문 강조가 같은 표를 읽는다(설계 DR-11).
+    rules: syntaxTokenRules(theme),
     colors: {
       "editor.background": t.bg,
       "editor.foreground": t.text,
@@ -100,6 +62,33 @@ defineMonacoTheme(getActiveTheme());
 // @monaco-editor/react가 번들된 monaco를 쓰도록 (기본 CDN 로더 대체).
 loader.config({ monaco });
 installPythonHighlighting(monaco);
+
+// diff 본문 구문 강조의 토크나이저 주입(설계 DR-12). diff-highlight.ts는 monaco를 모르므로
+// 여기서 등록한다 — 등록 전(부팅·테스트)에는 diff가 평문으로 그려진다.
+setDiffTokenizer(async (lines, lang) => {
+  const empty = (): TokenSpan[][] => lines.map(() => []);
+  const entry = monaco.languages.getLanguages().find((language) => language.id === lang);
+  if (!entry || lang === "plaintext") return empty();
+  // standalone 빌드의 언어는 지연 로드다. `tokenize`는 토크나이저 팩토리를 깨우기만 하고
+  // 기다리지 않아, 에디터가 아직 그 언어를 열지 않았으면 첫 호출이 전부 평문으로 돌아온다.
+  // 언어 정의의 `loader`는 모듈 import만 하고 팩토리를 해소하지 않는다(0.55 기준).
+  // 공개 API 중 팩토리 해소를 기다리는 것은 `colorize`뿐이라 빈 문자열로 한 번 부른다.
+  try {
+    await monaco.editor.colorize("", lang, {});
+  } catch {
+    // 해소에 실패해도 tokenize는 평문으로 동작한다.
+  }
+  // tokenize는 `\r`도 줄 경계로 본다. CRLF 파일의 줄 끝 `\r`이 남아 있으면 행이 밀려
+  // 다른 줄의 색을 칠하게 되므로, 길이가 같은 공백으로 바꿔 offset과 1:1 정렬을 지킨다.
+  const rows = monaco.editor.tokenize(lines.map((line) => line.replace(/\r/g, " ")).join("\n"), lang);
+  return lines.map((line, index) =>
+    (rows[index] ?? []).map((token, i, row) => ({
+      start: token.offset,
+      end: row[i + 1]?.offset ?? line.length,
+      type: token.type,
+    })),
+  );
+});
 
 // 언어 판별은 lang-from-path.ts가 소유한다(monaco 의존 없는 순수 모듈) — 기존 import 경로 보존을 위해 재수출.
 export { langFromPath } from "./lang-from-path";

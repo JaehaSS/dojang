@@ -71,7 +71,7 @@ pub(super) fn changes(path: &Path) -> anyhow::Result<Vec<ChangedPath>> {
                 .ok_or_else(|| anyhow::anyhow!("incomplete Git rename"))?;
         }
         if status == "??"
-            && (name.starts_with(".praxis/worktrees/") || name.starts_with(".praxis/approval/"))
+            && crate::project_paths::is_auxiliary_path(name)
         {
             continue;
         }

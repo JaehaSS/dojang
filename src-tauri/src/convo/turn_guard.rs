@@ -8,7 +8,8 @@ pub(crate) const TURN_COMPLETION_GUARD: &str = "\
 - Run delegated work in foreground; collect every terminal result before ending this turn.
 - Never leave background processes or servers running after the turn.
 - Keep builds/tests in foreground. If a tool yields a running process, stay in this turn and collect its result.
-- Before the final answer, verify the actual diff and relevant tests; do not claim completion or promise later notification while work remains active.";
+- Before the final answer, verify the actual diff and relevant tests; do not claim completion or promise later notification while work remains active.
+- Write every file path in replies as a full absolute path (e.g. /Users/me/repo/src/main.rs:42), never relative to the working directory; Dojang resolves file links from them and relative paths fail to open.";
 
 pub(crate) fn completion_system_prompt(vendor: Vendor) -> Option<&'static str> {
     (vendor == Vendor::Claude).then_some(TURN_COMPLETION_GUARD)

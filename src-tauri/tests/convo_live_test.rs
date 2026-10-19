@@ -37,17 +37,25 @@ fn collect(vendor: Vendor, msg: &str) -> (Result<String, String>, Vec<ConvoEvent
 fn agy_conversation_emits_text_and_result() {
     let (res, evs) = collect(
         Vendor::Agy,
-        "Reply with exactly the single word KIWI and nothing else. Do not use any tools.",
+        "Run the shell command `echo KIWI` with your terminal tool, then reply with the single word it printed.",
     );
     println!("agy result={res:?}\nevents={evs:#?}");
-    assert!(res.is_ok(), "run_turn 성공해야: {res:?}");
+    let session = res.expect("run_turn 성공해야");
     assert!(
-        evs.iter().any(|e| matches!(e, ConvoEvent::Text { .. })),
-        "agy는 전체 출력을 Text 1블록으로 내야 함: {evs:?}"
+        !session.is_empty() && session != praxis_lib::convo::AGY_CONTINUE,
+        "stream-json의 conversation_id를 resume 토큰으로 돌려줘야 함: {session}"
     );
     assert!(
-        evs.iter().any(|e| matches!(e, ConvoEvent::Result { .. })),
-        "합성 Result로 턴 종료를 알려야 함: {evs:?}"
+        evs.iter().any(|e| matches!(e, ConvoEvent::ToolUse { .. })),
+        "툴 호출이 카드로 흘러야 함: {evs:?}"
+    );
+    assert!(
+        evs.iter().any(|e| matches!(e, ConvoEvent::Text { text, .. } if text.contains("KIWI"))),
+        "응답 텍스트가 흘러야 함: {evs:?}"
+    );
+    assert!(
+        evs.iter().any(|e| matches!(e, ConvoEvent::Result { is_error: false, .. })),
+        "Result로 턴 종료를 알려야 함: {evs:?}"
     );
 }
 

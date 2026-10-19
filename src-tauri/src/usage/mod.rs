@@ -7,7 +7,7 @@
 //!   statusline JSON의 `rate_limits`를 그대로 덤프), (2) macOS Keychain 또는 레거시
 //!   `~/.claude/.credentials.json`의 OAuth 토큰으로 `/api/oauth/usage` 조회. (1)이 신선하면
 //!   네트워크를 타지 않는다.
-//! - Antigravity: 잔량을 노출하는 로컬 소스가 없어 `unsupported` 고정.
+//! - Antigravity: Hub/IDE의 로컬 quota 또는 macOS Keychain 로그인으로 Google API 조회.
 //!
 //! 네트워크 조회는 429가 잦아(claude-code#31637) `MIN_OAUTH_INTERVAL` 간격으로만 재시도하고
 //! 그 사이에는 프로세스 메모리 캐시를 돌려준다.
@@ -18,6 +18,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+mod antigravity;
+mod antigravity_oauth;
 pub mod bridge;
 mod claude_credentials;
 mod last_success;
@@ -42,6 +44,14 @@ pub struct UsageWindow {
     pub window_minutes: Option<u64>,
 }
 
+/// 서로 한도를 공유하는 모델 그룹. Antigravity의 Gemini와 Claude·GPT는 별도 한도다.
+#[derive(Debug, Clone, Serialize)]
+pub struct QuotaGroup {
+    pub label: String,
+    pub five_hour: Option<UsageWindow>,
+    pub weekly: Option<UsageWindow>,
+}
+
 /// 벤더 한 곳의 잔량 스냅샷.
 #[derive(Debug, Clone, Serialize)]
 pub struct VendorUsage {
@@ -57,7 +67,9 @@ pub struct VendorUsage {
     pub plan: Option<String>,
     pub five_hour: Option<UsageWindow>,
     pub weekly: Option<UsageWindow>,
-    /// "session-log" | "statusline" | "oauth" | "manual-token" — 값의 출처.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub quota_groups: Vec<QuotaGroup>,
+    /// "session-log" | "statusline" | "oauth" | "manual-token" | "antigravity-local" | "antigravity-oauth".
     pub source: Option<String>,
     /// 데이터가 관측된 시각(epoch secs).
     pub updated_at: Option<i64>,
@@ -74,6 +86,7 @@ impl VendorUsage {
             plan: None,
             five_hour: None,
             weekly: None,
+            quota_groups: Vec::new(),
             source: None,
             updated_at: None,
         }
@@ -330,6 +343,7 @@ fn codex_usage(now: i64) -> VendorUsage {
             .map(str::to_string),
         five_hour,
         weekly,
+        quota_groups: Vec::new(),
         source: Some("session-log".into()),
         updated_at: Some(observed),
     }
@@ -363,6 +377,7 @@ fn claude_from_bridge(home: &Path, now: i64) -> Option<VendorUsage> {
         plan: v.get("plan").and_then(|p| p.as_str()).map(str::to_string),
         five_hour,
         weekly,
+        quota_groups: Vec::new(),
         source: Some("statusline".into()),
         updated_at: Some(observed),
     })
@@ -456,6 +471,7 @@ async fn fetch_usage(
         plan,
         five_hour,
         weekly,
+        quota_groups: Vec::new(),
         source: Some(source.into()),
         updated_at: Some(now),
     })
@@ -494,6 +510,7 @@ fn claude_stale(home: &Path) -> VendorUsage {
         plan: last.plan,
         five_hour: last.five_hour,
         weekly: last.weekly,
+        quota_groups: Vec::new(),
         source: last.source,
         updated_at: Some(last.observed_at),
     }
@@ -644,12 +661,7 @@ pub async fn snapshot(force: bool) -> UsageSnapshot {
         .unwrap_or_else(|_| {
             VendorUsage::blank("codex", "Codex", "error", Some("집계 실패".into()))
         });
-    let agy = VendorUsage::blank(
-        "agy",
-        "Antigravity",
-        "unsupported",
-        Some("잔량을 노출하는 로컬 소스가 없습니다".into()),
-    );
+    let agy = antigravity::usage(now, force).await;
     UsageSnapshot {
         vendors: vec![claude, codex, agy],
         fetched_at: now,

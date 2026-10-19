@@ -36,8 +36,8 @@ describe("formatCaptureBlock", () => {
   });
 
   it("image_path가 있으면(있으면) 경로를 덧붙인다", () => {
-    const block = formatCaptureBlock(record({ image_path: ".praxis/captures/1/1.png" }), 1);
-    expect(block).toContain("이미지: .praxis/captures/1/1.png");
+    const block = formatCaptureBlock(record({ image_path: ".dojang/captures/1/1.png" }), 1);
+    expect(block).toContain("이미지: .dojang/captures/1/1.png");
   });
 
   it("image_path가 없으면 이미지 줄을 넣지 않는다", () => {
@@ -94,11 +94,11 @@ describe("formatCaptureBlock", () => {
 
   it("붙여넣기 캡처는 HTML/CSS 없이 이미지 경로만 전달한다", () => {
     const block = formatCaptureBlock(
-      record({ source: "paste", image_path: "/wt/.praxis/captures/1/1-0.png" }),
+      record({ source: "paste", image_path: "/wt/.dojang/captures/1/1-0.png" }),
       3,
     );
     expect(block).toContain("[붙여넣은 이미지 3]");
-    expect(block).toContain("이미지: /wt/.praxis/captures/1/1-0.png");
+    expect(block).toContain("이미지: /wt/.dojang/captures/1/1-0.png");
     expect(block).not.toContain("```html");
     expect(block).not.toContain("```css");
   });

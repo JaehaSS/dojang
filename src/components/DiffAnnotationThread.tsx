@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { RematchedAnnotation } from "../lib/ipc";
-import { positionKey } from "../lib/annotations";
+import { isAgentAnnotation, positionKey } from "../lib/annotations";
 import { Markdown } from "./ide/Markdown";
 
 const statusLabel: Record<string, string> = { draft: "초안", sent: "전송됨", resolved: "해결됨" };
@@ -115,10 +115,18 @@ export function AnnotationThread({
       {thread.map((a) => (
         <div key={a.id} className={`${indent} my-1 p-2 rounded bg-raised border border-border`}>
           <div className="flex items-center gap-2 mb-0.5">
-            <span className={`text-[10px] uppercase ${statusColor[a.status]}`}>
-              {statusLabel[a.status] ?? a.status}
-            </span>
-            {a.status === "draft" && (
+            {isAgentAnnotation(a) ? (
+              // 에이전트 노트에는 상태 대신 작성자가 붙는다 — 사람 주석의 "전송됨"과 같은 색이면
+              // 자기가 보낸 글로 읽힌다. 수정 버튼도 없다(저장소가 draft만 고친다).
+              <span className="text-[10px] text-accent" data-annotation-author={a.author}>
+                에이전트 · {a.author}
+              </span>
+            ) : (
+              <span className={`text-[10px] uppercase ${statusColor[a.status]}`}>
+                {statusLabel[a.status] ?? a.status}
+              </span>
+            )}
+            {a.status === "draft" && !isAgentAnnotation(a) && (
               <button className="text-text-muted hover:text-text text-[10px]" onClick={() => onEdit(a)}>
                 수정
               </button>

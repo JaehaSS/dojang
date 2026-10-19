@@ -83,6 +83,45 @@ afterEach(async () => {
 });
 
 describe("useWorkspaceFiles", () => {
+  it("reads a document resource through its source without opening a tab", async () => {
+    const onFileOpened = vi.fn();
+    const content = { kind: "image" as const, content: "data:image/png;base64,cG5n", mtime: 1 };
+    const read = vi.fn(async () => content);
+    await render({ task: null, source: { key: "project:images", tree: async () => [], read, write: async () => 1 }, onFileOpened });
+    expect(await api!.readFile("docs/chart.png")).toEqual(content);
+    expect(read).toHaveBeenCalledWith("docs/chart.png");
+    expect(api!.openFiles).toEqual([]);
+    expect(api!.activeKey).toBeNull();
+    expect(onFileOpened).not.toHaveBeenCalled();
+  });
+
+  it("routes document resource reads to local, external-local and remote readers", async () => {
+    await render({ task: LOCAL_42 });
+    await api!.readFile("docs/chart.png");
+    expect(mocks.fsRead).toHaveBeenLastCalledWith(LOCAL_42, "docs/chart.png");
+    await api!.readFile("/Users/test/chart.png");
+    expect(mocks.readLocalFile).toHaveBeenLastCalledWith(LOCAL_42, "/Users/test/chart.png");
+    const remote = { host: "remote", id: 42 };
+    await render({ task: remote });
+    await api!.readFile("/srv/docs/chart.png");
+    expect(mocks.fsRead).toHaveBeenLastCalledWith(remote, "/srv/docs/chart.png");
+    expect(api!.openFiles).toEqual([]);
+  });
+
+  it("rejects a resource result that belongs to a previous workspace", async () => {
+    let finish!: (file: { kind: "image"; content: string; mtime: number }) => void;
+    const first: WorkspaceFileSource = { key: "project:first", tree: async () => [], write: async () => 1,
+      read: () => new Promise((resolve) => { finish = resolve; }),
+    };
+    await render({ task: null, source: first });
+    const pending = api!.readFile("chart.png");
+    const rejected = expect(pending).rejects.toThrow("파일 범위가 변경되었습니다");
+    await render({ task: LOCAL_42 });
+    finish({ kind: "image", content: "data:image/png;base64,cG5n", mtime: 1 });
+    await rejected;
+    expect(api!.openFiles).toEqual([]);
+  });
+
   it("duplicate showFile preserves the dirty buffer's external-conflict baseline", async () => {
     let disk = "base";
     const source: WorkspaceFileSource = {
@@ -557,6 +596,21 @@ describe("useWorkspaceFiles", () => {
         expect(result.detail).toContain("read-only");
       }
     });
+  });
+
+  it("내용과 수정 시각이 같아도 재읽기는 HTML 리소스 갱신을 알린다", async () => {
+    const source: WorkspaceFileSource = {
+      key: "project:html-refresh", tree: async () => [],
+      read: async () => ({ kind: "text", content: "<h1>Report</h1>", mtime: 1 }),
+      write: async () => 1,
+    };
+    await render({ task: null, source });
+    await act(async () => { await api!.openFile("page.html"); });
+    const first = api!.openFiles[0];
+    await act(async () => { await api!.reloadFile("page.html"); });
+    expect(api!.openFiles[0]).toMatchObject({ content: first.content, mtime: first.mtime, reloadRevision: 1 });
+    await act(async () => { await api!.reloadFile("page.html"); });
+    expect(api!.openFiles[0]).toHaveProperty("reloadRevision", 2);
   });
 
   it("다시 읽으면 baseContent도 디스크를 따라간다", async () => {

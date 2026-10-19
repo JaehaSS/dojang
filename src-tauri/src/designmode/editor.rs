@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
-use super::capture::{next_capture_id, now_millis, take_screenshot, write_record};
-use super::{captures_dir, CaptureRecord, CaptureSource, EditorCapture};
+use super::capture::{
+    ensure_captures_dir, next_capture_id, now_millis, take_screenshot, write_record,
+};
+use super::{CaptureRecord, CaptureSource, EditorCapture};
 
 const MAX_SELECTION_TEXT: usize = 20_000;
 
@@ -47,8 +48,7 @@ pub fn save_editor_capture(
     capture: EditorCapture,
     screen_rect: super::BoundingRect,
 ) -> Result<CaptureRecord, String> {
-    let dir = captures_dir(worktree_path, task_id);
-    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let dir = ensure_captures_dir(worktree_path, task_id)?;
     let id = next_capture_id();
     let image_path = take_screenshot(&screen_rect, &dir.join(format!("{id}.png")))
         .ok_or("에디터 화면 캡처에 실패했습니다. macOS 화면 기록 권한을 확인하세요.")?;

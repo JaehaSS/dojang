@@ -4,6 +4,8 @@ fn main() {
     // 그대로 남는다 (ADR 0147).
     println!("cargo:rerun-if-env-changed=PRAXIS_GMAIL_CLIENT_ID");
     println!("cargo:rerun-if-env-changed=PRAXIS_GMAIL_CLIENT_SECRET");
+    println!("cargo:rerun-if-env-changed=PRAXIS_ANTIGRAVITY_CLIENT_ID");
+    println!("cargo:rerun-if-env-changed=PRAXIS_ANTIGRAVITY_CLIENT_SECRET");
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .plugin(

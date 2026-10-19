@@ -19,6 +19,20 @@ const TOKEN: &str = "abababababababababababababababababababababababababababababa
 #[tokio::test]
 async fn runner_review_routes_persist_host_owned_evidence() {
     let fixture = fixture().await;
+    let root = &fixture.state.config.repository_roots[0];
+    // Evidence freshness requires a complete Git fingerprint, and the fixture DB must not
+    // become part of that fingerprint while verification receipts are being persisted.
+    std::fs::write(root.join(".gitignore"), "test.sqlite*\n").unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "test@example.invalid"],
+        vec!["config", "user.name", "Test"],
+        vec!["add", ".gitignore"],
+        vec!["commit", "-qm", "initial"],
+    ] {
+        assert!(std::process::Command::new("git").current_dir(root).args(args).status().unwrap().success());
+    }
+
     let app = http::mobile_surface_router(fixture.state.clone(), std::sync::Arc::new(RunnerTaskActions));
     let preview_response = app
         .clone()

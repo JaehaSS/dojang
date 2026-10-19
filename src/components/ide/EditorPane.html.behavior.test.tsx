@@ -150,6 +150,55 @@ afterEach(() => {
 });
 
 describe("HTML 프리뷰", () => {
+  it("프로젝트 리소스를 미리보기에만 포함하고 원문을 저장한다", async () => {
+    const content = '<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><h1>Title</h1></body></html>';
+    const file: OpenFile = { ...FILE, content, baseContent: content };
+    const readHtmlAsset = vi.fn(async () => ({ kind: "text" as const, content: "h1 { color: red }" }));
+    const onSave = vi.fn();
+    await render({ files: [file], readHtmlAsset, onSave });
+    expect(readHtmlAsset).toHaveBeenCalledWith("docs/style.css");
+    expect(container.querySelector("iframe")?.getAttribute("srcdoc")).toContain("h1 { color: red }");
+    expect(container.querySelector("iframe")?.getAttribute("sandbox")).toBe("");
+    await clickSave();
+    expect(onSave).toHaveBeenCalledWith(FILE.path, content);
+  });
+
+  it("같은 HTML을 다시 읽어도 리소스를 새로 읽는다", async () => {
+    const content = '<link rel="stylesheet" href="style.css"><h1>Title</h1>';
+    const readHtmlAsset = vi.fn().mockResolvedValue({ kind: "text", content: "h1 { color: red }" });
+    const file: OpenFile = { ...FILE, content, baseContent: content };
+    await render({ files: [file], readHtmlAsset });
+    readHtmlAsset.mockResolvedValue({ kind: "text", content: "h1 { color: blue }" });
+    await render({ files: [{ ...file, reloadRevision: 1 }], readHtmlAsset });
+    expect(readHtmlAsset).toHaveBeenCalledTimes(2);
+    expect(container.querySelector("iframe")?.getAttribute("srcdoc")).toContain("color: blue");
+  });
+
+  it("이전 프로젝트의 늦은 리소스 응답을 새 미리보기에 표시하지 않는다", async () => {
+    const content = '<link rel="stylesheet" href="style.css"><h1>Title</h1>';
+    const file: OpenFile = { ...FILE, content, baseContent: content };
+    let finish: (value: { kind: "text"; content: string }) => void = () => undefined;
+    const previous = vi.fn(() => new Promise<{ kind: "text"; content: string }>((resolve) => { finish = resolve; }));
+    await render({ files: [file], readHtmlAsset: previous });
+    expect(container.querySelector("iframe")).toBeNull();
+    const next = vi.fn(async () => ({ kind: "text" as const, content: "h1 { color: blue }" }));
+    await render({ files: [file], readHtmlAsset: next });
+    await act(async () => finish({ kind: "text", content: "h1 { color: red }" }));
+    expect(container.querySelector("iframe")?.getAttribute("srcdoc")).toContain("color: blue");
+    expect(container.querySelector("iframe")?.getAttribute("srcdoc")).not.toContain("color: red");
+  });
+
+  it("불러오지 못한 리소스를 알리고 본문과 소스 전환을 유지한다", async () => {
+    const content = '<link rel="stylesheet" href="missing.css"><h1>Title</h1>';
+    const file: OpenFile = { ...FILE, content, baseContent: content };
+    const readHtmlAsset = vi.fn(async () => { throw new Error("denied"); });
+    await render({ files: [file], readHtmlAsset });
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("불러오지 못했습니다");
+    expect(container.querySelector("iframe")?.getAttribute("srcdoc")).toContain("<h1>Title</h1>");
+    await clickToggle("소스");
+    expect(container.querySelector('[data-testid="monaco"]')).toBeTruthy();
+  });
+
   it("연 직후엔 샌드박스 iframe으로 원문을 렌더한다", async () => {
     await render();
 

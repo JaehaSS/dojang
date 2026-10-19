@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { resolveAgentLink } from "./agent-link";
 
-const worktree = "/Users/test/.praxis/worktrees/task-42";
+const worktree = "/Users/test/.dojang/worktrees/task-42";
 
 describe("resolveAgentLink", () => {
   it("maps an encoded file URI inside the task worktree to a relative file", () => {
     expect(
       resolveAgentLink(
-        "file:///Users/test/.praxis/worktrees/task-42/reports/Top-5%20%ED%83%9C%EA%B9%85.xlsx",
+        "file:///Users/test/.dojang/worktrees/task-42/reports/Top-5%20%ED%83%9C%EA%B9%85.xlsx",
         worktree,
       ),
     ).toEqual({ kind: "task-file", path: "reports/Top-5 태깅.xlsx" });
@@ -90,7 +90,7 @@ describe("resolveAgentLink", () => {
   });
 
   it("prefers the editor tab when a tilde path lands inside the worktree", () => {
-    expect(resolveAgentLink("~/.praxis/worktrees/task-42/src/App.tsx:10", worktree, local)).toEqual({
+    expect(resolveAgentLink("~/.dojang/worktrees/task-42/src/App.tsx:10", worktree, local)).toEqual({
       kind: "task-file",
       path: "src/App.tsx",
       line: 10,

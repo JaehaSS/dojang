@@ -132,10 +132,18 @@ pub(super) fn contents(value: &Value) -> Vec<Content> {
             let content = match kind {
                 "text" | "inputText" | "input_text" => item["text"].as_str().map(text),
                 "image" | "audio" => {
-                    let mime = item["mimeType"].as_str().unwrap_or_default();
-                    item["data"]
+                    // Claude stream-json embeds images in an Anthropic source block;
+                    // MCP embeds the same payload directly on the content item.
+                    let source = if item["source"]["type"] == "base64" {
+                        &item["source"]
+                    } else {
+                        item
+                    };
+                    let mime = source["mimeType"]
                         .as_str()
-                        .and_then(|s| media(&format!("data:{mime};base64,{s}")))
+                        .or_else(|| source["media_type"].as_str())
+                        .unwrap_or_default();
+                    source["data"].as_str().and_then(|s| media(&format!("data:{mime};base64,{s}")))
                 }
                 "inputImage" | "input_image" | "inputAudio" | "input_audio" => {
                     let url = item["image_url"]
@@ -257,6 +265,17 @@ mod tests {
             panic!()
         };
         assert!(text.ends_with("(출력 일부 생략)"));
+    }
+    #[test]
+    fn claude_images_use_the_same_per_image_and_aggregate_limits() {
+        let block = |data: String| json!({"type":"image", "source":{"type":"base64", "media_type":"image/png", "data":data}});
+        let oversized = base64::engine::general_purpose::STANDARD.encode(vec![1; MAX_MEDIA + 1]);
+        assert!(contents(&json!([block(oversized)])).is_empty());
+        let data = base64::engine::general_purpose::STANDARD.encode(vec![1; MAX_MEDIA / 2 + 1]);
+        let result = contents(&json!([block(data.clone()), block(data)]));
+        assert_eq!(result.len(), 2);
+        assert!(matches!(&result[0], Content::Image { .. }));
+        assert!(matches!(&result[1], Content::Text { text } if text.contains("표시 한도")));
     }
     #[test]
     fn image_generation_and_mcp_errors_are_visible() {

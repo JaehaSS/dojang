@@ -61,3 +61,12 @@ export const deltaPct = (cur: number, prev: number | undefined | null) => {
   if (prev == null || prev === 0) return null;
   return Math.round(((cur - prev) / prev) * 100);
 };
+
+/** 초 → 사람이 읽는 소요. 표본이 없으면 "—". */
+export function fmtDuration(secs: number | null): string {
+  if (secs == null) return "—";
+  if (secs < 60) return `${secs}초`;
+  if (secs < 3600) return `${Math.round(secs / 60)}분`;
+  const hours = secs / 3600;
+  return hours < 10 ? `${hours.toFixed(1)}시간` : `${Math.round(hours)}시간`;
+}

@@ -253,7 +253,7 @@ describe("SessionModelSwitch", () => {
     expect(picker.model).toBe("sonnet");
   });
 
-  it("대화용 에이전트만 고르고, 새 에이전트에서는 모델 초안을 비운다", async () => {
+  it("대화용 에이전트만 고르고, 새 에이전트의 모델 초안은 기본값으로 비운다", async () => {
     await render(<SessionModelSwitch task={task()} onChanged={() => undefined} />);
     await act(async () => (container?.querySelector('button[title="다음 메시지를 처리할 에이전트"]') as HTMLButtonElement | null)?.click());
     expect(container?.textContent).toContain("Claude Code");
@@ -263,7 +263,47 @@ describe("SessionModelSwitch", () => {
     await act(async () => ([...(container?.querySelectorAll("button") ?? [])].find((b) => b.textContent?.includes("Codex")) as HTMLButtonElement | undefined)?.click());
     expect(picker.agent).toBe("codex");
     expect(picker.model).toBe("");
-    expect(container?.querySelector('button[type="button"]')?.hasAttribute("disabled")).toBe(true);
+    expect(container?.querySelector('button[type="button"]')?.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("다른 에이전트는 모델을 고르지 않아도 벤더 기본값으로 전환한다", async () => {
+    const onChanged = vi.fn();
+    await render(<SessionModelSwitch task={task()} onChanged={onChanged} />);
+    await act(async () => (container?.querySelector('button[title="다음 메시지를 처리할 에이전트"]') as HTMLButtonElement | null)?.click());
+    await act(async () => ([...(container?.querySelectorAll("button") ?? [])].find((b) => b.textContent?.includes("Codex")) as HTMLButtonElement | undefined)?.click());
+
+    const submit = [...(container?.querySelectorAll("button") ?? [])].find((b) => b.textContent === "전환") as HTMLButtonElement;
+    expect(submit.disabled).toBe(false);
+    await act(async () => submit.click());
+
+    expect(ipc.taskAgentSet).toHaveBeenCalledWith({ host: LOCAL_HOST, id: 7 }, "codex", "");
+    expect(onChanged).toHaveBeenCalledWith("", expect.objectContaining({ agent: "codex" }));
+  });
+
+  it("다른 에이전트의 모델 초안을 지우면 명시적으로 기본값으로 전환한다", async () => {
+    await render(<SessionModelSwitch task={task()} onChanged={() => undefined} />);
+    await act(async () => (container?.querySelector('button[title="다음 메시지를 처리할 에이전트"]') as HTMLButtonElement | null)?.click());
+    await act(async () => ([...(container?.querySelectorAll("button") ?? [])].find((b) => b.textContent?.includes("Codex")) as HTMLButtonElement | undefined)?.click());
+    await act(async () => picker.onChange("gpt-5.6-terra"));
+    await act(async () => picker.onChange(""));
+    await act(async () => [...(container?.querySelectorAll("button") ?? [])].find((b) => b.textContent === "전환")?.click());
+
+    expect(ipc.taskAgentSet).toHaveBeenCalledWith({ host: LOCAL_HOST, id: 7 }, "codex", "");
+  });
+
+  it("같은 에이전트의 모델을 기본값으로 되돌린 뒤 저장 실패하면 다시 시도할 수 있다", async () => {
+    const alert = vi.spyOn(window, "alert").mockImplementation(() => undefined);
+    ipc.taskModelSet.mockRejectedValueOnce("db 잠김").mockResolvedValueOnce(undefined);
+    const onChanged = vi.fn();
+    await render(<SessionModelSwitch task={task()} onChanged={onChanged} />);
+
+    await act(async () => picker.onChange(""));
+    await act(async () => picker.onChange(""));
+
+    expect(ipc.taskModelSet).toHaveBeenNthCalledWith(1, { host: LOCAL_HOST, id: 7 }, "");
+    expect(ipc.taskModelSet).toHaveBeenNthCalledWith(2, { host: LOCAL_HOST, id: 7 }, "");
+    expect(alert).toHaveBeenCalledWith(expect.stringContaining("db 잠김"));
+    expect(onChanged).toHaveBeenCalledWith("");
   });
 
   it("교차 에이전트 전환은 모델을 고르고 전환을 눌러야 저장 결과를 부모에 준다", async () => {

@@ -5,7 +5,7 @@ import { chromium } from "playwright";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
-const directory = path.resolve(".praxis/verification/python-highlighting-smoke");
+const directory = path.resolve(".dojang/verification/python-highlighting-smoke");
 const fixture = path.join(directory, "ui-fixture");
 const source = (file) => `/@fs/${path.resolve(file)}`;
 const darkScreenshot = process.env.PRAXIS_PYTHON_HIGHLIGHTING_DARK_SCREENSHOT || "/tmp/praxis-python-highlighting-dark.png";

@@ -21,6 +21,7 @@ import {
   type EditorRevealPayload,
   type EditorSessionPayload,
   type EditorStatus,
+  type EditorWindowClosedPayload,
 } from "../lib/editor-window-events";
 import {
   editorWindowAlive,
@@ -30,6 +31,8 @@ import {
   editorWindowOpen,
   type EditorWindowFiles,
 } from "../lib/ipc";
+import { editorProjectPrepare } from "../lib/project-editor-ipc";
+import { loadProjectTabs } from "../lib/project-editor-tabs";
 
 interface Options {
   /** 팝아웃 대상 세션. null이면 뺄 것이 없다. */
@@ -42,11 +45,12 @@ interface Options {
   /** 원격 워크트리는 언어 서버를 띄울 수 없다. */
   supportsLsp: boolean;
   /**
-   * 메인 창이 열어 두었던 파일의 **실경로** — 팝아웃 시 창이 이어받는다.
-   * 부르는 쪽이 diff 탭을 걸러서 넘긴다. 저쪽 창은 경로로 파일을 열 뿐이라 diff를 되살릴 수 없다.
+   * 메인 창이 열어 두었던 탭의 **키**(`tab-key.ts`) — 팝아웃 시 창이 이어받는다.
+   * diff 탭은 `diff:<path>`로 들어가고 저쪽 창이 그대로 되살린다(ADR 2026-10-08 결정 5).
+   * 이 훅은 목록을 해석하지 않는다 — 문자열 배열을 실어 보낼 뿐이다.
    */
   openPaths: string[];
-  /** 활성 **파일 탭**의 실경로. diff 탭이 활성이면 `null`이다(F-12). */
+  /** 활성 탭의 키. 없으면 `null` — 이 훅은 목록의 첫 항목으로 메우지 않는다(AC-10). */
   activePath: string | null;
   status: EditorStatus;
   /** 창이 닫혀 돌아왔다. 메인 창은 이 목록으로 에디터 탭을 되살린다. */
@@ -64,6 +68,7 @@ interface Options {
 export interface EditorWindowHost {
   poppedOut: boolean;
   popOut: () => Promise<void>;
+  openProject: (root: string) => Promise<string>;
   /** 파일을 나가 있는 창에서 연다. **창에 넘겼으면 true** — 호출자는 이 창에서 열지 않는다.
    *
    *  팝인 상태이거나 창에 닿지 못했으면 false다. 그때는 호출자가 이 창에서 열어야 한다 —
@@ -97,6 +102,8 @@ export function useEditorWindowHost({
   onError,
 }: Options): EditorWindowHost {
   const [poppedOut, setPoppedOut] = useState(false);
+  const projectRef = useRef<string | null>(null);
+  const openRequestRef = useRef(0);
 
   const sessionRef = useRef({ taskId, host, branch, worktreePath, supportsLsp, openPaths, activePath });
   sessionRef.current = { taskId, host, branch, worktreePath, supportsLsp, openPaths, activePath };
@@ -123,14 +130,22 @@ export function useEditorWindowHost({
 
   /** 지금 무엇을 열어야 하는지 창에 알린다. 세션이 없으면 보낼 것이 없다. */
   const publishSession = useCallback(async () => {
+    const project = projectRef.current;
+    if (project != null) {
+      const saved = loadProjectTabs(project);
+      await emitTo(EDITOR_WINDOW_LABEL, EDITOR_SESSION_EVENT, {
+        kind: "project", root: project, open_paths: saved.paths, active_path: saved.active,
+      });
+      return;
+    }
     const s = sessionRef.current;
     if (s.taskId == null) return;
     // 이전에 이 세션에서 열어 두었던 목록이 있으면 그것을 잇는다 — 창을 강제 종료했을 때
     // editor://closed가 오지 않아 메인 창의 목록이 비어 있을 수 있다.
     let openPathsToSend = s.openPaths;
     let activePathToSend = s.activePath;
-    // 열린 것이 diff 탭뿐이면 여기 빈 배열이 온다 — 그때는 저장된 목록으로 복원한다.
-    // diff만 띄운 채 팝아웃하면 빈 창이 뜨는 것보다 지난 파일들이 돌아오는 편이 낫다.
+    // 아무 탭도 없으면 저장된 목록으로 복원한다 — 창을 강제 종료했다가 다시 빼낼 때
+    // 빈 창이 뜨는 것보다 지난 탭들(diff 탭 포함)이 돌아오는 편이 낫다.
     if (s.host === "local" && openPathsToSend.length === 0) {
       try {
         const saved = await editorWindowFilesLoad(s.taskId);
@@ -140,7 +155,7 @@ export function useEditorWindowHost({
         // 목록을 못 읽는 것이 창을 못 여는 이유가 되어서는 안 된다.
       }
     }
-    if (sessionRef.current.taskId !== s.taskId || sessionRef.current.host !== s.host) return;
+    if (projectRef.current != null || sessionRef.current.taskId !== s.taskId || sessionRef.current.host !== s.host) return;
     const payload: EditorSessionPayload = {
       task_id: s.taskId,
       host: s.host,
@@ -153,11 +168,27 @@ export function useEditorWindowHost({
     await emitTo(EDITOR_WINDOW_LABEL, EDITOR_SESSION_EVENT, payload).catch(() => {});
   }, []);
 
+  const openProject = useCallback(async (root: string) => {
+    const request = ++openRequestRef.current;
+    const selected = sessionRef.current;
+    const info = await editorProjectPrepare(root);
+    const current = () => request === openRequestRef.current &&
+      selected.taskId === sessionRef.current.taskId && selected.host === sessionRef.current.host;
+    if (!current()) return info.root;
+    await editorWindowOpen();
+    if (!current()) return info.root;
+    projectRef.current = info.root;
+    changePoppedOut(true);
+    await publishSession();
+    return info.root;
+  }, [changePoppedOut, publishSession]);
+
   const popOut = useCallback(async () => {
     if (sessionRef.current.taskId == null) return;
     try {
       // 창을 보인 뒤에 탭을 지운다. 먼저 지우고 실패하면 에디터가 어디에도 없게 된다.
       await editorWindowOpen();
+      projectRef.current = null;
       changePoppedOut(true);
       await publishSession();
     } catch (e) {
@@ -207,7 +238,7 @@ export function useEditorWindowHost({
     const unReady = listen(EDITOR_READY_EVENT, () => {
       if (poppedOutRef.current) void publishSession();
     });
-    const unClosed = listen<EditorClosedPayload>(EDITOR_CLOSED_EVENT, ({ payload }) => {
+    const unClosed = listen<EditorWindowClosedPayload>(EDITOR_CLOSED_EVENT, ({ payload }) => {
       void (async () => {
         try {
           await editorWindowHide();
@@ -219,6 +250,8 @@ export function useEditorWindowHost({
           }
         }
         changePoppedOut(false);
+        projectRef.current = null;
+        if (!("task_id" in payload)) return;
         const session = sessionRef.current;
         if (session.taskId !== payload.task_id || session.host !== payload.host) return;
         // 알림 이동은 이전 파일 복원과 동시에 시작하면 새 작업 선택을 덮을 수 있다.
@@ -235,6 +268,7 @@ export function useEditorWindowHost({
         await editorWindowHide().catch(() => {});
         if (!poppedOutRef.current) return;
         changePoppedOut(false);
+        if (projectRef.current != null) { projectRef.current = null; return; }
         const session = sessionRef.current;
         if (session.taskId == null) return;
         let files: EditorWindowFiles = { open_paths: [], active_path: null };
@@ -287,9 +321,16 @@ export function useEditorWindowHost({
   }, [publishSession, changePoppedOut]);
 
   // 세션이 바뀌면 창이 따라 갈아탄다 — 창은 하나이고 언제나 한 세션에 붙는다.
+  const previousSelectionRef = useRef({ taskId, host });
   useEffect(() => {
+    const previous = previousSelectionRef.current;
+    previousSelectionRef.current = { taskId, host };
+    if (previous.taskId !== taskId || previous.host !== host) {
+      ++openRequestRef.current;
+      if (taskId != null) projectRef.current = null;
+    }
     if (poppedOut) void publishSession();
-  }, [taskId, poppedOut, publishSession]);
+  }, [taskId, host, poppedOut, publishSession]);
 
   // 응답 진행 여부만 흘려보낸다. 본문은 메인 창에 남는다.
   useEffect(() => {
@@ -297,5 +338,5 @@ export function useEditorWindowHost({
     void emitTo(EDITOR_WINDOW_LABEL, EDITOR_STATUS_EVENT, status).catch(() => {});
   }, [status, poppedOut]);
 
-  return { poppedOut, popOut, revealFile };
+  return { poppedOut, popOut, openProject, revealFile };
 }

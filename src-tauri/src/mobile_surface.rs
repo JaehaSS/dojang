@@ -409,7 +409,7 @@ impl TaskActions for DesktopTaskActions {
 
     async fn discard(&self, cx: &RunnerHttpState, id: i64) -> Result<(), ApiError> {
         self.require_review_commands(&cx.pool).await?;
-        crate::commands::task_discard(self.app.state::<AppState>(), id)
+        crate::commands::task_discard(self.app.clone(), self.app.state::<AppState>(), id)
             .await
             .map_err(bad_request)
     }

@@ -6,7 +6,7 @@ use super::{pool_of, AppState};
 use crate::db::{self, state as tstate};
 use crate::multireview::{self, PipelineReviewMeta};
 use crate::pipeline::db::{self as pdb, RunRow, StepRow, TicketRow};
-use crate::pipeline::model::{self, Spec, SplitOutput, TicketDraft, MAX_TICKETS};
+use crate::pipeline::model::{self, Clarification, Spec, SplitOutput, TicketDraft, MAX_TICKETS};
 use crate::pipeline::registry;
 use crate::pipeline::state::{RunState, TicketState};
 use serde::Serialize;
@@ -20,6 +20,8 @@ fn e2s<E: std::fmt::Display>(e: E) -> String {
 pub struct PipelineVendor {
     vendor: String,
     available: bool,
+    /// 사용 가능하면 null, 아니면 `PATH에 없음` 또는 `할당량 소진: <사유>`.
+    reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -51,9 +53,9 @@ pub(crate) fn revision_conflict() -> String {
 
 #[tauri::command]
 pub async fn pipeline_vendors() -> Result<Vec<PipelineVendor>, String> {
-    Ok(["claude", "codex", "agy"]
+    Ok(driver::vendor_statuses()
         .into_iter()
-        .map(|v| PipelineVendor { vendor: v.into(), available: crate::reviewer::on_path(v) })
+        .map(|(vendor, reason)| PipelineVendor { vendor, available: reason.is_none(), reason })
         .collect())
 }
 
@@ -88,7 +90,7 @@ pub async fn pipeline_start(
 }
 
 #[tauri::command]
-pub async fn pipeline_list(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<RunRow>, String> {
+pub async fn pipeline_list(state: State<'_, AppState>, repo: Option<String>) -> Result<Vec<pdb::RunSummaryRow>, String> {
     let pool = pool_of(&state)?;
     let repo = repo.map(|r| {
         std::path::Path::new(&r)
@@ -96,7 +98,7 @@ pub async fn pipeline_list(state: State<'_, AppState>, repo: Option<String>) -> 
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or(r)
     });
-    pdb::list_runs(&pool, repo.as_deref()).await.map_err(e2s)
+    pdb::list_runs_summary(&pool, repo.as_deref()).await.map_err(e2s)
 }
 
 #[tauri::command]
@@ -131,7 +133,7 @@ pub async fn pipeline_update_tickets(
     let spec: Spec = run.spec_json.as_deref().and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
     let avail = driver::available_vendors();
     let refs: Vec<&str> = avail.iter().map(String::as_str).collect();
-    let out = SplitOutput { spec, tickets };
+    let out = SplitOutput { spec, tickets, ..Default::default() };
     model::validate_split(&out, &refs, MAX_TICKETS).map_err(|e| e.join("; "))?;
     if !pdb::update_tickets_cas(&pool, run_id, expected_revision, &out.tickets, super::now())
         .await
@@ -221,6 +223,9 @@ pub async fn pipeline_retry_ticket(
     let vendor = vendor.map(|v| model::normalize_vendor(&v)).filter(|v| !v.is_empty());
     if let Some(v) = &vendor {
         if !driver::available_vendors().contains(v) {
+            if let Some(reason) = crate::pipeline::vendor_health::exhausted_reason(v) {
+                return Err(format!("벤더 `{v}`은(는) 할당량 소진 상태입니다: {reason}"));
+            }
             return Err(format!("벤더 `{v}`을(를) PATH에서 찾을 수 없습니다"));
         }
     }
@@ -272,9 +277,42 @@ pub async fn pipeline_resume(app: AppHandle, state: State<'_, AppState>, run_id:
     get_run(&pool, run_id).await
 }
 
+/// 분할 심판의 질문(clarify)·거절(decline)에 답한다. 답변은 다음 분할의 피드백이 되고 실행은 Drafting으로 돌아간다.
+#[tauri::command]
+pub async fn pipeline_answer_clarification(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    run_id: i64,
+    answer: String,
+) -> Result<RunRow, String> {
+    let pool = pool_of(&state)?;
+    let answer = answer.trim().to_string();
+    if answer.is_empty() {
+        return Err("답변을 입력하세요".into());
+    }
+    let run = get_run(&pool, run_id).await?;
+    let clarification: Clarification = run
+        .clarification_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str(j).ok())
+        .ok_or_else(|| "분할 질문 대기 상태가 아니라 답할 수 없습니다".to_string())?;
+    let feedback = clarification.feedback_for_answer(&answer);
+    if !pdb::answer_clarification(&pool, run_id, &feedback, super::now()).await.map_err(e2s)? {
+        return Err("분할 질문 대기 상태가 아니라 답할 수 없습니다".into());
+    }
+    driver::emit_changed(&app, run_id);
+    get_run(&pool, run_id).await
+}
+
 #[tauri::command]
 pub async fn pipeline_cancel(app: AppHandle, state: State<'_, AppState>, run_id: i64) -> Result<RunRow, String> {
-    let pool = pool_of(&state)?;
+    cancel_run(&app, &state, run_id).await
+}
+
+/// `pipeline_cancel`의 본체. 작업 목록에서 통합 작업을 중단·폐기할 때도 같은 경로를 탄다 —
+/// 통합 작업은 실행의 뿌리라 그것만 따로 지울 수 없고, 가드 메시지로 거절하면 사용자는 지울 길이 없다.
+pub(crate) async fn cancel_run<R: tauri::Runtime>(app: &AppHandle<R>, state: &AppState, run_id: i64) -> Result<RunRow, String> {
+    let pool = pool_of(state)?;
     let run = get_run(&pool, run_id).await?;
     if run.run_state().is_none_or(|s| s.is_terminal()) {
         return Ok(run);
@@ -284,7 +322,7 @@ pub async fn pipeline_cancel(app: AppHandle, state: State<'_, AppState>, run_id:
     pdb::cancel_run(&pool, run_id, super::now()).await.map_err(e2s)?;
     for t in pdb::list_tickets(&pool, run_id).await.map_err(e2s)? {
         if let Some(task) = t.task_id {
-            driver::stop_and_close_task(&state, task, Closure::Preserve).await;
+            driver::stop_and_close_task(state, task, Closure::Preserve).await;
         }
     }
     // 통합 작업은 검토 대기로 올리지 않는다 — 검토되지 않은 부분 통합 결과가 한 번에 병합 가능해지기 때문이다.
@@ -292,11 +330,11 @@ pub async fn pipeline_cancel(app: AppHandle, state: State<'_, AppState>, run_id:
     if let Some(id) = run.integration_task_id {
         if let Ok(Some(task)) = db::get_task(&pool, id).await {
             if !matches!(task.state.as_str(), tstate::DONE | tstate::DISCARDED) {
-                driver::stop_and_close_task(&state, id, Closure::Preserve).await;
+                driver::stop_and_close_task(state, id, Closure::Preserve).await;
             }
         }
     }
-    driver::emit_changed(&app, run_id);
+    driver::emit_changed(app, run_id);
     get_run(&pool, run_id).await
 }
 

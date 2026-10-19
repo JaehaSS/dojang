@@ -161,7 +161,7 @@ impl PreviewMcpLease {
         questions: bool,
     ) -> Result<Self, String> {
         let spawn_id = random_hex_id()?;
-        let token = tokens.issue(task_id, &spawn_id)?;
+        let token = tokens.issue_labeled(task_id, &spawn_id, vendor.bin())?;
         let config_path = match vendor {
             Vendor::Claude => match write_config(config_dir, &spawn_id, endpoint) {
                 Ok(path) => Some(path),

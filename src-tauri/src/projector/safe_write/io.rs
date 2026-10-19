@@ -118,7 +118,7 @@ fn temp_path(target: &Path) -> PathBuf {
         .and_then(|name| name.to_str())
         .unwrap_or("context");
     target.with_file_name(format!(
-        ".{name}.praxis-{}-{sequence}.tmp",
+        ".{name}.dojang-{}-{sequence}.tmp",
         std::process::id()
     ))
 }

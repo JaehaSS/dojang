@@ -118,8 +118,8 @@ pub(super) async fn cancelled(pool: &SqlitePool, session: &Session) -> anyhow::R
     Ok(count > 0)
 }
 
-fn lock(worktree: &Worktree, task_id: i64) -> anyhow::Result<File> {
-    let root = git::managed_dir(&worktree.repo, &[".praxis", "approval", "repairs"])?;
+fn lock(worktree: &Worktree, task_id: i64) -> anyhow::Result<Vec<File>> {
+    let root = git::managed_dir(&worktree.repo, &[crate::project_paths::DIR, "approval", "repairs"])?;
     let path = root.join(format!("task-{task_id}.lock"));
     if let Ok(meta) = std::fs::symlink_metadata(&path) {
         anyhow::ensure!(!meta.file_type().is_symlink(), "repair lock symlink");
@@ -132,7 +132,26 @@ fn lock(worktree: &Worktree, task_id: i64) -> anyhow::Result<File> {
         .open(path)?;
     file.try_lock_exclusive()
         .map_err(|_| anyhow::anyhow!("이 작업의 자동 해결이 이미 진행 중입니다"))?;
-    Ok(file)
+    let mut locks = vec![file];
+    let legacy_root = worktree.repo.join(crate::project_paths::LEGACY_DIR).join("approval/repairs");
+    let legacy = legacy_root.join(format!("task-{task_id}.lock"));
+    match std::fs::symlink_metadata(&legacy) {
+        Ok(metadata) => {
+            anyhow::ensure!(metadata.is_file() && !metadata.file_type().is_symlink(), "repair legacy lock symlink");
+            let mut parent = worktree.repo.canonicalize()?;
+            for part in [crate::project_paths::LEGACY_DIR, "approval", "repairs"] {
+                parent.push(part);
+                let metadata = std::fs::symlink_metadata(&parent)?;
+                anyhow::ensure!(metadata.is_dir() && !metadata.file_type().is_symlink(), "repair legacy lock parent symlink");
+            }
+            let file = OpenOptions::new().read(true).write(true).open(legacy)?;
+            file.try_lock_exclusive().map_err(|_| anyhow::anyhow!("이 작업의 자동 해결이 이미 진행 중입니다"))?;
+            locks.push(file);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(locks)
 }
 
 async fn reviewable(pool: &SqlitePool, task: &db::Task) -> anyhow::Result<()> {
@@ -234,10 +253,10 @@ fn prepare_git(task: &db::Task, worktree: &Worktree, exclude_mcp: bool) -> anyho
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos()
     );
-    let journal = git::managed_dir(&worktree.repo, &[".praxis", "approval", "repairs", &id])?;
+    let journal = git::managed_dir(&worktree.repo, &[crate::project_paths::DIR, "approval", "repairs", &id])?;
     let snapshot = git::snapshot(worktree, &journal, exclude_mcp)?;
     let hooks = git::managed_dir(&journal, &["empty-hooks"])?;
-    let root = git::managed_dir(&worktree.repo, &[".praxis", "worktrees"])?;
+    let root = git::managed_dir(&worktree.repo, &[crate::project_paths::DIR, "worktrees"])?;
     let path = root.join(format!("repair-{id}"));
     let branch = format!("dojang/repair-{id}");
     git::git(

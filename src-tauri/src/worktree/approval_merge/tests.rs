@@ -84,6 +84,21 @@ fn merge_resumes_a_clean_registered_temp_residual_and_removes_it() {
 }
 
 #[test]
+fn merge_resumes_a_legacy_temporary_worktree_without_creating_another() {
+    let fixture = fixture("resume-legacy");
+    let current = temp_checkout(&fixture);
+    assert!(current.starts_with(fixture.repo.canonicalize().unwrap().join(".dojang/approval")));
+    let legacy = fixture.repo.join(".praxis/approval").join(current.file_name().unwrap());
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    git(&fixture.repo, &["worktree", "move", current.to_str().unwrap(), legacy.to_str().unwrap()]);
+    fixture.worktree.merge_for_approval(&fixture.commit).unwrap();
+    assert!(!legacy.exists());
+    assert!(!current.exists());
+    assert_eq!(git(&fixture.repo, &["show", "task.base:result.txt"]), "approved\n");
+    clean(fixture);
+}
+
+#[test]
 fn merge_preserves_a_detached_original_head_and_updates_saved_base() {
     let fixture = fixture("detached-original");
     git(&fixture.repo, &["checkout", "--detach"]);
@@ -273,6 +288,41 @@ async fn approval_and_direct_checkout_locks_contend_across_task_identities() {
     clean(fixture);
 }
 
+#[tokio::test]
+async fn existing_legacy_branch_lock_blocks_new_approval_and_checkout() {
+    let fixture = fixture("legacy-lock");
+    let common = canonical_git(&fixture.repo, git(&fixture.repo, &["rev-parse", "--git-common-dir"]).trim()).unwrap();
+    let legacy = OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(common.join("praxis-direct-branch.lock")).unwrap();
+    legacy.lock_exclusive().unwrap();
+    assert!(approval_lock(&fixture.worktree).is_err());
+    let locks = DirectCheckoutLocks::default();
+    let repo = fixture.repo.clone();
+    let checkout = tokio::spawn(async move { locks.acquire(&repo).await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!checkout.is_finished());
+    drop(legacy);
+    drop(checkout.await.unwrap().unwrap());
+    assert!(approval_lock(&fixture.worktree).is_ok());
+    clean(fixture);
+}
+
+#[test]
+fn new_approval_also_locks_the_legacy_git_metadata_name() {
+    let fixture = fixture("new-lock-first");
+    let common = canonical_git(&fixture.repo, git(&fixture.repo, &["rev-parse", "--git-common-dir"]).trim()).unwrap();
+    assert!(!common.join("praxis-direct-branch.lock").exists());
+    let guard = approval_lock(&fixture.worktree).unwrap();
+    let legacy = OpenOptions::new().read(true).write(true)
+        .open(common.join("praxis-direct-branch.lock")).unwrap();
+    assert!(legacy.try_lock_exclusive().is_err());
+    drop(guard);
+    assert!(legacy.try_lock_exclusive().is_ok());
+    drop(legacy);
+    assert!(!fixture.repo.join(".praxis").exists());
+    clean(fixture);
+}
+
 #[test]
 fn retiring_clean_temp_releases_it_but_dirty_temp_preserves_the_task() {
     let clean_residue = fixture("retire-clean");
@@ -307,7 +357,7 @@ fn managed_parent_and_temp_git_symlinks_cannot_escape_the_repository() {
     std::fs::create_dir_all(&outside).unwrap();
     let sentinel = outside.join("sentinel.txt");
     std::fs::write(&sentinel, "outside\n").unwrap();
-    let approval = parent.repo.join(".praxis").join("approval");
+    let approval = parent.repo.join(".dojang").join("approval");
     symlink(&outside, &approval).unwrap();
 
     assert!(parent.worktree.merge_for_approval(&parent.commit).is_err());

@@ -301,6 +301,7 @@ fn live_codex_question_resume_and_fresh_mcp_lease() {
         instance: "question-probe".into(),
         tokens: tokens.clone(),
         dispatcher: dispatcher.clone(),
+        review: Arc::new(mcp::NoReview),
         tools: mcp::Tools::phase_f(),
     });
     let server = LiveServer(Some(tauri::async_runtime::spawn(mcp::serve_on(

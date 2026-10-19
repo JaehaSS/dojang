@@ -176,30 +176,41 @@ describe("useSessionPanels", () => {
     expect(panels?.terminalDock).toBe(false);
   });
 
-  it("Diff 패널과 선택 파일을 host:id별로 복원한다", async () => {
+  it("트리 렌즈를 host:id별로 복원한다 — 변경을 보던 세션만 변경으로 돌아온다", async () => {
     await open(A);
-    await use((p) => p.openDiffPanel());
-    await use((p) => p.setCentralDiffPath("src/a.ts"));
+    await use((p) => p.openChangesLens());
+    expect(panels?.showTree).toBe(true);
+    expect(panels?.treeLens).toBe("changes");
 
     await open(B);
-    expect(panels?.centralDiffPath).toBeNull();
+    expect(panels?.showTree).toBe(false);
+    expect(panels?.treeLens).toBe("files");
 
     await open(A);
-    expect(panels?.codeTab).toBe("diff");
-    expect(panels?.centralDiffPath).toBe("src/a.ts");
+    expect(panels?.showTree).toBe(true);
+    expect(panels?.treeLens).toBe("changes");
   });
 
-  it("Diff를 닫거나 다른 오른쪽 탭으로 옮기면 본문을 대화로 돌린다", async () => {
+  it("닫힌 트리의 렌즈는 남는다 — 변경을 보다 닫고 다시 열면 변경이 나온다", async () => {
     await open(A);
-    await use((p) => p.openDiffPanel());
-    await use((p) => p.setCentralDiffPath("src/a.ts"));
-    await use((p) => p.setCodeTab("preview"));
-    expect(panels?.centralDiffPath).toBeNull();
+    await use((p) => p.openChangesLens());
+    await use((p) => p.setShowTree(false));
+    expect(panels?.treeLens).toBe("changes");
 
-    await use((p) => p.openDiffPanel());
-    await use((p) => p.setCentralDiffPath("src/a.ts"));
-    await use((p) => p.toggleDiffPanel());
-    expect(panels?.codeOpen).toBe(false);
-    expect(panels?.centralDiffPath).toBeNull();
+    await use((p) => p.setShowTree(true));
+    expect(panels?.treeLens).toBe("changes");
+  });
+
+  it("openChangesLens는 멱등이다 — 이미 그 상태면 코드 열을 건드리지 않는다", async () => {
+    await open(A);
+    await use((p) => p.setCodeOpen(true));
+    await use((p) => p.setCodeTab("preview"));
+    await use((p) => p.openChangesLens());
+    await use((p) => p.openChangesLens());
+
+    expect(panels?.showTree).toBe(true);
+    expect(panels?.treeLens).toBe("changes");
+    expect(panels?.codeOpen).toBe(true);
+    expect(panels?.codeTab).toBe("preview");
   });
 });

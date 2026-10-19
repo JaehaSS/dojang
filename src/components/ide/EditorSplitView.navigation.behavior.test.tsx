@@ -139,12 +139,12 @@ const file = (path: string): OpenFile => ({
 
 let sourceChange: { current: (path: string) => void };
 
-function Harness({ initial = ["a.ts", "b.ts", "c.ts"] }: { initial?: string[] }) {
+function Harness({ initial = ["a.ts", "b.ts", "c.ts"], projectRoot }: { initial?: string[]; projectRoot?: string }) {
   const [files, setFiles] = useState(() => initial.map(file));
   const [activeKey, setActiveKey] = useState<TabKey | null>(fileTabKey(initial[0] ?? "a.ts"));
   sourceChange = { current: () => undefined };
   return <EditorSplitView
-    taskId={1} host="local" windowId="main" files={files} activeKey={activeKey} dark={false} ownsWindow
+    taskId={projectRoot ? null : 1} rootPath={projectRoot} host="local" windowId="main" files={files} activeKey={activeKey} dark={false} ownsWindow
     onSelect={setActiveKey} onClose={(key) => setFiles((current) => current.filter((item) => item.key !== key))}
     onChange={() => undefined} onSave={() => undefined} onReload={() => undefined} onOpenPath={() => undefined} onRevealPath={() => undefined}
     onOpenTarget={async (next) => {
@@ -185,6 +185,15 @@ afterEach(() => {
 });
 
 describe("EditorSplitView navigation integration", () => {
+  it("프로젝트 모드에서도 정의 이동과 뒤로 이동이 같은 컨트롤러를 사용한다", async () => {
+    await act(async () => root.render(<Harness projectRoot="/repo/mirae" />));
+    await click('[aria-label="navigate-a.ts"]');
+    expect(h.reveals[h.reveals.length - 1]?.path).toBe("b.ts");
+    const back = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.title.includes("뒤로"));
+    expect(back?.disabled).toBe(false);
+    await act(async () => back?.click());
+    expect(h.reveals[h.reveals.length - 1]?.path).toBe("a.ts");
+  });
   it("keeps only the latest reference result across two panes and stales only its source", async () => {
     await render(["a.ts", "b.ts"]);
     await click('[aria-label="split-a.ts"]');

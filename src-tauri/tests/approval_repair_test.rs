@@ -41,11 +41,11 @@ impl Fixture {
             ],
         );
         std::fs::write(root.join("shared.txt"), "base\n").unwrap();
-        std::fs::write(root.join(".gitignore"), ".praxis/\n").unwrap();
+        std::fs::write(root.join(".gitignore"), ".dojang/\n").unwrap();
         cmd(&root, &["add", "."]);
         cmd(&root, &["commit", "-qm", "base"]);
         let source = worktree::create_plain(&root, "praxis/source", Some("dev")).unwrap();
-        let pool = db::init_pool(root.join(".praxis/test.sqlite").to_str().unwrap())
+        let pool = db::init_pool(root.join(".dojang/test.sqlite").to_str().unwrap())
             .await
             .unwrap();
         let id = db::insert_task(
@@ -181,6 +181,36 @@ async fn snapshot_and_accept_preserve_original_index_refs_and_files() {
 }
 
 #[tokio::test]
+async fn existing_legacy_repair_candidates_remain_valid() {
+    let f = Fixture::new().await;
+    let mut session = f.prepare().await;
+    let current = std::path::PathBuf::from(&session.candidate_path);
+    assert!(current.starts_with(f.root.canonicalize().unwrap().join(".dojang/worktrees")));
+    assert!(f.root.join(".dojang/approval/repairs").join(&session.id).is_dir());
+    let legacy = f.root.join(".praxis/worktrees").join(current.file_name().unwrap());
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    cmd(&f.root, &["worktree", "move", current.to_str().unwrap(), legacy.to_str().unwrap()]);
+    session.candidate_path = legacy.canonicalize().unwrap().to_string_lossy().into_owned();
+    git::assert_candidate(&session).unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+async fn existing_legacy_repair_lock_blocks_a_new_repair_session() {
+    use fs2::FileExt;
+    let f = Fixture::new().await;
+    let root = f.root.join(".praxis/approval/repairs");
+    std::fs::create_dir_all(&root).unwrap();
+    let legacy = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(root.join(format!("task-{}.lock", f.task.id))).unwrap();
+    legacy.lock_exclusive().unwrap();
+    assert!(repair::prepare(&f.pool, &f.task, f.source.clone(), &f.claims).await.is_err());
+    drop(legacy);
+    f.prepare().await;
+    f.close().await;
+}
+
+#[tokio::test]
 async fn adoption_rejects_changed_source_target_or_verified_candidate() {
     for changed in ["source", "target", "candidate"] {
         let f = Fixture::new().await;
@@ -262,9 +292,9 @@ async fn automated_agent_loop_checks_real_result_and_stops_after_two_attempts() 
         "check_mutation",
     ] {
         let f = Fixture::new().await;
-        std::fs::create_dir_all(f.source.path.join(".praxis")).unwrap();
+        std::fs::create_dir_all(f.source.path.join(".dojang")).unwrap();
         std::fs::write(
-            f.source.path.join(".praxis/validate.toml"),
+            f.source.path.join(".dojang/validate.toml"),
             if mode == "check_mutation" {
                 "test = \"echo changed >> shared.txt\"\n"
             } else {
@@ -287,7 +317,7 @@ async fn automated_agent_loop_checks_real_result_and_stops_after_two_attempts() 
             .unwrap();
             std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let bin = f.root.join(".praxis/bin");
+        let bin = f.root.join(".dojang/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let agent = bin.join("claude");
         let action = if mode == "success" {
@@ -373,7 +403,7 @@ async fn preparation_copies_declared_environment_and_excludes_generated_mcp() {
     std::fs::write(f.source.path.join(".worktreeinclude"), ".env\n").unwrap();
     std::fs::write(
         f.source.path.join(".gitignore"),
-        ".praxis/\n.env\n.mcp.json\n",
+        ".dojang/\n.env\n.mcp.json\n",
     )
     .unwrap();
     std::fs::write(f.source.path.join(".env"), "FIXTURE_VALUE=local\n").unwrap();
@@ -472,12 +502,12 @@ async fn candidate_and_management_symlinks_are_rejected() {
     use std::os::unix::fs::symlink;
     let f = Fixture::new().await;
     let mut session = f.prepare().await;
-    let alias = f.root.join(".praxis/worktrees/alias");
+    let alias = f.root.join(".dojang/worktrees/alias");
     symlink(&session.candidate_path, &alias).unwrap();
     session.candidate_path = alias.to_string_lossy().into_owned();
     assert!(git::assert_candidate(&session).is_err());
     let alias_root = f.root.join("alias");
-    symlink(f.root.join(".praxis"), &alias_root).unwrap();
+    symlink(f.root.join(".dojang"), &alias_root).unwrap();
     assert!(git::managed_dir(&f.root, &["alias", "other"]).is_err());
     f.close().await;
 }

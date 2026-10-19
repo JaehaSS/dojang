@@ -21,7 +21,9 @@ export interface DiffViewerData {
   setRange: (range: DiffRange) => void;
   error: string | null;
   warning: string | null;
-  refresh: () => void;
+  refresh: () => Promise<void>;
+  /** 이미 진행 중인 조회를 기다린 뒤 새 스냅샷을 요청한다. */
+  refreshAfterCurrent: () => Promise<void>;
   refreshAnnotations: () => void;
 }
 
@@ -196,7 +198,11 @@ export function useDiffViewerData(task: TaskRef, enabled = true): DiffViewerData
     setRange,
     error,
     warning,
-    refresh: () => void load(false),
+    refresh: () => load(false),
+    refreshAfterCurrent: async () => {
+      await activeLoads.current.get(currentKey)?.promise;
+      if (currentKey === currentKeyRef.current) await load(false);
+    },
     refreshAnnotations,
   };
 }

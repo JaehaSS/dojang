@@ -11,10 +11,13 @@ pub fn project_editor_shell_open<R: Runtime>(
     window: WebviewWindow<R>,
     cols: u16,
     rows: u16,
+    root: Option<String>,
 ) -> Result<ShellOpen, String> {
-    let root = state.root_for_window(window.label())?;
+    let root = state.root_for_request(window.label(), root.as_deref())?;
     if let Some(open) = current_shell(&state, window.label()) {
-        return Ok(open);
+        if state.root_is_current(window.label(), &root) {
+            return Ok(open);
+        }
     }
     let session = state.next_session();
     let launch = state
@@ -22,14 +25,10 @@ pub fn project_editor_shell_open<R: Runtime>(
         .lock()
         .unwrap()
         .launch_for_label(window.label());
-    let (shell, events) = ProjectShell::spawn(
-        &display_root(&root),
-        session,
-        cols,
-        rows,
-        launch.as_ref(),
-    )?;
-    let Some(installed) = super::insert_shell_if_registered(&state, window.label(), shell.clone())
+    let (shell, events) =
+        ProjectShell::spawn(&display_root(&root), session, cols, rows, launch.as_ref())?;
+    let Some(installed) =
+        super::insert_shell_if_registered(&state, window.label(), &root, shell.clone())
     else {
         shell.lock().unwrap().terminate();
         return Err("프로젝트 창이 닫혔습니다".into());
@@ -62,7 +61,9 @@ pub fn project_editor_shell_snapshot<R: Runtime>(
     state: State<'_, ProjectEditorState>,
     window: WebviewWindow<R>,
     session: u64,
+    root: Option<String>,
 ) -> Result<ShellSnapshot, String> {
+    state.root_for_request(window.label(), root.as_deref())?;
     shell_for(&state, window.label())?
         .lock()
         .unwrap()
@@ -75,7 +76,9 @@ pub fn project_editor_shell_write<R: Runtime>(
     window: WebviewWindow<R>,
     session: u64,
     data: String,
+    root: Option<String>,
 ) -> Result<(), String> {
+    state.root_for_request(window.label(), root.as_deref())?;
     shell_for(&state, window.label())?
         .lock()
         .unwrap()
@@ -89,7 +92,9 @@ pub fn project_editor_shell_resize<R: Runtime>(
     session: u64,
     cols: u16,
     rows: u16,
+    root: Option<String>,
 ) -> Result<(), String> {
+    state.root_for_request(window.label(), root.as_deref())?;
     shell_for(&state, window.label())?
         .lock()
         .unwrap()
@@ -101,7 +106,9 @@ pub fn project_editor_shell_close<R: Runtime>(
     state: State<'_, ProjectEditorState>,
     window: WebviewWindow<R>,
     session: u64,
+    root: Option<String>,
 ) -> Result<(), String> {
+    state.root_for_request(window.label(), root.as_deref())?;
     let shell = shell_for(&state, window.label())?;
     let result = shell.lock().unwrap().close(session);
     result

@@ -1,10 +1,13 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { reviewGet } from "../../../lib/ipc";
 import {
   PIPELINE_VENDORS,
+  groupFindings,
   hasTicketErrors,
   isRevisionConflict,
   linesToList,
   listToLines,
+  synthesisOf,
   pipelineApprovePlan,
   pipelineRejectPlan,
   pipelineUpdateTickets,
@@ -23,12 +26,49 @@ interface Props {
   run: RunRow;
   tickets: TicketRow[];
   vendors: string[];
+  /** 사용 불가 벤더의 사유(벤더 → 사유). */
+  reasons?: Record<string, string>;
   /** 갱신된 상태를 다시 불러온다 — 승인·반려·개정 충돌 뒤에 부른다. */
   onReload: () => void;
 }
 
+/** 계획 리뷰가 남긴 것을 한 줄로 요약한다 — 남은 blocking 수, 응답하지 못한 리뷰어. 종합 전문은 아래 SynthesisView에 있다. */
+function PlanReviewBanner({ run }: { run: RunRow }) {
+  const [summary, setSummary] = useState<{ blocking: number; failed: string[] } | null>(null);
+  useEffect(() => {
+    let live = true;
+    setSummary(null);
+    if (run.plan_review_id == null) return;
+    reviewGet(run.plan_review_id).then(
+      (r) => {
+        if (!live) return;
+        const failed = r.result.items.filter((i) => !i.ok).map((i) => vendorLabel(i.vendor));
+        setSummary({ blocking: groupFindings(synthesisOf(r.result)).blocking.length, failed });
+      },
+      () => live && setSummary(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [run.plan_review_id]);
+  if (!summary || (summary.blocking === 0 && summary.failed.length === 0)) return null;
+  return (
+    <div role="status" aria-label="계획 리뷰 요약" className="mb-3 rounded border border-status-awaiting p-2 text-sm">
+      {summary.blocking > 0 && (
+        <p className="text-status-failed">
+          계획 리뷰의 blocking 지적 {summary.blocking}건이 {run.plan_fix_used ? "한 번의 자동 수정 뒤에도 " : ""}남아 있습니다.
+          아래 종합을 확인하고, 반영이 필요하면 반려 코멘트로 다시 분할시키세요. 승인하면 지적을 그대로 두고 실행합니다.
+        </p>
+      )}
+      {summary.failed.length > 0 && (
+        <p className="text-text-secondary">응답하지 못한 리뷰어: {summary.failed.join(", ")} (사유는 아래 종합의 벤더별 항목에 있습니다)</p>
+      )}
+    </div>
+  );
+}
+
 /** G1 — 스펙·티켓 배정을 검토·편집하고 승인하거나 코멘트와 함께 반려한다. */
-export function PlanApproval({ run, tickets, vendors, onReload }: Props) {
+export function PlanApproval({ run, tickets, vendors, reasons = {}, onReload }: Props) {
   const original = useMemo(() => tickets.map(ticketToDraft), [tickets]);
   const [drafts, setDrafts] = useState<TicketDraft[]>(original);
   const [comment, setComment] = useState("");
@@ -80,6 +120,7 @@ export function PlanApproval({ run, tickets, vendors, onReload }: Props) {
   return (
     <Section title="계획 승인 (G1)">
       <ErrorLine message={error} />
+      <PlanReviewBanner run={run} />
       <div className="space-y-3">
         {drafts.map((d) => {
           const e = errors[d.key] ?? {};
@@ -101,8 +142,9 @@ export function PlanApproval({ run, tickets, vendors, onReload }: Props) {
                   구현 벤더
                   <select className={INPUT} value={d.vendor} aria-label={`${d.key} 벤더`} onChange={(ev) => patch(d.key, { vendor: ev.target.value })}>
                     {PIPELINE_VENDORS.filter((v) => vendors.includes(v) || v === d.vendor).map((v) => (
-                      <option key={v} value={v} disabled={!vendors.includes(v)}>
+                      <option key={v} value={v} disabled={!vendors.includes(v)} title={reasons[v]}>
                         {vendorLabel(v)}
+                        {!vendors.includes(v) && reasons[v] ? ` (${reasons[v]})` : ""}
                       </option>
                     ))}
                   </select>

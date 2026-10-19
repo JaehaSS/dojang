@@ -7,8 +7,8 @@
 //! 남는다(best-effort — 사용자는 HTML/CSS 캡처만으로도 계속 작업할 수 있어야 한다). 비-macOS
 //! 플랫폼에서는 항상 `None`이다.
 //!
-//! 캡처 파일은 `<worktree>/.praxis/captures/<task_id>/<id>.json`에만 저장한다(ADR 0031
-//! 경로 정책 — worktree 내부만 허용).
+//! 새 캡처 파일은 `<worktree>/.dojang/captures/<task_id>/<id>.json`에 저장한다. 기존
+//! `.praxis` 캡처도 읽고 정리한다(ADR 0031 경로 정책 — worktree 내부만 허용).
 
 use std::collections::BTreeMap;
 
@@ -41,6 +41,13 @@ pub const PREVIEW_INIT_JS: &str = concat!(
     include_str!("actions.js"),
     "\n",
     include_str!("console.js")
+);
+
+/// Design Canvas 전용 초기화 스크립트. raw 선택기 자체는 일반 Preview에도 주입되므로,
+/// 네이티브 전달 경로를 열었다는 표식은 이 builder 전용 스크립트에서만 설정한다.
+pub const DESIGN_CANVAS_INIT_JS: &str = concat!(
+    include_str!("inject.js"),
+    "\nwindow.__dojangCanvasNative=true;"
 );
 
 /// 레이아웃·색·타이포 중심 화이트리스트 — 프롬프트 비대화 방지(design doc §6.8, ~40속성).

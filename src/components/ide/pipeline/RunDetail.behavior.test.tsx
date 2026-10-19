@@ -109,9 +109,76 @@ describe("RunDetail", () => {
     expect(calls("pipeline_cancel")[0][1]).toEqual({ runId: 1 });
   });
 
+  it("자동 단계가 도는 동안 진행 중 단계와 경과 시간을 보인다", async () => {
+    const started = Math.floor(Date.now() / 1000) - 125;
+    current = {
+      ...detail(run({ state: "plan_review", spec_json: '{"goal":"g","requirements":[]}' })),
+      steps: [
+        { id: 1, run_id: 1, ticket_id: null, kind: "split", vendor: "claude", step_key: "a", status: "succeeded", prompt: null, output: null, started_at: 1, finished_at: 2 },
+        { id: 2, run_id: 1, ticket_id: null, kind: "plan_review", vendor: "claude", step_key: "b", status: "running", prompt: null, output: null, started_at: started, finished_at: null },
+      ],
+    };
+    await mount();
+    const status = container.querySelector('[aria-label="진행 상황"]')?.textContent ?? "";
+    expect(status).toContain("계획 리뷰");
+    expect(status).toContain("경과 2분");
+    expect(status).toContain("예산 7분");
+  });
+
+  describe("분할 질문(clarify)", () => {
+    beforeEach(() => {
+      current = detail(run({
+        state: "paused", paused_from: "drafting", paused_reason: "질문 2건",
+        clarification_json: JSON.stringify({ decision: "clarify", questions: ["무엇을 만들 건가?", "범위는?"], reason: "브레인스토밍 요청" }),
+      }));
+    });
+
+    it("질문을 보이고 답변을 보내며 일시정지 해제 버튼은 숨긴다", async () => {
+      await mount();
+      const list = container.querySelector('[aria-label="확인 질문"]');
+      expect(list?.querySelectorAll("li")).toHaveLength(2);
+      expect(container.textContent).toContain("브레인스토밍 요청");
+      expect(byText(container, "button", "일시정지 해제")).toBeUndefined();
+      const send = () => byText(container, "button", "답변하고 분할 계속") as HTMLButtonElement;
+      expect(send().disabled).toBe(true);
+      await setValue(byLabel(container, "질문 답변") as unknown as HTMLTextAreaElement, " 로그인 화면을 만든다 ");
+      await click(send());
+      expect(calls("pipeline_answer_clarification")[0][1]).toEqual({ runId: 1, answer: "로그인 화면을 만든다" });
+    });
+
+    it("답하지 않고 진행하면 고정 답변을 보낸다", async () => {
+      await mount();
+      await click(byText(container, "button", "답하지 않고 그대로 진행"));
+      const [, args] = calls("pipeline_answer_clarification")[0];
+      expect(args).toMatchObject({ runId: 1 });
+      expect(String((args as { answer: string }).answer)).toContain("그대로 진행");
+    });
+
+    it("decline은 사유와 거절 제목을 보인다", async () => {
+      current = detail(run({ state: "paused", paused_from: "drafting", clarification_json: JSON.stringify({ decision: "decline", questions: [], reason: "다른 저장소 대상" }) }));
+      await mount();
+      expect(container.textContent).toContain("수행을 거절");
+      expect(container.textContent).toContain("다른 저장소 대상");
+    });
+  });
+
   describe("G1", () => {
     beforeEach(() => {
       current = detail(run({ state: "awaiting_plan_approval", plan_review_id: 5 }), [ticket("T1"), ticket("T2")]);
+    });
+
+    it("계획 리뷰 요약 배너에 남은 blocking 수와 응답 없는 리뷰어를 보인다", async () => {
+      mocks.invoke.mockImplementation(async (cmd) => {
+        if (cmd === "pipeline_get") return current;
+        if (cmd === "pipeline_vendors") return VENDORS;
+        if (cmd === "review_get") return { ...record, result: { ...record.result, items: [...record.result.items, { vendor: "agy", ok: false, text: "" }] } };
+        return current.run;
+      });
+      await mount();
+      await flush();
+      const banner = container.querySelector('[aria-label="계획 리뷰 요약"]')?.textContent ?? "";
+      expect(banner).toContain("blocking 지적 1건");
+      expect(banner).toContain("Gemini(agy)");
     });
 
     it("편집하면 update 후 새 revision으로 승인한다", async () => {
@@ -223,5 +290,50 @@ describe("RunDetail", () => {
       await click(byText(container, "button", "통합 작업 열기 (diff)"));
       expect(onOpenTask).toHaveBeenCalledWith(42);
     });
+  });
+
+  it("executing 중에도 진행 카드와 활성 티켓 줄을 보이고, 조치 카드가 스펙·티켓보다 앞선다", async () => {
+    current = detail(
+      run({ state: "executing", spec_json: JSON.stringify({ goal: "g", requirements: [], out_of_scope: [] }) }),
+      [ticket("T1", { state: "running", task_id: 7 }), ticket("T2", { state: "escalated", last_error: "첫 줄 오류\n둘째 줄" })],
+    );
+    await mount();
+    expect(byLabel(container, "진행 상황")).toBeTruthy();
+    expect(container.querySelector('[aria-label="티켓 진행"]')?.textContent).toContain("에이전트 세션 진행 중");
+    const html = container.innerHTML;
+    expect(html.indexOf("에스컬레이션")).toBeLessThan(html.indexOf("티켓 진행"));
+    expect(html.indexOf('aria-label="티켓"')).toBeLessThan(html.indexOf("단계 기록"));
+    expect(container.textContent).toContain("첫 줄 오류");
+    expect(container.querySelector('[aria-label="지금 할 일"]')?.textContent).toContain("1건 에스컬레이션");
+    expect(container.querySelector('[role="progressbar"]')).toBeTruthy();
+  });
+
+  it("baseline 실패 명령이 있으면 경고 카드를 보인다", async () => {
+    current = detail(run({ state: "executing" }), [ticket("T1")]);
+    current.steps = [{ id: 1, run_id: 1, ticket_id: null, kind: "baseline", vendor: null, step_key: "b", status: "succeeded", prompt: null, output: '{"failed_commands":["npm test"],"summary":"1 failed"}', started_at: 1, finished_at: 2 }];
+    await mount();
+    const w = container.querySelector('[aria-label="기준선 검증 경고"]');
+    expect(w?.textContent).toContain("npm test");
+    expect(w?.textContent).toContain(".dojang/validate.toml");
+  });
+
+  it("단계 기록은 최신순이고 30건을 넘으면 더 보기로 늘린다", async () => {
+    current = detail(run({ state: "paused" }), [ticket("T1")]);
+    current.steps = Array.from({ length: 35 }, (_, i) => ({ id: i + 1, run_id: 1, ticket_id: null, kind: "split", vendor: null, step_key: `s${i}`, status: "succeeded", prompt: null, output: null, started_at: i + 1, finished_at: i + 2 }));
+    await mount();
+    expect(container.querySelectorAll("ol > li").length).toBe(30);
+    await click(byText(container, "button", "더 보기 (5건 남음)"));
+    expect(container.querySelectorAll("ol > li").length).toBe(35);
+  });
+
+  it("에스컬레이션 벤더 옵션에 사용 불가 사유를 붙인다", async () => {
+    mocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "pipeline_get") return current;
+      if (cmd === "pipeline_vendors") return [{ vendor: "claude", available: true }, { vendor: "codex", available: true }, { vendor: "agy", available: false, reason: "PATH에 없음" }];
+      return current.run;
+    });
+    current = detail(run({ state: "paused" }), [ticket("T1", { state: "escalated", vendor: "agy" })]);
+    await mount();
+    expect(container.querySelector('select[aria-label="T1 재시도 벤더"]')?.textContent).toContain("PATH에 없음");
   });
 });

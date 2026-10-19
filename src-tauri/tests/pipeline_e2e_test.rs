@@ -339,7 +339,7 @@ impl H {
 
     fn plan_text(run: &pdb::RunRow, tickets: &[TicketRow]) -> String {
         let spec: Spec = serde_json::from_str(run.spec_json.as_deref().unwrap()).unwrap();
-        split::render_spec_text(&SplitOutput { spec, tickets: tickets.iter().map(prompts::draft_from_row).collect() })
+        split::render_spec_text(&SplitOutput { spec, tickets: tickets.iter().map(prompts::draft_from_row).collect(), ..Default::default() })
     }
 
     async fn plan_review(&self) {
@@ -402,6 +402,7 @@ impl H {
             t.spawn_head.as_deref().unwrap(),
             &t.allowed_paths(),
             &t.acceptance(),
+            &[],
             Some(&self.reg),
         )
         .unwrap();

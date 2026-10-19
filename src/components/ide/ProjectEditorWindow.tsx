@@ -6,6 +6,7 @@ import { fileTabKey } from "../../lib/tab-key";
 import { LOCAL_HOST } from "../../lib/transport";
 import { projectEditorInfo, projectEditorOpenPath, projectEditorRead, projectEditorResolvePath, projectEditorTree, projectEditorWrite, type ProjectEditorInfo } from "../../lib/project-editor-ipc";
 import { useWorkspaceFiles, type WorkspaceFileSource } from "./useWorkspaceFiles";
+import { useEditorActions } from "./useEditorActions";
 import { EditorSplitView } from "./EditorSplitView";
 import { FileTree } from "./FileTree";
 import { Icon } from "./icons";
@@ -42,6 +43,7 @@ export function ProjectEditorWindow() {
     write: projectEditorWrite,
   }, [info?.root]);
   const files = useWorkspaceFiles({ task: null, source, onError: setError });
+  const actions = useEditorActions({ taskId: null, projectRoot: info?.root, host: LOCAL_HOST, onError: setError, openFile: files.openFile });
 
   const loadInfo = useCallback(() => {
     return projectEditorInfo().then((next) => {
@@ -143,7 +145,7 @@ export function ProjectEditorWindow() {
       </aside>
       {!treeOpen && <button className="w-8 shrink-0 border-r border-border" onClick={() => setTreeOpen(true)} aria-label="파일 트리 열기"><Icon name="folder" size={14} /></button>}
       <div className="flex min-w-0 min-h-0 flex-1 flex-col">
-        <EditorSplitView taskId={null} host={LOCAL_HOST} rootPath={info.root} windowId={info.label} ownsWindow files={files.openFiles} activeKey={files.activeKey} treeOpen={files.treeOpen} onTreeOpenHandled={files.consumeTreeOpen} dark={theme.kind !== "light"} onSelect={files.setActiveKey} onClose={files.closeTab} onBeforeClose={beforeCloseTab} onOpenFile={files.openFile} onChange={files.changeFile} onSave={(path, content) => void files.saveFile(path, content)} onReload={(path) => void files.reloadFile(path)} onOpenPath={(path) => void projectEditorOpenPath(path).catch((cause) => setError(String(cause)))} onRevealPath={(path) => void projectEditorResolvePath(path).then(revealItemInDir).catch((cause) => setError(String(cause)))} onPinTab={files.pinTab} codeFontFamily={fontSettings ? codeFontStack(fontSettings.code_family) : undefined} codeFontSize={fontSettings?.code_size} editorSettings={editorSettings} />
+        <EditorSplitView taskId={null} readHtmlAsset={source?.read} lspScopeKey={`project:${info.root}`} onGoto={actions.gotoSymbol} onLspStatus={actions.askLspStatus} onSemanticTokens={actions.askSemanticTokens} onOpenTarget={actions.openLspTarget} onNavigationError={setError} host={LOCAL_HOST} rootPath={info.root} windowId={info.label} ownsWindow files={files.openFiles} activeKey={files.activeKey} treeOpen={files.treeOpen} onTreeOpenHandled={files.consumeTreeOpen} dark={theme.kind !== "light"} onSelect={files.setActiveKey} onClose={files.closeTab} onBeforeClose={beforeCloseTab} onOpenFile={files.openFile} readFile={files.readFile} onChange={files.changeFile} onSave={(path, content) => void files.saveFile(path, content)} onReload={(path) => void files.reloadFile(path)} onOpenPath={(path) => void projectEditorOpenPath(path).catch((cause) => setError(String(cause)))} onRevealPath={(path) => void projectEditorResolvePath(path).then(revealItemInDir).catch((cause) => setError(String(cause)))} onPinTab={files.pinTab} codeFontFamily={fontSettings ? codeFontStack(fontSettings.code_family) : undefined} codeFontSize={fontSettings?.code_size} editorSettings={editorSettings} />
         {terminalStarted && <section className={`h-64 shrink-0 border-t border-border flex flex-col ${terminalOpen ? "" : "hidden"}`}><div className="h-8 px-3 flex items-center gap-2 text-xs text-text-muted">터미널{terminalExited && <button className="ml-auto text-primary-bright" onClick={() => void restartShell()}>재시작</button>}</div><ProjectTerminal hidden={!terminalOpen} restart={restart} onSession={setShellSession} onExit={setTerminalExited} onError={setError} /></section>}
       </div>
     </div>

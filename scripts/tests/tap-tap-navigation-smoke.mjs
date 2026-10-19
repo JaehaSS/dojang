@@ -5,7 +5,7 @@ import { chromium } from "playwright";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
-const directory = path.resolve(".praxis/verification/tap-tap-navigation-smoke");
+const directory = path.resolve(".dojang/verification/tap-tap-navigation-smoke");
 const fixture = path.join(directory, "ui-fixture");
 const darkScreenshot = "/tmp/praxis-session-navigator-dark.png";
 const lightScreenshot = "/tmp/praxis-session-navigator-light.png";

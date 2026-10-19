@@ -1,6 +1,7 @@
 pub mod dispatch;
 pub mod inject;
 pub mod protocol;
+pub mod review;
 pub mod server;
 pub mod tokens;
 
@@ -9,5 +10,6 @@ pub use dispatch::{
 };
 pub use inject::{McpInjection, PreviewMcpLease};
 pub use protocol::Tools;
+pub use review::{NoReview, ReviewBridge, ReviewCommand};
 pub use server::{bind, router, serve_on, McpState};
 pub use tokens::ControlTokens;

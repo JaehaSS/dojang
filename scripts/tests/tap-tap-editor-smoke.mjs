@@ -5,7 +5,7 @@ import { chromium, webkit } from "playwright";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
 
-const directory = path.resolve(".praxis/verification/tap-tap-editor-smoke");
+const directory = path.resolve(".dojang/verification/tap-tap-editor-smoke");
 const fixture = path.join(directory, "ui-fixture");
 const source = (file) => `/@fs/${path.resolve(file)}`;
 await mkdir(fixture, { recursive: true });

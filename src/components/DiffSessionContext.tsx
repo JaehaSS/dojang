@@ -20,8 +20,12 @@ import {
 import { useDiffReviewActions } from "./use-diff-review-actions";
 import { useDiffViewerData, type DiffViewerData } from "./use-diff-viewer-data";
 import { usePartialApply, type PartialApplyState } from "./use-partial-apply";
+import { navigationFrom, useReviewEvents, type ReviewNavigation } from "./use-review-events";
 
 export type OpenDiff = (path: string, opts?: { preview?: boolean }) => void;
+
+/** 에이전트 이동 목표가 소비되지 않고 살아 있는 한도. */
+export const NAVIGATION_TTL_MS = 15_000;
 
 export interface DiffSessionValue {
   data: DiffViewerData;
@@ -35,6 +39,9 @@ export interface DiffSessionValue {
   openDiff: OpenDiff;
   /** 폴링 구독 — 반환된 해제 함수를 부를 때까지 타이머가 돈다(설계 DR-7). */
   retain: () => () => void;
+  /** 에이전트의 `review_navigate`가 남긴 이동 목표. 그 파일의 DiffTab이 스크롤한 뒤 지운다. */
+  navigation: ReviewNavigation | null;
+  consumeNavigation: () => void;
 }
 
 const DiffSession = createContext<DiffSessionValue | null>(null);
@@ -100,6 +107,40 @@ export function DiffSessionProvider({
   const partial = usePartialApply(task, data.hunks, data.refresh);
   const [activeDiffPath, setActiveDiffPath] = useState<string | null>(null);
   const actions = useDiffReviewActions(task, activeDiffPath, data.annotations, data.refreshAnnotations);
+  const [navigation, setNavigation] = useState<ReviewNavigation | null>(null);
+  const consumeNavigation = useCallback(() => setNavigation(null), []);
+  const openDiffRef = useRef(openDiff);
+  openDiffRef.current = openDiff;
+  const navigationSequence = useRef(0);
+  const expiry = useRef<number | null>(null);
+  useEffect(() => {
+    setNavigation(null);
+    return () => {
+      navigationSequence.current += 1;
+      if (expiry.current !== null) window.clearTimeout(expiry.current);
+    };
+  }, [task.host, task.id]);
+  useReviewEvents(task, {
+    onAnnotationsChanged: data.refreshAnnotations,
+    onNavigate: (payload) => {
+      // 탭이 없으면 연다. 스크롤은 그 탭이 hunk를 그린 뒤 `navigation`을 보고 한다.
+      openDiffRef.current(payload.path);
+      const nonce = ++navigationSequence.current;
+      setNavigation(null);
+      // 새 스냅샷이 도착하기 전에 DiffTab이 목표를 소비하지 않도록 갱신 완료 뒤에 전달한다.
+      void data.refreshAfterCurrent().then(() => {
+        if (navigationSequence.current === nonce) setNavigation(navigationFrom(payload, nonce));
+      });
+      // 소비할 탭이 이 창에 없을 수 있다(팝아웃 창이 가져간 파일, 다른 작업을 보는 중). 묵은 목표가
+      // 나중에 탭이 열릴 때 튀지 않도록 한도를 둔다.
+      if (expiry.current !== null) window.clearTimeout(expiry.current);
+      expiry.current = window.setTimeout(() => {
+        if (navigationSequence.current !== nonce) return;
+        navigationSequence.current += 1;
+        setNavigation(null);
+      }, NAVIGATION_TTL_MS);
+    },
+  });
 
   return (
     <DiffSession.Provider
@@ -113,6 +154,8 @@ export function DiffSessionProvider({
         setActiveDiffPath,
         openDiff,
         retain,
+        navigation,
+        consumeNavigation,
       }}
     >
       {children}

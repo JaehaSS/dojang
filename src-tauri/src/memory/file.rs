@@ -92,7 +92,7 @@ pub struct MemoryFileInfo {
 /// 사람이 폴더 이름만 보고 어느 저장소인지 알 수 있다.
 ///
 /// worktree는 자동으로 같은 키를 쓴다 — `task.repo`가 언제나 메인 저장소 루트이고
-/// `.praxis/worktrees/` 아래 경로는 `worktree_path`로 따로 들고 다니기 때문이다.
+/// `.dojang/worktrees/` 아래 경로는 `worktree_path`로 따로 들고 다니기 때문이다.
 pub fn repo_key(repo: &str) -> String {
     let trimmed = repo.trim();
     let trimmed = trimmed.trim_end_matches('/');

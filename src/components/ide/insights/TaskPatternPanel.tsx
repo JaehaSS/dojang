@@ -2,20 +2,11 @@ import type { ReactElement } from "react";
 
 import type { TaskPatterns } from "../../../lib/ipc";
 import { Metric, RankBar } from "./parts";
-import { fmtInt } from "./format";
+import { fmtDuration, fmtInt } from "./format";
 
 interface Props {
   /** 상위가 로드한 집계. 아직 없으면 null — 같은 조회를 두 번 하지 않는다. */
   data: TaskPatterns | null;
-}
-
-/** 초 → 사람이 읽는 소요. 표본이 없으면 "—". */
-function fmtDuration(secs: number | null): string {
-  if (secs == null) return "—";
-  if (secs < 60) return `${secs}초`;
-  if (secs < 3600) return `${Math.round(secs / 60)}분`;
-  const hours = secs / 3600;
-  return hours < 10 ? `${hours.toFixed(1)}시간` : `${Math.round(hours)}시간`;
 }
 
 const pct = (part: number, whole: number) => (whole > 0 ? Math.round((part / whole) * 100) : 0);
