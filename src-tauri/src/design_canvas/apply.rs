@@ -4,8 +4,6 @@
 //! 기록을 소유한다. 따라서 개발 서버와 Canvas 페이지에는 쓰기 경로가 없다.
 
 use std::collections::HashMap;
-#[cfg(not(unix))]
-use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -636,6 +634,7 @@ impl Drop for ReapChild {
     }
 }
 
+#[cfg(unix)]
 fn write_checked(
     root: &Path,
     relative: &Path,
@@ -696,6 +695,21 @@ fn write_checked(
         let _ = remove_temporary(&target, &temporary);
     }
     commit
+}
+
+// 직접 기록은 openat·renameat로 경로 교체를 막는 데 기대므로 unix에서만 연다.
+#[cfg(not(unix))]
+fn write_checked(
+    _root: &Path,
+    _relative: &Path,
+    _expected_hash: Option<&str>,
+    _previous_hash: &str,
+    _content: &str,
+) -> Result<(), EditError> {
+    Err(EditError::new(
+        "write_failed",
+        "이 플랫폼에서는 디자인 캔버스 직접 기록을 아직 지원하지 않습니다",
+    ))
 }
 
 #[cfg(unix)]
@@ -883,10 +897,6 @@ fn remove_temporary(target: &AnchoredTarget, temporary: &std::ffi::OsStr) -> std
 fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     left.dev() == right.dev() && left.ino() == right.ino()
-}
-#[cfg(not(unix))]
-fn same_file(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
-    true
 }
 
 fn read_limited(file: &mut File) -> Result<Vec<u8>, EditError> {
