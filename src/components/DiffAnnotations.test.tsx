@@ -55,7 +55,7 @@ describe("AnnotatedUnifiedDiff", () => {
     expect(html).toContain("if (!token) throw new AuthError()");
     expect(html).toContain("에러 코드는 상수로 빼줘");
     expect(html).toContain("초안");
-    expect(html).toContain("💬");
+    expect(html).toContain('aria-label="주석 남기기"');
   });
 
   it("labels an agent note with its author instead of a status and offers no edit button", () => {

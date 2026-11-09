@@ -160,11 +160,7 @@ fn schema_hash(runtime: &str) -> String {
 }
 /// 에이전트가 고르는 런타임. 여기 없는 에이전트는 질문 세션을 열 수 없다.
 pub fn runtime_for_agent(agent: &str) -> Option<&'static str> {
-    match agent {
-        "codex" => Some(RUNTIME),
-        "claude" => Some(RUNTIME_LOCAL),
-        _ => None,
-    }
+    crate::task_observation::question_runtime(agent)
 }
 pub async fn migrate(pool: &SqlitePool) -> Result<(), String> {
     for sql in [

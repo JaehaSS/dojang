@@ -12,6 +12,11 @@
 :root {
   /* 커스텀 스타일이 닿지 않는 네이티브 UI(스크롤바 폴백·폼 컨트롤)가 테마를 따르게 한다 */
   color-scheme: light;
+  /* 고도(elevation) 3단계 — e1 눌린 칸·세그먼트, e2 메뉴·팝오버·토스트, e3 다이얼로그·팔레트.
+     테마 팔레트가 아니라 밝기 종류(.dark)만 따른다. DESIGN.md "Elevation"과 짝 */
+  --shadow-e1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-e2: 0 4px 12px rgba(0, 0, 0, 0.1);
+  --shadow-e3: 0 10px 24px rgba(0, 0, 0, 0.18);
   --c-bg: #ffffff;
   --c-surface: #f7f7f8;
   --c-raised: #ffffff;
@@ -75,6 +80,10 @@
 
 .dark {
   color-scheme: dark;
+  /* 어두운 배경에선 그림자가 묻히므로 진하게 + 윗변 1px 하이라이트로 떠 보이게 한다 */
+  --shadow-e1: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-e2: 0 4px 12px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-e3: 0 8px 32px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.05);
   --c-bg: #0d0d0d;
   --c-surface: #161616;
   --c-raised: #1f1f1f;
@@ -161,7 +170,7 @@ body {
   border-radius: 6px;
   background: transparent;
   box-shadow: none;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   line-height: 1;
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;

@@ -42,7 +42,7 @@ export function CaptureAttachmentChips({ captures, onRemove }: Props) {
         >
           <Icon
             name={capture.source === "preview" ? "code" : "desktop"}
-            size={11}
+            size={12}
           />
           {chipLabel(capture)}
           <button
@@ -50,7 +50,7 @@ export function CaptureAttachmentChips({ captures, onRemove }: Props) {
             onClick={() => onRemove(capture.id)}
             aria-label="캡처 제거"
           >
-            <Icon name="x" size={11} />
+            <Icon name="x" size={12} />
           </button>
         </span>
       ))}

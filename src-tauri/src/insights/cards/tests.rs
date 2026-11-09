@@ -491,7 +491,7 @@ fn l1_baseline_is_none_for_all_range_and_for_a_thin_previous_window() {
 
     // "all"은 직전 구간 자체가 없다.
     let current_all = current_window("all", NOW);
-    let out_all = build_l1(&[proj.clone()], "all", current_all, None, 0);
+    let out_all = build_l1(std::slice::from_ref(&proj), "all", current_all, None, 0);
     assert_eq!(out_all[0].card.baseline, None);
 
     // 직전 구간은 있지만 표본이 하한(10) 미만이면 비중을 낼 수 없다.

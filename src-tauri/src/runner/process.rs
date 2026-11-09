@@ -583,6 +583,21 @@ fn consume_conversation_events(
                     Some(db::awaiting_kind::QUESTION),
                 ));
             }
+            if task.kind == db::task_kind::ASSISTANT && !result_error.load(Ordering::Relaxed) {
+                let preview = last_text
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .chars()
+                    .take(120)
+                    .collect::<String>();
+                let _ = runtime.block_on(db::append_runner_event(
+                    &pool,
+                    task_id,
+                    super::now_secs(),
+                    db::runner_event_kind::ASSISTANT_REPLY,
+                    (!preview.is_empty()).then_some(preview.as_str()),
+                ));
+            }
             Ok(())
         }
         Err(error) => {

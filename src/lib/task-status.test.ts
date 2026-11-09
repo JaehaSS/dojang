@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  attentionRank,
   blockedVendor,
   isAuthBlocked,
   lastRunLabel,
@@ -158,5 +159,18 @@ describe("실행 중 열린 구조화 질문", () => {
 
   it("인증 차단은 질문보다 먼저다 — 로그인해야 답도 전달된다", () => {
     expect(statusTone("Running", null, "auth:codex", true)).toBe("awaiting");
+  });
+});
+
+describe("attentionRank", () => {
+  it("답변 대기 0, 사람의 결정 1, 나머지 2", () => {
+    expect(attentionRank({ state: "AwaitingReview", awaiting_kind: "question" })).toBe(0);
+    expect(attentionRank({ state: "Running" }, true)).toBe(0);
+    expect(attentionRank({ state: "AwaitingReview" })).toBe(1);
+    expect(attentionRank({ state: "PendingApproval" })).toBe(1);
+    expect(attentionRank({ state: "Failed" })).toBe(1);
+    expect(attentionRank({ state: "Queued", blocked_reason: "auth:codex" })).toBe(1);
+    expect(attentionRank({ state: "Running" })).toBe(2);
+    expect(attentionRank({ state: "Queued" })).toBe(2);
   });
 });

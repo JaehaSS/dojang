@@ -9,6 +9,7 @@ import {
   type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type MouseEvent as ReactMouseEvent,
   type MutableRefObject,
   type ReactElement,
 } from "react";
@@ -256,7 +257,12 @@ export function EditorSplitView({
   const sourceVersion = useCallback((path: string) => sourceVersionsRef.current.get(`${navigationScope}:${path}`) ?? 0, [navigationScope]);
   const navigation = useEditorNavigation({
     identity: pane.taskId == null && !rootPath ? null : { host, taskId: pane.taskId, windowId, workspaceKey: rootPath ?? undefined },
-    openTarget: async (target) => pane.onOpenTarget ? pane.onOpenTarget(target) : "failed",
+    openTarget: async (target) => {
+      if (pane.onOpenTarget) return pane.onOpenTarget(target);
+      if (target.external || target.path == null) return "failed";
+      if (byKey.has(fileTabKey(target.path))) return "opened";
+      return await onOpenFile?.(target.path) ? "opened" : "failed";
+    },
     onError: onNavigationError,
   });
   useEffect(() => {
@@ -442,7 +448,7 @@ export function EditorSplitView({
   /**
    * 문서 링크가 가리키는 것을 연다 — 파일은 **그 문서와 같은 칸**에, URL은 기본 브라우저로.
    *
-   * 문서 탭은 그대로 남는다. 링크를 따라간 뒤 돌아올 손잡이가 문서 탭 말고는 없기 때문이다.
+   * 문서 탭을 보존하고, 성공한 파일 이동은 뒤로가기 기록에 남긴다.
    */
   const openLinkTarget = (groupId: string, target: DocumentLinkTarget | null, link: string): void => {
     if (target == null) {
@@ -456,8 +462,24 @@ export function EditorSplitView({
       return;
     }
     const key = fileTabKey(target.path);
+    const group = layout.groups.find((item) => item.id === groupId);
+    const source = group?.activeKey == null ? null : byKey.get(group.activeKey);
+    const doc = Array.from(hostRef.current?.querySelectorAll<HTMLElement>("[data-group-id]") ?? [])
+      .find((element) => element.dataset.groupId === groupId)
+      ?.querySelector<HTMLElement>("[data-document-scroll]");
+    const origin = source == null ? null : {
+      path: source.path, groupId, line: 1, column: 1,
+      scrollTop: doc?.scrollTop ?? 0, scrollLeft: doc?.scrollLeft ?? 0,
+    };
+    const record = () => {
+      if (origin && origin.path !== target.path)
+        navigation.record(origin, { ...origin, path: target.path, scrollTop: 0, scrollLeft: 0 });
+    };
     // 옆 칸이 들고 있어도 이 칸에 띄운다 — 배치의 복제이지 내용의 복제가 아니다(ADR 0132).
-    if (byKey.has(key)) return commit(activateInGroup(layout, groupId, key));
+    if (byKey.has(key)) {
+      record();
+      return commit(activateInGroup(layout, groupId, key));
+    }
     if (onOpenFile == null) return;
     // 열리는 것은 다음 렌더다 — 요청별 대기 자리에 "이 칸에"를 적어 둔다.
     const request = Symbol(target.path);
@@ -465,6 +487,7 @@ export function EditorSplitView({
     void onOpenFile(target.path)
       .then((opened) => {
         if (!opened) pendingPlacements.current.delete(request);
+        else record();
       })
       .catch((error: unknown) => {
         pendingPlacements.current.delete(request);
@@ -868,10 +891,23 @@ export function EditorSplitView({
   }, [navigation, ownsWindow, shortcutsActive]);
   const multi = layout.groups.length > 1;
 
+  const onNavigationMouse = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!shortcutsActive || (event.button !== 3 && event.button !== 4)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    // mouseup과 auxclick도 취소하되 이동은 눌렀을 때 한 번만 한다.
+    if (event.type === "mousedown") {
+      if (event.button === 3) navigation.back(); else navigation.forward();
+    }
+  };
+
   return (
     <div
       ref={hostRef}
       className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+      onMouseDownCapture={onNavigationMouse}
+      onMouseUpCapture={onNavigationMouse}
+      onAuxClickCapture={onNavigationMouse}
     >
       <div className="flex h-8 shrink-0 items-center justify-end gap-1 border-b border-border px-2" aria-label="코드 탐색">
         <button disabled={!navigation.canBack} onClick={navigation.back} title="뒤로 (Alt+← / Ctrl+-)" className="rounded px-2 py-1 text-xs text-text-muted disabled:opacity-40">뒤로</button>

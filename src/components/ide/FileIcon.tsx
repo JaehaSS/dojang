@@ -25,12 +25,15 @@ export function FileIcon({
   fallback: IconName;
   /** 후퇴 경로의 틴트 클래스 — 글리프가 있으면 쓰지 않는다(아이콘이 색을 갖는다). */
   fallbackTint?: string;
+  /** 컬러 글리프의 크기. 트리 행은 18px(DESIGN.md 파일 타입 아이콘, 대비 실측 근거) — UI 아이콘 단계와 별개다. */
   size?: number;
 }) {
   if (!glyph) {
     return (
-      <span className={fallbackTint}>
-        <Icon name={fallback} size={size} />
+      // 선 아이콘은 크기 단계(IconSize)를 지키고, 칸은 컬러 글리프와 같은 크기로 잡아 행 정렬을 맞춘다.
+      // 컬러 글리프는 viewBox 안에 여백이 있어 16px 선 아이콘과 눈으로 보이는 크기가 비슷하다.
+      <span className={`inline-flex shrink-0 items-center justify-center ${fallbackTint ?? ""}`} style={{ width: size, height: size }}>
+        <Icon name={fallback} size={size >= 16 ? 16 : 14} />
       </span>
     );
   }

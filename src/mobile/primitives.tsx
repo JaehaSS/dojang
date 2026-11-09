@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { Tone } from "./status";
+import { TaskStatusIcon } from "../components/ide/TaskStatusIcon";
 
 // 모바일 공용 프리미티브. 데스크톱 4열 셸의 컴포넌트는 폭 전제가 달라 재사용하지 않는다.
 // 터치 대상은 최소 44px — 손가락으로 눌러 오탭이 나면 승인 화면에서 사고가 된다.
@@ -22,25 +23,12 @@ const TONE_BG: Record<Tone, string> = {
   muted: "bg-text-muted",
 };
 
-/**
- * 상태 기호. 색 단독 인코딩은 WCAG 1.4.1 위반이고, 색만 다른 점은 아이콘이 아니다
- * (DESIGN.md Do #2). 모양이 서로 다른 글리프를 써서 색 없이도 구분되게 한다.
- */
-const TONE_GLYPH: Record<Tone, string> = {
-  running: "▶",
-  awaiting: "◆",
-  question: "?",
-  done: "✓",
-  failed: "✕",
-  muted: "·",
-};
 
 export function StatusPill({ tone, children }: { tone: Tone; children: ReactNode }) {
   return (
     <span className={`inline-flex shrink-0 items-center gap-1 text-xs ${TONE_TEXT[tone]}`}>
-      <span aria-hidden className="text-[9px] leading-none">
-        {TONE_GLYPH[tone]}
-      </span>
+      {/* 모양이 다른 상태 아이콘 — 색 단독 인코딩 금지(DESIGN.md Do #2). 데스크톱과 같은 컴포넌트다. */}
+      <TaskStatusIcon tone={tone} label="" size={12} decorative />
       {children}
     </span>
   );

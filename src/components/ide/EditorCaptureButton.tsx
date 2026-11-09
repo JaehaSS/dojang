@@ -39,7 +39,7 @@ export function EditorCaptureButton({ taskId, available, onError }: Props) {
       title={available ? "현재 에디터 화면을 세션에 첨부" : "에디터 탭에서 파일을 먼저 여세요"}
       aria-label="에디터 캡처"
     >
-      <Icon name="desktop" size={13} /> {capturing ? "캡처 중…" : "에디터"}
+      <Icon name="desktop" size={14} /> {capturing ? "캡처 중…" : "에디터"}
     </button>
   );
 }

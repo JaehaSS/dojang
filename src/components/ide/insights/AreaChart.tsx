@@ -119,7 +119,7 @@ export function AreaChart({ days, height = 180 }: { days: DayStat[]; height?: nu
 
       {active && (
         <div
-          className="absolute top-0 pointer-events-none bg-raised border border-border-strong rounded-md px-2 py-1 text-xs whitespace-nowrap shadow-lg"
+          className="absolute top-0 pointer-events-none bg-raised border border-border-strong rounded-md px-2 py-1 text-xs whitespace-nowrap shadow-e2"
           style={{
             left: `${(hover! / Math.max(1, n - 1)) * 100}%`,
             transform: `translateX(${hover! > n / 2 ? "-105%" : "5%"})`,

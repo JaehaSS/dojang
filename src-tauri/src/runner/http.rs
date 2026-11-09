@@ -2,7 +2,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Extension;
 use axum::{Json, Router};
 use futures_util::StreamExt;
@@ -132,6 +132,7 @@ pub fn mobile_surface_routes() -> Router<RunnerHttpState> {
         .route("/v1/tasks/:id/approval-repair/cancel", post(approval_repair_cancel))
         .route("/v1/tasks/:id/approval-repair/accept", post(approval_repair_accept))
         .route("/v1/tasks/:id/discard", post(task_discard))
+        .route("/v1/tasks/:id/cancel", post(task_cancel))
         .route("/v1/tasks/:id/diff", get(task_diff))
         .route("/v1/tasks/:id/diff/hunks", get(task_diff_hunks))
         .route("/v1/tasks/:id/output", get(task_output))
@@ -139,6 +140,7 @@ pub fn mobile_surface_routes() -> Router<RunnerHttpState> {
         .route("/v1/repositories", get(repositories))
         .route("/v1/files/tree", get(file_tree))
         .route("/v1/files/read", get(file_read))
+        .route("/v1/files/write", put(file_write))
         .route("/v1/schedules", get(schedules).post(schedule_create))
         .route(
             "/v1/schedules/:id",
@@ -155,6 +157,23 @@ pub fn mobile_surface_routes() -> Router<RunnerHttpState> {
         .route("/v1/mobile/pairings", post(mobile_pairing_create))
         .route("/v1/mobile/sessions", get(mobile_sessions))
         .route("/v1/mobile/sessions/:id", delete(mobile_session_revoke))
+        .route("/v1/assistant", get(assistant_get))
+        .route("/v1/assistant/message", post(assistant_message))
+        .route("/v1/assistant/cancel", post(assistant_cancel))
+        .route("/v1/assistant/config", patch(assistant_update_config))
+        .route("/v1/assistant/approvals", get(assistant_approvals))
+        .route(
+            "/v1/assistant/approvals/:id/approve",
+            post(assistant_approval_approve),
+        )
+        .route(
+            "/v1/assistant/approvals/:id/reject",
+            post(assistant_approval_reject),
+        )
+        .route(
+            "/v1/mcp/orchestrator",
+            post(crate::runner::orchestrator_mcp::handle_mcp),
+        )
         .merge(crate::runner::review_http::routes())
 }
 
@@ -192,6 +211,15 @@ pub fn mobile_surface_router(
     finish_router(mobile_surface_routes(), state, actions)
 }
 
+/// 독립 `praxis-runner` 데몬 라우터.
+pub fn router(state: RunnerHttpState) -> Router {
+    finish_router(
+        mobile_surface_routes(),
+        state,
+        std::sync::Arc::new(crate::runner::actions::RunnerTaskActions),
+    )
+}
+
 /// Desktop webview의 교차 출처 fetch(예: http://localhost:1420 → http://127.0.0.1:포트)를
 /// 허용한다. CORS는 여기서 보안 경계가 아니다 — 어떤 로컬 프로세스든 이미 curl로 접근
 /// 가능하며, 접근 통제는 require_auth의 loopback peer + pairing token이 수행한다.
@@ -216,7 +244,7 @@ fn cors_preflight() -> Response {
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, POST, PUT, DELETE"),
+        HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE"),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
@@ -1108,6 +1136,168 @@ fn now() -> i64 {
 
 fn not_found() -> (StatusCode, String) {
     (StatusCode::NOT_FOUND, "task를 찾을 수 없습니다".to_string())
+}
+
+#[derive(Deserialize)]
+struct ApprovalStatusQuery {
+    status: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FileWriteRequest {
+    repository: String,
+    path: String,
+    content: String,
+}
+
+async fn task_cancel(
+    State(state): State<RunnerHttpState>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let _review_claim = state
+        .review_claims
+        .claim_finalization(id)
+        .map_err(invalid_request)?;
+    crate::runner::review_process::assert_task_unfenced(&state.pool, id)
+        .await
+        .map_err(invalid_request)?;
+    if state
+        .queue
+        .cancel(id, now())
+        .await
+        .map_err(invalid_request)?
+    {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let cancelled = db::cancel_queued_task(&state.pool, id, now())
+        .await
+        .map_err(internal_error)?;
+    if cancelled {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        crate::runner::cancel_pending_task(
+            &state.config,
+            &state.pool,
+            &state.queue.worktree_locks(),
+            id,
+            now(),
+        )
+        .await
+        .map_err(|error| (StatusCode::CONFLICT, error))?;
+        Ok(StatusCode::NO_CONTENT)
+    }
+}
+
+async fn file_write(
+    State(state): State<RunnerHttpState>,
+    Json(request): Json<FileWriteRequest>,
+) -> Result<Json<i64>, (StatusCode, String)> {
+    let root = authorized_repository(&state, &request.repository)?;
+    crate::runner::file_mutation::write_file(
+        &state.pool,
+        &state.queue.worktree_locks(),
+        &state.review_claims,
+        &root,
+        &request.path,
+        &request.content,
+    )
+    .await
+    .map(Json)
+    .map_err(invalid_path)
+}
+
+async fn assistant_get(
+    State(state): State<RunnerHttpState>,
+) -> Result<Json<crate::runner::assistant::AssistantSnapshot>, (StatusCode, String)> {
+    let snapshot = crate::runner::assistant::snapshot(&state.pool, &state.config, now())
+        .await
+        .map_err(invalid_request)?;
+    Ok(Json(snapshot))
+}
+
+async fn assistant_message(
+    State(state): State<RunnerHttpState>,
+    Extension(actions): Extension<crate::runner::actions::SharedTaskActions>,
+    Json(request): Json<crate::runner::assistant::AssistantMessageRequest>,
+) -> Result<(StatusCode, Json<db::Task>), (StatusCode, String)> {
+    let trimmed = request.message.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_request("메시지는 비어 있을 수 없습니다".into()));
+    }
+    let assistant_task =
+        crate::runner::assistant::ensure_assistant_task(&state.pool, &state.config, now())
+            .await
+            .map_err(invalid_request)?;
+    actions.message(&state, assistant_task.id, trimmed).await?;
+    let updated = db::get_task(&state.pool, assistant_task.id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(not_found)?;
+    Ok((StatusCode::ACCEPTED, Json(updated)))
+}
+
+async fn assistant_cancel(
+    State(state): State<RunnerHttpState>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let assistant_task =
+        crate::runner::assistant::ensure_assistant_task(&state.pool, &state.config, now())
+            .await
+            .map_err(invalid_request)?;
+    if state
+        .queue
+        .cancel(assistant_task.id, now())
+        .await
+        .map_err(invalid_request)?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((
+            StatusCode::CONFLICT,
+            "현재 진행 중인 비서 턴이 없습니다".to_string(),
+        ))
+    }
+}
+
+async fn assistant_update_config(
+    State(state): State<RunnerHttpState>,
+    Json(request): Json<crate::runner::assistant::AssistantConfigUpdate>,
+) -> Result<Json<db::Task>, (StatusCode, String)> {
+    let updated =
+        crate::runner::assistant::update_config(&state.pool, &state.config, request, now()).await?;
+    Ok(Json(updated))
+}
+
+async fn assistant_approvals(
+    State(state): State<RunnerHttpState>,
+    Query(query): Query<ApprovalStatusQuery>,
+) -> Result<Json<Vec<crate::runner::assistant::AssistantApproval>>, (StatusCode, String)> {
+    let items =
+        crate::runner::assistant::list_approvals(&state.pool, query.status.as_deref())
+            .await
+            .map_err(invalid_request)?;
+    Ok(Json(items))
+}
+
+async fn assistant_approval_approve(
+    State(state): State<RunnerHttpState>,
+    Extension(actions): Extension<crate::runner::actions::SharedTaskActions>,
+    Path(id): Path<i64>,
+) -> Result<Json<crate::runner::assistant::AssistantApproval>, (StatusCode, String)> {
+    let resolved =
+        crate::runner::assistant::approve_request(&state, &actions, id, now()).await?;
+    Ok(Json(resolved))
+}
+
+async fn assistant_approval_reject(
+    State(state): State<RunnerHttpState>,
+    Path(id): Path<i64>,
+    body: Option<Json<crate::runner::assistant::ApprovalRejectRequest>>,
+) -> Result<Json<crate::runner::assistant::AssistantApproval>, (StatusCode, String)> {
+    let reason = body.and_then(|Json(req)| req.reason);
+    let resolved =
+        crate::runner::assistant::reject_request(&state.pool, id, reason.as_deref(), now())
+            .await?;
+    Ok(Json(resolved))
 }
 
 #[cfg(test)]

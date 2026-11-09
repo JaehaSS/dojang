@@ -35,7 +35,7 @@ export function VoiceHUD({ state }: { state: VoiceHudState }) {
   return (
     <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 -translate-x-1/2">
       <div
-        className={`flex items-center gap-2 rounded-lg border bg-surface px-3 py-2 text-sm shadow-lg ${
+        className={`flex items-center gap-2 rounded-lg border bg-surface px-3 py-2 text-sm shadow-e2 ${
           isError && phase === "idle"
             ? "border-dangerborder text-status-failed"
             : "border-border text-text-secondary"

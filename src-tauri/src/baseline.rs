@@ -22,7 +22,7 @@ pub async fn pin_missing_baselines(pool: &SqlitePool) -> anyhow::Result<usize> {
         if !crate::worktree::is_git_repository(&path) {
             continue;
         }
-        let Ok(revision) = crate::worktree::merge_base(&path, "HEAD", &task.base) else {
+        let Ok(revision) = crate::worktree::freshest_merge_base(&path, &task.base) else {
             continue;
         };
         if revision.is_empty() {

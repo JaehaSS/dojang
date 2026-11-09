@@ -529,3 +529,123 @@ fn untracked_lists_new_excludes_ignored() {
     );
     let _ = wt.discard();
 }
+
+/// `origin`이 로컬 경로인 (upstream, clone) 쌍. clone의 `main`은 upstream과 같은 지점이다.
+fn remote_pair() -> (PathBuf, PathBuf) {
+    let up = temp_repo();
+    let clone = up.with_file_name(format!(
+        "{}-clone",
+        up.file_name().unwrap().to_str().unwrap()
+    ));
+    git(
+        up.parent().unwrap(),
+        &["clone", "-q", up.to_str().unwrap(), clone.to_str().unwrap()],
+    );
+    git(&clone, &["config", "user.email", "t@t.t"]);
+    git(&clone, &["config", "user.name", "t"]);
+    git(&clone, &["config", "commit.gpgsign", "false"]);
+    (up, clone)
+}
+
+fn commit_file(dir: &Path, name: &str) {
+    std::fs::write(dir.join(name), format!("{name}\n")).unwrap();
+    git(dir, &["add", name]);
+    git(dir, &["commit", "-qm", name]);
+}
+
+fn rev(dir: &Path, refname: &str) -> String {
+    run_git_output(dir, &["rev-parse", refname])
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn diff_ignores_remote_commits_missing_from_a_stale_local_base() {
+    let (up, clone) = remote_pair();
+    // 원격에만 있는 남의 커밋 — 로컬 main은 pull하지 않아 뒤처진다.
+    commit_file(&up, "others.txt");
+    git(&clone, &["fetch", "-q", "origin"]);
+    let stale = rev(&clone, "main");
+
+    // 작업은 원격 최신에서 갈라졌다(에이전트가 `reset --hard origin/main`한 것과 같다).
+    let path = clone.join(".dojang/worktrees/stale-base");
+    git(
+        &clone,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "task",
+            path.to_str().unwrap(),
+            "origin/main",
+        ],
+    );
+    let wt = Worktree {
+        repo: clone.clone(),
+        path: path.clone(),
+        branch: "task".to_string(),
+        base: "main".to_string(),
+        base_revision: Some(stale),
+    };
+    commit_file(&path, "mine.txt");
+
+    assert_eq!(wt.changed_paths().unwrap(), vec!["mine.txt".to_string()]);
+
+    // GitHub에서 머지되고 fetch만 한 상태 — 로컬 main은 여전히 모른다. diff가 사라지면 안 된다.
+    git(&up, &["fetch", "-q", path.to_str().unwrap(), "task"]);
+    git(&up, &["merge", "-q", "--ff-only", "FETCH_HEAD"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert!(!wt.changed_paths().unwrap().is_empty());
+
+    std::fs::remove_dir_all(&clone).ok();
+    std::fs::remove_dir_all(&up).ok();
+}
+
+#[test]
+fn create_from_the_remote_pins_the_remote_revision() {
+    let (up, clone) = remote_pair();
+    git(&up, &["checkout", "-q", "-b", "shared"]);
+    commit_file(&up, "s.txt");
+    git(&clone, &["fetch", "-q", "origin", "shared:shared"]);
+    commit_file(&up, "s2.txt");
+    // 다른 worktree가 shared를 쥐면 로컬을 못 옮기고 origin/shared에서 직접 갈라진다.
+    let holder = clone.join(".dojang/worktrees/holder");
+    git(
+        &clone,
+        &["worktree", "add", "-q", holder.to_str().unwrap(), "shared"],
+    );
+
+    let (wt, _) = worktree::create(&clone, "dojang/from-remote", Some("shared"), true, &|_| {})
+        .expect("create");
+
+    assert_eq!(wt.base_revision, Some(rev(&clone, "origin/shared")));
+    assert_eq!(wt.base_revision, Some(rev(&wt.path, "HEAD")));
+    commit_file(&wt.path, "mine.txt");
+    assert_eq!(wt.changed_paths().unwrap(), vec!["mine.txt".to_string()]);
+
+    std::fs::remove_dir_all(&clone).ok();
+    std::fs::remove_dir_all(&up).ok();
+}
+
+#[test]
+fn diff_survives_an_agent_resetting_onto_the_remote_from_a_diverged_local_base() {
+    let (up, clone) = remote_pair();
+    commit_file(&up, "others.txt");
+    git(&clone, &["fetch", "-q", "origin"]);
+    // 로컬 base가 원격에 없는 커밋을 가진다 — 로컬 merge 커밋처럼 원격과 갈라진 상태.
+    commit_file(&clone, "local-only.txt");
+    let pinned = rev(&clone, "main");
+
+    // 작업은 로컬 main에서 만들어졌지만 에이전트가 원격 최신으로 옮겨 기준점을 버렸다.
+    let (wt, _) = worktree::create(&clone, "dojang/reset", Some("main"), false, &|_| {})
+        .expect("create");
+    assert_eq!(wt.base_revision, Some(pinned));
+    git(&wt.path, &["reset", "-q", "--hard", "origin/main"]);
+    commit_file(&wt.path, "mine.txt");
+
+    assert_eq!(wt.changed_paths().unwrap(), vec!["mine.txt".to_string()]);
+
+    std::fs::remove_dir_all(&clone).ok();
+    std::fs::remove_dir_all(&up).ok();
+}

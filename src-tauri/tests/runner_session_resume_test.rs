@@ -460,6 +460,7 @@ async fn serve_with_roots(
         max_concurrent_tasks: 2,
         execution_policy: praxis_lib::runner::config::ExecutionPolicy::AlwaysApprove,
         pairing_token_file: token_path.clone().into(),
+        ..Default::default()
     };
     let queue = QueueWorker::new(pool.clone(), 2);
     let state = RunnerHttpState {

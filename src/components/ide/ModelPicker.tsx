@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./icons";
 import { modelsForAgentWithObserved, type ModelOption } from "../../lib/models";
 import { useObservedModels } from "../../lib/use-observed-models";
+import { useAvailableModels } from "../../lib/use-available-models";
 import { agentModelsGet } from "../../lib/ipc";
 import { filterByQuery, queryTokens } from "./picker-search";
 import { Highlighted } from "./PickerHighlight";
@@ -113,8 +114,9 @@ export function ModelPicker({
   const [query, setQuery] = useState("");
   // 설정의 벤더 기본 모델 — "기본" 항목에 실제 값을 보여주기 위한 조회(실패해도 무시).
   const [defaults, setDefaults] = useState<Record<string, string>>({});
-  // 카탈로그에 없는 모델도 한 번 쓴 적 있으면 후보로 올린다 (CLI가 목록을 안 주므로).
+  // CLI 조회 목록에 없는 모델도 한 번 쓴 적 있으면 후보로 올린다.
   const observed = useObservedModels();
+  const available = useAvailableModels(agent, open);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -132,7 +134,7 @@ export function ModelPicker({
     return () => window.removeEventListener("mousedown", onDown);
   }, [open]);
 
-  const options = modelsForAgentWithObserved(agent, observed);
+  const options = modelsForAgentWithObserved(agent, observed, available);
   const vendorDefault = (defaults[agent] ?? "").trim();
   const labelOf = (id: string) => options.find((o) => o.id === id)?.label ?? id;
   const requested = model.trim();
@@ -164,7 +166,8 @@ export function ModelPicker({
     count: rows.length,
     initial: tokens.length > 0 ? 1 : Math.max(selectedRow, 0),
     resetOn: "open+query",
-    query,
+    // 비동기 조회로 행이 바뀌면 이전 인덱스로 다른 모델을 확정하지 않도록 커서를 다시 맞춘다.
+    query: JSON.stringify([query, rows.map((row) => [row.kind, row.value])]),
     onCommit: (i) => {
       const row = rows[i];
       if (row) pick(row.value);
@@ -186,14 +189,14 @@ export function ModelPicker({
         onClick={() => setOpen((v) => !v)}
         title={disabled ? disabledTitle ?? chipTitle : chipTitle}
       >
-        <Icon name="sparkle" size={13} />
+        <Icon name="sparkle" size={14} />
         <span className="max-w-[150px] truncate">{chipLabel}</span>
         <Icon name="chevronDown" size={12} />
       </button>
 
       {open && (
         <div
-          className={`absolute left-0 z-20 w-64 rounded-lg border border-border-strong bg-raised py-1 shadow-xl ${
+          className={`absolute left-0 z-20 w-64 rounded-lg border border-border-strong bg-raised py-1 shadow-e2 ${
             placement === "down" ? "top-full mt-1" : "bottom-full mb-1"
           }`}
         >
@@ -266,7 +269,7 @@ export function ModelPicker({
                     }
                   >
                     <span className={`shrink-0 w-4 ${on ? "text-primary-bright" : "text-text-muted"}`}>
-                      <Icon name={on ? "check" : row.kind === "free" ? "chevronRight" : "sparkle"} size={13} />
+                      <Icon name={on ? "check" : row.kind === "free" ? "chevronRight" : "sparkle"} size={14} />
                     </span>
                     <span className={`truncate flex-1 ${row.kind === "custom" ? "font-code text-xs" : ""}`}>
                       {row.match ? <Highlighted text={row.label} tokens={tokens} /> : row.label}

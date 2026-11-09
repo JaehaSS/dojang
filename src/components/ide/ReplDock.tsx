@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState, type ReactElement } from "react";
 import { ShellTerminal, type PtyChannel } from "./ShellTerminal";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 import { useTerminalDockHeight } from "./terminal-dock-height";
 import { replDetach, replOpen, replReplay, replResize, replWrite } from "../../lib/ipc";
 
@@ -81,20 +82,15 @@ export function ReplDock({
         onKeyDown={resize.onKeyDown}
       />
       <div className="h-8 shrink-0 flex items-center gap-2 px-3 border-b border-border">
-        <Icon name="terminal" size={13} />
+        <Icon name="terminal" size={14} />
         <span className="text-xs uppercase tracking-wide text-text-muted">Python 콘솔</span>
         {label != null && (
           <span className="text-xs text-text-muted truncate opacity-70">{label}</span>
         )}
         <span className="ml-auto text-[11px] text-text-muted hidden sm:inline">⇧⏎ 선택 실행</span>
-        <button
-          className="p-1 text-text-muted hover:text-text"
-          onClick={onClose}
-          title="콘솔 닫기 (⌃`)"
-          aria-label="콘솔 닫기"
-        >
-          <Icon name="x" size={13} />
-        </button>
+        <IconButton size="sm" label="콘솔 닫기" title="콘솔 닫기 (⌃`)" onClick={onClose}>
+          <Icon name="x" size={14} />
+        </IconButton>
       </div>
       {!available ? (
         <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-text-muted">

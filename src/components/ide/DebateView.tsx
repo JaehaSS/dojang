@@ -6,6 +6,7 @@ import { conversationScrollMemory, isConversationNearBottom } from "./conversati
 import { Items, PaneHeader, paneGrid, Round } from "./DebateRoundGrid";
 import { activeSide, consensusText, debateRounds, type DebateEventLike } from "./debate-rounds";
 import { debateSessionWidth } from "./workspace-split-width";
+import { Icon } from "./icons";
 
 /** 한 면이 누구인지 — 값은 좌측이 `tasks`, 나머지가 `convo_debate_sides`에서 온다. */
 export interface DebatePane {
@@ -145,8 +146,8 @@ export function DebateView({ taskId, events, roundCap, panes, busy, onSend, onEn
           점유 중에는 Runner가 물러나므로(debate_end_checked) 누르게 두지 않고 중단을 먼저 가리킨다. */}
       <div className="flex flex-wrap items-center gap-2 border-t border-border bg-raised px-3 py-2 text-sm">
         {ended && (
-          <span className={ended === "consensus" ? "text-primary-bright" : "text-text-secondary"}>
-            {ended === "consensus" ? "✓ " : ""}
+          <span className={`inline-flex items-center gap-1 ${ended === "consensus" ? "text-primary-bright" : "text-text-secondary"}`}>
+            {ended === "consensus" && <Icon name="check" size={12} />}
             {BANNER[ended]}
           </span>
         )}

@@ -127,12 +127,12 @@ export function CheckpointMenu({ taskId, onRewound }: Props): ReactElement {
       >
         <Icon name="clock" size={16} />
         {points.length > 0 && (
-          <span className="text-[10px] leading-none tabular-nums">{points.length}</span>
+          <span className="text-[11px] leading-none tabular-nums">{points.length}</span>
         )}
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-80 rounded-lg border border-border-strong bg-raised p-3 shadow-xl">
+        <div className="absolute right-0 top-full z-20 mt-1 w-80 rounded-lg border border-border-strong bg-raised p-3 shadow-e2">
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
             <h2 className="text-sm font-medium text-text">체크포인트</h2>
             <span className="text-[11px] text-text-muted">

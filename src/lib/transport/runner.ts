@@ -34,8 +34,12 @@ import type {
 } from "../ipc";
 import type { SourcePage } from "../notifications";
 import type {
+  AssistantApproval,
+  AssistantConfigUpdate,
+  AssistantSnapshot,
   DiffRange,
   HostId,
+  OrchestratorOverview,
   PraxisTransport,
   ReviewProcessQuarantine,
   ReviewProcessRepairResult,
@@ -692,6 +696,57 @@ export class RunnerTransport implements PraxisTransport {
     return this.json("/v1/reminders", {
       method: "POST",
       body: JSON.stringify({ text, delay_minutes: delayMinutes }),
+    });
+  }
+
+  async assistantGet(): Promise<AssistantSnapshot> {
+    const raw = await this.json<{
+      task: TaskRow;
+      pending_approvals: AssistantApproval[];
+      overview: OrchestratorOverview;
+    }>("/v1/assistant", { signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
+    return {
+      task: this.own(raw.task),
+      pending_approvals: raw.pending_approvals ?? [],
+      overview: raw.overview,
+    };
+  }
+
+  async assistantMessage(message: string): Promise<Task> {
+    const row = await this.json<TaskRow>("/v1/assistant/message", {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    });
+    return this.own(row);
+  }
+
+  assistantCancel(): Promise<void> {
+    return this.empty("/v1/assistant/cancel", { method: "POST" });
+  }
+
+  async assistantUpdateConfig(update: AssistantConfigUpdate): Promise<Task> {
+    const row = await this.json<TaskRow>("/v1/assistant/config", {
+      method: "PATCH",
+      body: JSON.stringify(update),
+    });
+    return this.own(row);
+  }
+
+  assistantApprovals(status?: string): Promise<AssistantApproval[]> {
+    const query = status ? `?${new URLSearchParams({ status })}` : "";
+    return this.json(`/v1/assistant/approvals${query}`);
+  }
+
+  assistantApprove(approvalId: number): Promise<AssistantApproval> {
+    return this.json(`/v1/assistant/approvals/${approvalId}/approve`, {
+      method: "POST",
+    });
+  }
+
+  assistantReject(approvalId: number, reason?: string): Promise<AssistantApproval> {
+    return this.json(`/v1/assistant/approvals/${approvalId}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason ?? null }),
     });
   }
 

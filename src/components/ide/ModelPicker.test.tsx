@@ -4,14 +4,16 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ModelPicker, modelChipTitle } from "./ModelPicker";
+import type { ModelOption } from "../../lib/models";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-// 부분 mock — 이 트리가 import하는 다른 IPC를 통째로 지우지 않는다. 바꾸는 것은 조회 하나뿐이다.
-const ipc = vi.hoisted(() => ({ agentModelsGet: vi.fn() }));
+// 부분 mock — 이 트리가 import하는 다른 IPC를 통째로 지우지 않는다.
+const ipc = vi.hoisted(() => ({ agentModelsGet: vi.fn(), agentAvailableModels: vi.fn() }));
 vi.mock("../../lib/ipc", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/ipc")>()),
   agentModelsGet: ipc.agentModelsGet,
+  agentAvailableModels: ipc.agentAvailableModels,
 }));
 
 const observed = vi.hoisted(() => ({
@@ -28,6 +30,7 @@ beforeEach(() => {
   root = createRoot(container);
   observed.rows = [];
   ipc.agentModelsGet.mockReset().mockResolvedValue({});
+  ipc.agentAvailableModels.mockReset().mockResolvedValue([]);
 });
 
 afterEach(async () => {
@@ -196,6 +199,60 @@ async function press(key: string): Promise<void> {
 }
 
 describe("ModelPicker 검색", () => {
+  it("조회 중 이동한 커서는 목록이 바뀌면 현재 선택으로 돌아간다", async () => {
+    let resolve!: (models: ModelOption[]) => void;
+    ipc.agentAvailableModels.mockReturnValue(new Promise<ModelOption[]>((done) => { resolve = done; }));
+    const onChange = vi.fn();
+    await openMenu(<ModelPicker agent="agy" model="" onChange={onChange} />);
+    await press("ArrowDown");
+    await press("ArrowDown");
+    await act(async () => resolve([
+      { id: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" },
+      { id: "gemini-4-argon-low", label: "Gemini 4 Argon (Low)" },
+    ]));
+    expect(options()[0].dataset.cursor).toBe("true");
+    await press("Enter");
+    expect(onChange).toHaveBeenCalledWith("");
+  });
+
+  it("메뉴를 열면 CLI의 아르곤 목록을 조회하고 선택한 ID를 전달한다", async () => {
+    ipc.agentAvailableModels.mockResolvedValue([
+      { id: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" },
+    ]);
+    const onChange = vi.fn();
+    await render(<ModelPicker agent="agy" model="" onChange={onChange} />);
+    expect(ipc.agentAvailableModels).not.toHaveBeenCalled();
+    await act(async () => chip()?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(ipc.agentAvailableModels).toHaveBeenCalledWith("agy");
+    expect(options().map((o) => o.textContent).join(" ")).toContain("Gemini 4 Argon (High)");
+    expect(options().map((o) => o.textContent).join(" ")).not.toContain("Gemini 3.6");
+    await act(async () => options()[1].click());
+    expect(onChange).toHaveBeenCalledWith("gemini-4-argon-high");
+    await act(async () => chip()?.click());
+    expect(ipc.agentAvailableModels).toHaveBeenCalledTimes(2);
+  });
+
+  it("CLI 조회가 실패해도 기존 모델과 자유입력을 사용할 수 있다", async () => {
+    ipc.agentAvailableModels.mockRejectedValue(new Error("offline"));
+    const onChange = vi.fn();
+    await openMenu(<ModelPicker agent="agy" model="" onChange={onChange} />);
+    expect(options().map((o) => o.textContent).join(" ")).toContain("Gemini 3.8");
+    await type("gemini-4-argon-low");
+    await press("Enter");
+    expect(onChange).toHaveBeenCalledWith("gemini-4-argon-low");
+  });
+
+  it("벤더를 바꾸면 이전 벤더의 조회 결과를 표시하지 않는다", async () => {
+    ipc.agentAvailableModels.mockResolvedValue([
+      { id: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" },
+    ]);
+    await openMenu(<ModelPicker agent="agy" model="" onChange={() => undefined} />);
+    await render(<ModelPicker agent="claude" model="" onChange={() => undefined} />);
+    expect(options().map((o) => o.textContent).join(" ")).not.toContain("Argon");
+    expect(options().map((o) => o.textContent).join(" ")).toContain("Opus");
+    expect(ipc.agentAvailableModels).toHaveBeenCalledTimes(1);
+  });
+
   it("필드는 하나다 — 검색어가 곧 모델 ID라고 placeholder가 말한다", async () => {
     await openMenu(<ModelPicker agent="agy" model="" onChange={() => undefined} />);
     expect(search()?.placeholder).toBe("검색 또는 모델 ID 입력");

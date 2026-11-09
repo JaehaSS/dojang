@@ -200,6 +200,15 @@ export function useEditorNavigation({
     [clearPending],
   );
 
+  // 문서 링크는 분할 배치가 파일 열기를 소유한다. 성공한 이동만 같은 기록에 합친다.
+  const record = useCallback((origin: NavigationLocation, destination: NavigationLocation) => {
+    if (!identity || identityKeyRef.current !== identityKey) return;
+    ++idRef.current;
+    clearPending();
+    setReveal(null);
+    setHistory((current) => pushNavigation(pushNavigation(current, origin), destination));
+  }, [clearPending, identity, identityKey]);
+
   const move = useCallback(
     (direction: -1 | 1) => {
       if (!identity) return;
@@ -231,6 +240,7 @@ export function useEditorNavigation({
   return {
     reveal: reveal?.epoch === epochRef.current ? reveal : null,
     navigate,
+    record,
     onRevealed,
     back: () => move(-1),
     forward: () => move(1),

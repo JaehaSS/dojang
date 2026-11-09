@@ -23,6 +23,7 @@ import { FileContextMenu, type FileMenuAction, type FileMenuState } from "./File
 import { FilePromptDialog } from "./FilePromptDialog";
 import { keyAction, typeAheadIndex, type NavRow } from "./tree-nav";
 import { splitLabel } from "./file-label";
+import { IconButton } from "../ui";
 
 export type SortKey = "name" | "mtime";
 
@@ -425,24 +426,13 @@ export function DirectoryBrowser({
   return (
     <div ref={rootRef} className={`flex flex-col min-h-0 ${className}`}>
       <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border shrink-0">
-        <button
-          className="p-1 text-text-muted hover:text-text disabled:opacity-40"
-          disabled={!parent || rootBusy}
-          onClick={() => parent && openRoot(parent)}
-          title="상위 폴더"
-          aria-label="상위 폴더"
-        >
+        <IconButton size="sm" label="상위 폴더" disabled={!parent || rootBusy} onClick={() => parent && openRoot(parent)}>
           <Icon name="chevronLeft" size={14} />
-        </button>
+        </IconButton>
         {roots.length > 0 && (
-          <button
-            className="p-1 text-text-muted hover:text-text"
-            onClick={() => openRoot(roots[0])}
-            title={roots[0]}
-            aria-label="최상위로"
-          >
+          <IconButton size="sm" label="최상위로" title={`최상위로 — ${roots[0]}`} onClick={() => openRoot(roots[0])}>
             <Icon name="home" size={14} />
-          </button>
+          </IconButton>
         )}
         <span
           className="flex-1 min-w-0 truncate text-xs font-code text-text-secondary"
@@ -451,24 +441,18 @@ export function DirectoryBrowser({
         >
           {root || "…"}
         </span>
-        <button
-          className={`p-1 ${showHidden ? "text-primary-bright" : "text-text-muted hover:text-text"}`}
-          onClick={() => setShowHidden((v) => !v)}
+        <IconButton
+          size="sm"
+          label="숨김 항목"
+          pressed={showHidden}
           title={showHidden ? "숨김 항목 감추기" : "숨김 항목 보기 (.*)"}
-          aria-label="숨김 항목"
-          aria-pressed={showHidden}
+          onClick={() => setShowHidden((v) => !v)}
         >
           <Icon name={showHidden ? "eye" : "eyeOff"} size={14} />
-        </button>
-        <button
-          className="p-1 text-text-muted hover:text-text disabled:opacity-40"
-          disabled={rootBusy}
-          onClick={() => openRoot(root)}
-          title="새로고침"
-          aria-label="새로고침"
-        >
+        </IconButton>
+        <IconButton size="sm" label="새로고침" disabled={rootBusy} onClick={() => openRoot(root)}>
           <Icon name="refresh" size={14} />
-        </button>
+        </IconButton>
       </div>
 
       <div className="flex items-center gap-2 px-3 py-1 border-b border-border text-xs text-text-muted shrink-0">
@@ -583,12 +567,12 @@ export function DirectoryBrowser({
                     {tail && <span className="min-w-0 shrink truncate">{tail}</span>}
                   </span>
                   {entry.is_repo && (
-                    <span className="shrink-0 text-[10px] px-1 rounded border border-border text-primary-bright">
+                    <span className="shrink-0 text-[11px] px-1 rounded border border-border text-primary-bright">
                       git
                     </span>
                   )}
                   {loading.has(entry.path) && (
-                    <span className="shrink-0 text-[10px] text-text-muted">…</span>
+                    <span className="shrink-0 text-[11px] text-text-muted">…</span>
                   )}
                 </button>
                 {!dense && (

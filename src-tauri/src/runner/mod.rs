@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod assistant;
 pub mod auth;
 pub mod capacity;
 pub mod config;
@@ -8,6 +9,7 @@ pub mod finalization;
 pub mod http;
 mod memory_gate;
 pub mod mobile_http;
+pub mod orchestrator_mcp;
 pub mod process;
 pub(crate) mod process_identity;
 pub mod push;

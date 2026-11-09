@@ -298,7 +298,7 @@ export function QuickOpen({ open, scopes, editorSearch, initialEditorTab = "all"
           role="dialog"
           aria-modal="true"
           aria-label="빠른 검색"
-          className="bg-raised border border-border-strong rounded-xl shadow-xl w-full max-w-xl max-h-[70vh] flex flex-col overflow-hidden"
+          className="bg-raised border border-border-strong rounded-xl shadow-e3 w-full max-w-xl max-h-[70vh] flex flex-col overflow-hidden"
           onClick={(e) => e.stopPropagation()}
           onKeyDown={onKeyDown}
         >

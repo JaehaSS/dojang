@@ -42,13 +42,13 @@ export function AgentPicker({ agents, onChange }: Props) {
         onClick={() => setOpenMenu((v) => !v)}
         title={`리드 에이전트: ${current}`}
       >
-        <Icon name="sparkle" size={13} />
+        <Icon name="sparkle" size={14} />
         <span className="max-w-[170px] truncate">{labelFor(current)}</span>
         <Icon name="chevronDown" size={12} />
       </button>
 
       {openMenu && (
-        <div className="absolute bottom-full left-0 mb-1 z-20 w-72 rounded-lg border border-border-strong bg-raised py-1 shadow-xl">
+        <div className="absolute bottom-full left-0 mb-1 z-20 w-72 rounded-lg border border-border-strong bg-raised py-1 shadow-e2">
           <div className="px-3 py-1 text-xs text-text-muted">에이전트</div>
           {AGENT_PRESETS.map((p) => {
             const on = current === p.key;
@@ -64,7 +64,7 @@ export function AgentPicker({ agents, onChange }: Props) {
                   onClick={() => { onChange([p.key]); setOpenMenu(false); }}
                 >
                   <span className={`shrink-0 w-4 ${on ? "text-primary-bright" : "text-text-muted"}`}>
-                    <Icon name={on ? "check" : "sparkle"} size={13} />
+                    <Icon name={on ? "check" : "sparkle"} size={14} />
                   </span>
                   <span className="truncate flex-1">{p.label}</span>
                   <span className="text-text-muted text-xs font-code shrink-0">{p.key}</span>
@@ -79,7 +79,7 @@ export function AgentPicker({ agents, onChange }: Props) {
               className="w-full text-left flex items-center gap-2 px-3 py-1.5 text-sm text-text"
             >
               <span className="shrink-0 w-4 text-primary-bright">
-                <Icon name="check" size={13} />
+                <Icon name="check" size={14} />
               </span>
               <span className="truncate flex-1 font-code text-xs">{c}</span>
               <span className="text-text-muted text-xs">커스텀</span>

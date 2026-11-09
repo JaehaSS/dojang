@@ -143,7 +143,7 @@ export function HunkCheckbox({
   if (hunk.committed) {
     return (
       <span
-        className="rounded bg-raised px-1 text-[10px] text-text-muted"
+        className="rounded bg-raised px-1 text-[11px] text-text-muted"
         title="이미 커밋된 변경 — 부분 적용이 건드리지 않습니다"
       >
         커밋됨
@@ -187,7 +187,7 @@ export function DiffRangeToggle({
           key={option.value}
           className={`rounded px-2.5 text-xs ${
             range === option.value
-              ? "bg-raised text-text shadow-sm"
+              ? "bg-raised text-text shadow-e1"
               : "text-text-muted hover:text-text-secondary"
           }`}
           aria-pressed={range === option.value}
@@ -224,7 +224,7 @@ export function DiffModeToggle({
           key={option.value}
           className={`rounded px-2.5 text-xs disabled:opacity-50 ${
             mode === option.value
-              ? "bg-raised text-text shadow-sm"
+              ? "bg-raised text-text shadow-e1"
               : "text-text-muted hover:text-text-secondary"
           }`}
           aria-pressed={mode === option.value}

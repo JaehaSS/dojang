@@ -110,9 +110,9 @@ fn stub_dir() -> &'static Path {
 }
 
 /// 두 테스트가 같은 calls.log를 쓰므로 직렬화한다.
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    static M: Mutex<()> = Mutex::new(());
-    M.lock().unwrap_or_else(|e| e.into_inner())
+fn serial() -> &'static tokio::sync::Mutex<()> {
+    static M: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &M
 }
 
 fn calls() -> Vec<String> {
@@ -545,7 +545,7 @@ async fn task_count(pool: &SqlitePool) -> i64 {
 /// 의존 티켓 B는 A의 결과 위에서 시작하므로 A와 충돌할 수 없다. 충돌은 독립 티켓 T3로 만든다.
 #[tokio::test]
 async fn pipeline_runs_split_to_merge_gate_with_dependency_and_conflict() {
-    let _g = serial();
+    let _g = serial().lock().await;
     let repo = init_repo("e2e-main");
     let h = H::new(repo.clone()).await;
     let base_rev = git(&repo, &["rev-parse", "main"]);
@@ -680,7 +680,7 @@ async fn pipeline_runs_split_to_merge_gate_with_dependency_and_conflict() {
 /// 허용 경로 밖 파일을 만든 티켓은 수용 명령이 통과해도 검증에서 거절되어 fixing으로 간다(R10).
 #[tokio::test]
 async fn ticket_writing_outside_allowed_paths_is_rejected_at_verify() {
-    let _g = serial();
+    let _g = serial().lock().await;
     let repo = init_repo("e2e-rogue");
     let h = H::new(repo.clone()).await;
     h.ensure_integration().await;
@@ -723,7 +723,7 @@ async fn ticket_writing_outside_allowed_paths_is_rejected_at_verify() {
 /// 이 오류로 빠졌다. 드라이버는 성공 2개 미만이면 실행을 멈추고, 티켓 리뷰는 다른 리뷰어로 넘어간다.
 #[test]
 fn concurrent_reviewers_get_distinct_temp_dirs() {
-    let _g = serial();
+    let _g = serial().blocking_lock();
     stub_dir();
     let n = 12;
     let barrier = std::sync::Barrier::new(n);

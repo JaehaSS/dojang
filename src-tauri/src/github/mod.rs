@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 mod remote;
+pub mod pr_status;
+pub mod pr_delivery;
 mod store;
 
 pub use remote::{
@@ -73,3 +75,5 @@ pub fn build_instruction(owner_repo: &str, number: u64, detail: &GhIssueDetail) 
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod pr_status_tests;

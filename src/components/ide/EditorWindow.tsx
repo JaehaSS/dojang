@@ -62,9 +62,11 @@ import { QuickOpen, type EditorSearchTab } from "../QuickOpen";
 import { parseCodeItemId, type RankedQuickOpenItem } from "../../lib/quickopen";
 import { onKeyDown as shiftDown, onKeyUp as shiftUp, type ShiftTapState } from "../../lib/shift-double-tap";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 import { ReplDock } from "./ReplDock";
 import { pandasOpenSnippet } from "../../lib/repl-snippets";
 import { ProjectTerminal, restartProjectShell } from "./ProjectTerminal";
+import { TaskStatusIcon } from "./TaskStatusIcon";
 
 const STATUS_LABEL: Record<EditorStatus, string> = {
   idle: "대기",
@@ -104,8 +106,8 @@ function StatusBar({
       )}
       <span className="ml-auto" aria-live="polite">
         {STATUS_LABEL[status]}
-        {status === "busy" && " ⏳"}
-        {status === "done" && " ✓"}
+        {status === "busy" && <TaskStatusIcon tone="running" label="" size={12} decorative />}
+        {status === "done" && <TaskStatusIcon tone="done" label="" size={12} decorative />}
       </span>
     </div>
   );
@@ -430,6 +432,13 @@ export function EditorWindow() {
   const applyReveal = useCallback(async (payload: EditorRevealPayload) => {
     const current = sessionRef.current;
     if (!current || current.task_id !== payload.task_id || current.host !== payload.host) return;
+    // 메인 창의 변경 칩 — 변경 목록을 이 창의 트리 열에 세운다. 탭을 열지 않으므로 이어받은
+    // 활성 탭 복원(`revealClaimedRef`)을 가로채지 않는다.
+    if (payload.kind === "changes") {
+      setTreeLens("changes");
+      setTreeOpen(true);
+      return;
+    }
     revealClaimedRef.current = true;
     // 변경 목록의 행이 보낸 링크 — diff 탭은 읽을 파일이 없으니 바로 만들고 끝낸다.
     if (payload.kind === "diff") {
@@ -710,21 +719,16 @@ export function EditorWindow() {
     <div className="h-screen flex flex-col bg-base text-text">
       {project && <header className="h-9 shrink-0 flex items-center gap-2 px-3 border-b border-border text-xs text-text-muted">
         <Icon name="folder" size={14} /><span className="truncate">{project.root}</span>
-        <button className="ml-auto p-1 hover:text-text" aria-label={terminalOpen ? "터미널 닫기" : "터미널 열기"} aria-pressed={terminalOpen} onClick={() => { setTerminalStarted(true); setTerminalOpen((open) => !open); }}><Icon name="terminal" size={14} /></button>
+        <IconButton size="sm" className="ml-auto" label={terminalOpen ? "터미널 닫기" : "터미널 열기"} pressed={terminalOpen} onClick={() => { setTerminalStarted(true); setTerminalOpen((open) => !open); }}><Icon name="terminal" size={14} /></IconButton>
       </header>}
       {/* diff 스냅샷·확인함은 세션당 하나다 — 변경 목록(트리 열)과 diff 탭(에디터)이 같은 값을 본다. */}
       <DiffSessionScope task={task} openDiff={files.openDiff}>
       <div className="flex-1 flex min-h-0" inert={switching} aria-busy={switching}>
         {!treeOpen && (
           <div className="w-8 shrink-0 border-r border-border flex flex-col items-center pt-1">
-            <button
-              className="p-1 text-text-secondary hover:text-text"
-              onClick={() => setTreeOpen(true)}
-              title="파일 트리 열기"
-              aria-label="파일 트리 열기"
-            >
+            <IconButton size="sm" label="파일 트리 열기" onClick={() => setTreeOpen(true)}>
               <Icon name="folder" size={14} />
-            </button>
+            </IconButton>
           </div>
         )}
         {/* 접을 때 언마운트하지 않는다 — 펼친 가지가 FileTree의 상태라 다시 열면 처음으로
@@ -755,34 +759,22 @@ export function EditorWindow() {
             )}
             <span className="ml-auto" />
             {treeLens === "files" && (<>
-            <button
-              className={`p-1 ${
-                showHidden ? "text-primary-bright" : "hover:text-text"
-              }`}
-              onClick={() => setShowHidden((v) => !v)}
+            <IconButton
+              size="sm"
+              pressed={showHidden}
+              label="숨김 항목"
               title={showHidden ? "숨김 항목 감추기" : "숨김 항목 보기 (.*)"}
-              aria-label="숨김 항목"
-              aria-pressed={showHidden}
+              onClick={() => setShowHidden((v) => !v)}
             >
-              <Icon name={showHidden ? "eye" : "eyeOff"} size={13} />
-            </button>
-            <button
-              className="p-1 hover:text-text"
-              onClick={() => files.refreshTree()}
-              title="새로고침"
-              aria-label="파일 트리 새로고침"
-            >
-              <Icon name="refresh" size={13} />
-            </button>
+              <Icon name={showHidden ? "eye" : "eyeOff"} size={14} />
+            </IconButton>
+            <IconButton size="sm" label="파일 트리 새로고침" title="새로고침" onClick={() => files.refreshTree()}>
+              <Icon name="refresh" size={14} />
+            </IconButton>
             </>)}
-            <button
-              className="p-1 hover:text-text"
-              onClick={() => setTreeOpen(false)}
-              title="파일 트리 닫기"
-              aria-label="파일 트리 닫기"
-            >
-              <Icon name="x" size={13} />
-            </button>
+            <IconButton size="sm" label="파일 트리 닫기" onClick={() => setTreeOpen(false)}>
+              <Icon name="x" size={14} />
+            </IconButton>
           </div>
           {session && treeLens === "changes" ? (
             <ChangesList />

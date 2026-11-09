@@ -135,17 +135,17 @@ export interface ObservedModel {
 /**
  * 하드코딩 카탈로그 + 실제 관측 목록. 카탈로그에 없는 모델을 뒤에 덧붙인다.
  *
- * claude·codex CLI 모두 "사용 가능한 모델 목록"을 노출하지 않아(`--model`/`-m`은 입력 전용)
- * 신모델은 카탈로그를 손으로 고치기 전까지 드롭다운에 뜨지 않는다. 관측을 합치면 **자유입력으로
- * 한 번 쓴 모델이 다음부터 목록에 남는다** — 완전 자동은 아니고 "한 번 쓰면 기억한다"에 가깝다.
+ * agy는 설치된 CLI의 목록이 있으면 내장 목록 대신 사용한다.
+ * 사용 이력은 내장/조회 목록을 보강하므로 자유입력으로 한 번 쓴 모델도 다음부터 목록에 남는다.
  *
  * 중복은 카탈로그 쪽을 남긴다(사람이 붙인 라벨이 원시 id보다 읽기 좋다).
  */
 export function modelsForAgentWithObserved(
   agent: string,
   observed: readonly ObservedModel[],
+  available?: readonly ModelOption[] | null,
 ): ModelOption[] {
-  const catalog = modelsForAgent(agent);
+  const catalog = available?.length ? available : modelsForAgent(agent);
   const known = new Set(catalog.map((option) => option.id));
   const extra = observed
     .filter((entry) => entry.agent === agent && !known.has(entry.model))

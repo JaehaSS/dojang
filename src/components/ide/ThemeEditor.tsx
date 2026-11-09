@@ -20,6 +20,7 @@ import {
   type ThemeKind,
 } from "../../lib/themes";
 import { useTheme } from "../../lib/use-theme";
+import { Icon } from "./icons";
 import {
   DERIVED_KEYS,
   PALETTE_KEYS,
@@ -111,8 +112,8 @@ function ColorCell({
         />
       </span>
       {note && (
-        <span className="text-[10px] text-status-failed">
-          ⚠ {note.ratio} → {note.corrected} 보정됨
+        <span className="inline-flex items-center gap-1 text-[11px] text-status-failed">
+          <Icon name="alert" size={12} />{note.ratio} → {note.corrected} 보정됨
         </span>
       )}
     </label>
@@ -132,9 +133,9 @@ function Preview({ theme, monacoThemeId }: { theme: Theme; monacoThemeId: string
         <div className="mb-1.5 flex items-center gap-1.5">
           <span className="h-2 w-2 rounded-full bg-primary" />
           <span className="text-[11px] text-text">Dojang</span>
-          <span className="ml-auto text-[10px] text-text-muted">미리보기</span>
+          <span className="ml-auto text-[11px] text-text-muted">미리보기</span>
         </div>
-        <div className="rounded border border-border bg-raised px-1.5 py-1 text-[10px] text-text-secondary">
+        <div className="rounded border border-border bg-raised px-1.5 py-1 text-[11px] text-text-secondary">
           작업 카드
         </div>
         <div className="mt-1.5 flex items-center gap-1.5">
@@ -146,7 +147,7 @@ function Preview({ theme, monacoThemeId }: { theme: Theme; monacoThemeId: string
               style={{ background: theme.tokens[k] }}
             />
           ))}
-          <span className="ml-auto text-[10px] text-text-muted">상태 5색</span>
+          <span className="ml-auto text-[11px] text-text-muted">상태 5색</span>
         </div>
       </div>
 

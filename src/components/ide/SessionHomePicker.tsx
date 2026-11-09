@@ -323,7 +323,7 @@ export function SessionHomePicker({ host, repo, projects = NO_PROJECTS, onSelect
         role="dialog"
         aria-modal="true"
         aria-label="세션 이어받기"
-        className="flex max-h-[70vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-border-strong bg-raised shadow-xl"
+        className="flex max-h-[70vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-border-strong bg-raised shadow-e3"
         onMouseDown={(event) => event.stopPropagation()}
         onKeyDown={(event) => {
           if (event.defaultPrevented) return;

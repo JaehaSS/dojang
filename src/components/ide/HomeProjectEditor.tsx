@@ -45,7 +45,7 @@ export function HomeProjectEditor({ localRoots, onOpen }: Props) {
   };
   return <section className="mb-5 rounded-md border border-border bg-surface px-3 py-2.5">
     <div className="flex items-center gap-2">
-      <Icon name="folder" size={15} />
+      <Icon name="folder" size={16} />
       <span className="text-sm text-text">프로젝트 에디터</span>
       <span className="text-xs text-text-muted">작업 없이 원본 폴더를 엽니다</span>
       <div className="ml-auto"><RepoPicker repo="" triggerLabel="에디터 열기" recentRepos={candidates} onPick={(path) => void open(path)} label="최근 프로젝트" onOpen={() => setRecent(recentProjectRoots())} placement="down" align="right" /></div>

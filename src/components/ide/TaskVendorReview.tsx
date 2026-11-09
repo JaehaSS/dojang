@@ -11,6 +11,7 @@ import {
 import { LOCAL_HOST, type HostId } from "../../lib/transport";
 import { Icon } from "./icons";
 import { ReviewPanel } from "./ReviewPanel";
+import { IconButton } from "../ui";
 
 /** 백엔드 화이트리스트와 같은 순서 — 기본 셋에 gemini를 선택지로 더 둔다. */
 const VENDORS = ["claude", "codex", "agy", "gemini"];
@@ -131,7 +132,7 @@ export function TaskVendorReview({ repo, taskId, host }: Props) {
         </button>
 
         {open && (
-          <div className="absolute bottom-full right-0 z-30 mb-1 flex w-80 flex-col gap-2 rounded-lg border border-border-strong bg-raised p-3 text-left shadow-xl">
+          <div className="absolute bottom-full right-0 z-30 mb-1 flex w-80 flex-col gap-2 rounded-lg border border-border-strong bg-raised p-3 text-left shadow-e2">
             <div className="flex flex-wrap items-center gap-2">
               {VENDORS.map((v) => (
                 <label key={v} className="flex cursor-pointer items-center gap-1 text-xs text-text-secondary">
@@ -189,14 +190,9 @@ export function TaskVendorReview({ repo, taskId, host }: Props) {
                     >
                       {stamp(m.created_at)} · {m.ok_count}/{m.total} 완료
                     </button>
-                    <button
-                      className="shrink-0 text-text-muted hover:text-status-failed"
-                      onClick={() => void removeHistory(m.id)}
-                      aria-label="리뷰 삭제"
-                      title="리뷰 삭제"
-                    >
-                      <Icon name="x" size={12} />
-                    </button>
+                    <IconButton size="sm" tone="danger" label="리뷰 삭제" onClick={() => void removeHistory(m.id)}>
+                      <Icon name="x" size={14} />
+                    </IconButton>
                   </div>
                 ))}
               </div>

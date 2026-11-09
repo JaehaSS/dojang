@@ -132,7 +132,7 @@ const emptyBranches: BranchList = { current: "", branches: [] };
 const chip = "flex items-center gap-1 text-xs text-text-secondary border border-border rounded-md px-2 py-1";
 const Chip = ({ icon, label }: { icon: IconName; label: string }) => (
   <span className={chip}>
-    <Icon name={icon} size={13} />
+    <Icon name={icon} size={14} />
     {label}
   </span>
 );
@@ -558,7 +558,7 @@ export function Composer({
         {showResume && (
           resumeSession ? (
             <span className={chip}>
-              <Icon name="clock" size={13} />
+              <Icon name="clock" size={14} />
               <span
                 className="max-w-[160px] truncate"
                 title={resumeSession.title?.trim() || resumeSession.first_message?.trim() || resumeSession.session_id}
@@ -582,7 +582,7 @@ export function Composer({
               className="flex items-center gap-1 text-xs text-text-secondary border border-border rounded-md px-2 py-1 hover:border-border-strong"
               onClick={() => setSessionPickerOpen(true)}
             >
-              <Icon name="clock" size={13} />
+              <Icon name="clock" size={14} />
               세션 이어받기
             </button>
           )
@@ -622,7 +622,7 @@ export function Composer({
               onClick={() => void initRepo()}
               title="저장소가 없으면 만들고, 커밋이 없으면 현재 내용을 초기 커밋으로 남깁니다"
             >
-              <Icon name="branch" size={13} />
+              <Icon name="branch" size={14} />
               {initBusy ? "준비 중…" : "git 준비하기"}
             </button>
           </>
@@ -655,11 +655,11 @@ export function Composer({
           <Icon name="branch" size={12} />
           <span className="flex-1">{baseRefreshNotice}</span>
           <button
-            className="text-text-muted hover:text-text-secondary"
+            className="inline-flex items-center text-text-muted hover:text-text-secondary"
             aria-label="최신화 알림 닫기"
             onClick={onDismissBaseRefresh}
           >
-            ✕
+            <Icon name="x" size={12} />
           </button>
         </div>
       )}
@@ -729,7 +729,7 @@ export function Composer({
             title="작업 생성 (Enter)"
           >
             <span className={busy ? "inline-flex animate-spin" : "inline-flex"}>
-              <Icon name={busy ? "refresh" : "send"} size={18} />
+              <Icon name={busy ? "refresh" : "send"} size={16} />
             </span>
           </button>
         </div>

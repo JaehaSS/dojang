@@ -3,6 +3,8 @@ import { viewedCount } from "../../lib/diff-viewed";
 import type { DiffSessionValue } from "../DiffSessionContext";
 import { DiffRangeToggle } from "../DiffPresentation";
 import { BaselineNotice } from "../DiffViewerLayout";
+import { Icon } from "./icons";
+import { IconButton } from "../ui";
 
 /** 두 줄은 늘 있고, 재전송·부분 적용은 필요할 때만 자리를 쓴다(설계 DR-10). */
 export function ChangesHeader({ session }: { session: DiffSessionValue }) {
@@ -15,14 +17,9 @@ export function ChangesHeader({ session }: { session: DiffSessionValue }) {
         <span className="truncate">
           변경 {files.length} · 확인 {viewedCount(viewed, files)}/{files.length}
         </span>
-        <button
-          className="ml-auto h-6 w-6 shrink-0 rounded text-text-secondary hover:bg-raised hover:text-text"
-          aria-label="Diff 새로고침"
-          title="Diff 새로고침"
-          onClick={data.refresh}
-        >
-          ↻
-        </button>
+        <IconButton label="Diff 새로고침" className="ml-auto" onClick={data.refresh}>
+          <Icon name="refresh" size={14} />
+        </IconButton>
       </div>
       <div className="flex items-center px-3 pb-1.5">
         <DiffRangeToggle range={data.range} onChange={data.setRange} />
@@ -66,7 +63,7 @@ function PartialApplyLine({ session }: { session: DiffSessionValue }) {
         <p className="text-text-secondary">
           hunk {discardedIds.length}개를 버립니다 — 아래 파일이 바뀝니다.
         </p>
-        <ul className="mt-1 font-code text-[10px] text-text-muted">
+        <ul className="mt-1 font-code text-[11px] text-text-muted">
           {paths.map((path) => (
             <li key={path} className="truncate" title={path}>
               {path}

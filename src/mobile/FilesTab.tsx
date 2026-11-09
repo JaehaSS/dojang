@@ -3,6 +3,7 @@ import type { FileContent, FsNode } from "../lib/ipc";
 import { api } from "./api";
 import { Empty, MobileList, Row, Spinner } from "./primitives";
 import { breadcrumbs, childrenAt, parentPath, previewNotice, ROOT } from "./tree";
+import { Icon } from "../components/ide/icons";
 
 // worktree 파일 보기 — 읽기 전용. (설계 0013 §10 M3)
 //
@@ -136,8 +137,8 @@ export function FilesTab({ id }: { id: number }) {
           ) : null}
           {entries.map((node) => (
             <Row key={node.path} ariaLabel={node.name} onClick={() => open(node)}>
-              <span className="text-sm text-text">
-                {node.is_dir ? "📁 " : ""}
+              <span className="inline-flex items-center gap-1.5 text-sm text-text">
+                {node.is_dir && <span className="inline-flex shrink-0 text-text-muted"><Icon name="folder" size={14} /></span>}
                 {node.name}
               </span>
             </Row>

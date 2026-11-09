@@ -55,7 +55,7 @@ describe("SubagentCard — 실행 모델 칩", () => {
   it("관측 전(null)에는 칩을 그리지 않는다 — 빈 칩은 모른다는 사실을 감춘다", () => {
     const html = renderToStaticMarkup(<SubagentCard thread={thread} parentBusy={false} />);
 
-    expect(html).not.toContain("text-[10px]");
+    expect(html).not.toContain("font-code text-[11px]");
   });
 });
 

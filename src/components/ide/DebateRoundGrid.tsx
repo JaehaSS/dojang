@@ -43,7 +43,7 @@ function SpeakerTag({ pane }: { pane: DebatePane }): ReactElement {
   const name = badgeLabelFor(pane.agent) ?? labelFor(pane.agent);
   return (
     <div className="flex items-center gap-1.5 px-3 pt-2 text-[11px] text-text-secondary" data-testid="debate-speaker">
-      <Icon name="sparkle" size={11} />
+      <Icon name="sparkle" size={12} />
       <span>{name}</span>
       {pane.model && <span className="font-code text-text-muted">{pane.model}</span>}
     </div>

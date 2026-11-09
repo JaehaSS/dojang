@@ -177,3 +177,18 @@ export function needsUser(
   if (isAuthBlocked(task)) return true;
   return task.state === "AwaitingReview" || task.state === "PendingApproval";
 }
+
+/**
+ * 목록 정렬 순위 — 낮을수록 위. 0 답변 대기(에이전트가 멈춰 묻고 있다), 1 사람의 결정이 필요한
+ * 작업(검토·승인·인증 차단·실패), 2 나머지(실행 중·대기열). 같은 순위 안의 순서는 호출부가
+ * 넘긴 순서를 지킨다 — 상태가 같은 행까지 흔들면 누르려던 행이 손 밑에서 움직인다.
+ */
+export function attentionRank(
+  task: Pick<Task, "state" | "awaiting_kind" | "blocked_reason">,
+  pendingQuestion = false,
+): 0 | 1 | 2 {
+  const tone = taskTone(task, pendingQuestion);
+  if (tone === "question") return 0;
+  if (needsUser(task) || tone === "failed") return 1;
+  return 2;
+}

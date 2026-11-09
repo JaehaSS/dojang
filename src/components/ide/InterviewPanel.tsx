@@ -2,6 +2,7 @@ import { MAX_GRILL_ROUNDS, isStale as grillIsStale, type GrillState } from "../.
 import { badgeTier, isStale as interviewIsStale, type InterviewState } from "../../lib/interview";
 import type { AmbiguityScore, GrillQuestion, InterviewQuestion } from "../../lib/ipc";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 
 interface Props {
   /** 1단계 — 발산(깊게 파기) 상태. 리듀서는 채점과 별개다(Plan 0039 DR-P4). */
@@ -325,7 +326,7 @@ export function InterviewPanel({
   return (
     <div className="mb-2 rounded-md border border-border bg-raised/40 px-2.5 py-1.5">
       <div className="flex items-center gap-2 text-xs">
-        <Icon name="sparkle" size={13} />
+        <Icon name="sparkle" size={14} />
         <span className="text-text-secondary">인터뷰</span>
         {stage !== "idle" && <StageChips stage={stage} />}
         {stage === "dig" && (grill.phase === "asking" || grill.phase === "answering") && (
@@ -358,9 +359,9 @@ export function InterviewPanel({
           </button>
         )}
         {stage !== "idle" && onClose && (
-          <button type="button" className="text-text-muted hover:text-text" onClick={onClose} aria-label="닫기">
+          <IconButton size="sm" label="닫기" onClick={onClose}>
             <Icon name="x" size={14} />
-          </button>
+          </IconButton>
         )}
       </div>
 

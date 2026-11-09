@@ -256,6 +256,9 @@ pub fn should_notify(kind: &str) -> bool {
             | "cancelled"
             | crate::db::runner_event_kind::AWAITING_REVIEW
             | crate::db::runner_event_kind::AWAITING_ANSWER
+            | crate::db::runner_event_kind::ASSISTANT_APPROVAL_REQUESTED
+            | crate::db::runner_event_kind::ASSISTANT_REPLY
+            | crate::db::runner_event_kind::REMINDER_FIRED
     )
 }
 

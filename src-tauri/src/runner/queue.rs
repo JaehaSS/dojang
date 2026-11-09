@@ -146,6 +146,47 @@ impl QueueWorker {
         Ok(true)
     }
 
+    /// 상시 비서(`kind = 'assistant'`)가 `Queued` 상태면 일반 코딩 슬롯과 무관하게 즉시 시작한다.
+    pub async fn spawn_assistant_if_queued(
+        &self,
+        config: &super::config::RunnerConfig,
+        now: i64,
+    ) -> Result<bool, String> {
+        let Some(task) = db::claim_queued_assistant_task(&self.pool, now)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(false);
+        };
+        let Some(task_fence) = crate::side_question::try_runner_task_fence(task.id) else {
+            let _ = sqlx::query("UPDATE tasks SET state = ? WHERE id = ? AND state = ?")
+                .bind(db::state::QUEUED)
+                .bind(task.id)
+                .bind(db::state::STARTING)
+                .execute(&self.pool)
+                .await;
+            return Ok(false);
+        };
+        let _ = super::orchestrator_mcp::sync_assistant_mcp_config(config);
+        let pool = self.pool.clone();
+        let terminal_active = self.terminal_active.clone();
+        let conversation_active = self.conversation_active.clone();
+        let worktree_locks = self.worktree_locks.clone();
+        tokio::spawn(async move {
+            let _fence = task_fence;
+            let _ = execute_task(
+                pool,
+                task,
+                now,
+                terminal_active,
+                conversation_active,
+                worktree_locks,
+            )
+            .await;
+        });
+        Ok(true)
+    }
+
     /// Run an already-durable isolated side question through the same global
     /// semaphore as normal Runner work, independently of the main task fence.
     pub fn spawn_side_question(&self, task_id: i64, turn_id: i64, now: i64) -> tokio::task::JoinHandle<()> {

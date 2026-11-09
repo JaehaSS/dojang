@@ -16,6 +16,7 @@ import {
 } from "./DiffAnnotationThread";
 import { tokensForLine } from "../lib/diff-highlight";
 import { DiffLineText, HunkCheckbox, useDiffTheme, useHunkTokens } from "./DiffPresentation";
+import { Icon } from "./ide/icons";
 
 /** 라인마다 단어 단위 강조 조각을 붙여 렌더 루프에서 짝짓기 로직이 새지 않게 한다. */
 function withIntraLine(lines: HunkLine[]): { line: HunkLine; segments?: Segment[] }[] {
@@ -87,15 +88,16 @@ export function AnnotatedUnifiedDiff({
                 <div key={i}>
                   <div className="group flex items-start px-1 hover:bg-border/40">
                     <button
-                      className={`w-4 shrink-0 text-[10px] leading-5 ${
+                      className={`inline-flex h-5 w-4 shrink-0 items-center justify-center text-text-muted hover:text-primary-bright ${
                         thread.length > 0 ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                       }`}
                       title="주석 남기기"
+                      aria-label="주석 남기기"
                       onClick={() =>
                         composer.openNew(hunk.id, annotationLine(line), line.side)
                       }
                     >
-                      💬
+                      <Icon name="chat" size={12} />
                     </button>
                     <span className="w-10 shrink-0 text-right pr-2 text-text-muted select-none">
                       {line.oldLine ?? ""}

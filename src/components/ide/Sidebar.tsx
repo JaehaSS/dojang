@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Icon, type IconName } from "./icons";
+import { IconButton } from "../ui";
 import {
   SessionTaskNavigation,
   type SessionTaskNavigationProps,
@@ -7,6 +8,7 @@ import {
 
 export type View =
   | "home"
+  | "assistant"
   | "workspace"
   | "ensemble"
   | "insights"
@@ -52,6 +54,7 @@ interface Props extends SessionTaskNavigationProps {
 }
 
 const QUICK: { v: View; icon: IconName; label: string }[] = [
+  { v: "assistant", icon: "sparkle", label: "상시 비서" },
   { v: "insights", icon: "chart", label: "인사이트" },
   { v: "pipeline", icon: "branch", label: "파이프라인" },
 ];
@@ -94,6 +97,8 @@ export function Sidebar({
   onNewInRepo,
   onDeleteTask,
   onMergeTask,
+  onArchiveTask,
+  onRestoreTask,
   onRemoveProject,
   onDiscardOrphans,
   groups,
@@ -133,30 +138,15 @@ export function Sidebar({
   if (collapsed) {
     return (
       <aside className="w-10 shrink-0 bg-surface border-r border-border flex flex-col items-center min-h-0 py-2 gap-1">
-        <button
-          onClick={onToggleCollapse}
-          className="p-1.5 text-text-muted hover:text-text"
-          title="사이드바 펼치기 (⌥⌘B)"
-          aria-label="사이드바 펼치기"
-        >
+        <IconButton label="사이드바 펼치기" title="사이드바 펼치기 (⌥⌘B)" onClick={onToggleCollapse}>
           <Icon name="chevronRight" size={16} />
-        </button>
-        <button
-          onClick={onNewTask}
-          className="p-1.5 text-text-secondary hover:text-text"
-          title="새 작업"
-          aria-label="새 작업"
-        >
+        </IconButton>
+        <IconButton label="새 작업" onClick={onNewTask}>
           <Icon name="plus" size={16} />
-        </button>
-        <button
-          onClick={() => onQuickLink("settings")}
-          className="mt-auto p-1.5 text-text-muted hover:text-text"
-          title="설정"
-          aria-label="설정"
-        >
+        </IconButton>
+        <IconButton label="설정" className="mt-auto" onClick={() => onQuickLink("settings")}>
           <Icon name="settings" size={16} />
-        </button>
+        </IconButton>
       </aside>
     );
   }
@@ -173,14 +163,9 @@ export function Sidebar({
           >
             <Icon name="plus" size={16} /> 새 작업
           </button>
-          <button
-            onClick={onToggleCollapse}
-            className="p-1.5 shrink-0 text-text-muted hover:text-text"
-            title="사이드바 접기 (⌥⌘B)"
-            aria-label="사이드바 접기"
-          >
+          <IconButton label="사이드바 접기" title="사이드바 접기 (⌥⌘B)" onClick={onToggleCollapse}>
             <Icon name="chevronLeft" size={16} />
-          </button>
+          </IconButton>
         </div>
       </div>
 
@@ -209,7 +194,7 @@ export function Sidebar({
                       만성적으로 켜져 있는 배지는 두 주면 무시된다(설계 0054 DR-6). */}
                   {q.v === "insights" && insightsUnread > 0 && (
                     <span
-                      className="ml-auto w-1.5 h-1.5 rounded-full bg-primary-bright shrink-0"
+                      className="ml-auto w-1.5 h-1.5 rounded-full bg-text shrink-0"
                       title={`읽지 않은 발견 카드 ${insightsUnread}건`}
                       aria-label={`읽지 않은 발견 카드 ${insightsUnread}건`}
                     />
@@ -274,6 +259,8 @@ export function Sidebar({
           onNewInRepo={onNewInRepo}
           onDeleteTask={onDeleteTask}
           onMergeTask={onMergeTask}
+          onArchiveTask={onArchiveTask}
+          onRestoreTask={onRestoreTask}
           onRemoveProject={onRemoveProject}
           onDiscardOrphans={onDiscardOrphans}
           groups={groups}
@@ -283,7 +270,7 @@ export function Sidebar({
       </div>
 
       <div className="p-2.5 border-t border-border flex items-center gap-2">
-        <span className="w-6 h-6 rounded-full bg-raised text-primary-bright flex items-center justify-center text-xs shrink-0 font-bold">
+        <span className="w-6 h-6 rounded-full bg-raised text-text-secondary flex items-center justify-center text-xs shrink-0 font-bold">
           P
         </span>
         {/* 호스트가 하나뿐이면 고를 것이 없다 — 손잡이 대신 사실만 적는다. */}
@@ -313,14 +300,9 @@ export function Sidebar({
             </select>
           </label>
         )}
-        <button
-          onClick={() => onQuickLink("settings")}
-          className="text-text-muted hover:text-text shrink-0"
-          aria-label="설정"
-          title="설정"
-        >
+        <IconButton label="설정" onClick={() => onQuickLink("settings")}>
           <Icon name="settings" size={16} />
-        </button>
+        </IconButton>
       </div>
     </aside>
   );

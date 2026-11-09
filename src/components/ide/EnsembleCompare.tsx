@@ -89,7 +89,7 @@ export function EnsembleCompare({ candidates, winnerTaskId, ensemble, onComposed
           >
             <span className="font-code">{candidateLabel(c)}</span>
             {c.id === winnerTaskId && (
-              <span className="text-[10px] px-1 rounded bg-primary/20 text-primary-bright">심판 추천</span>
+              <span className="text-[11px] px-1 rounded bg-primary/20 text-primary-bright">심판 추천</span>
             )}
           </button>
         ))}
@@ -112,8 +112,8 @@ export function EnsembleCompare({ candidates, winnerTaskId, ensemble, onComposed
         </div>
       )}
       {s.notice && (
-        <div className="px-3 py-1 text-xs shrink-0" style={{ color: "var(--c-awaiting)" }}>
-          ⚠ {s.notice}
+        <div className="px-3 py-1 text-xs shrink-0 flex items-center gap-1" style={{ color: "var(--c-awaiting)" }}>
+          <Icon name="alert" size={12} />{s.notice}
         </div>
       )}
 

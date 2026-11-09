@@ -34,6 +34,9 @@ const DOC_LINK: Record<string, string> = {
   "docs/bad.md": "/etc/passwd",
   "docs/abs.md": "/work/root/docs/target.md",
   "docs/fragment.md": "#소제목",
+  "docs/first.md": "second.md",
+  "docs/second.md": "third.md",
+  "docs/picture.md": "picture.png",
   "/Users/test/notes/README.md": "GLOSSARY.md",
   "docs/left.md": "../x.ts",
   "docs/right.md": "../y.ts",
@@ -1053,6 +1056,123 @@ describe("문서 링크 클릭", () => {
     Array.from(pane.querySelectorAll<HTMLElement>("[data-tab-path]")).find((el) =>
       el.className.includes("bg-bg"),
     )?.dataset.tabPath ?? null;
+
+  const mouseNavigate = async (button: number, target: Element = panes()[0]) => {
+    const events = ["mousedown", "mouseup", "auxclick"].map((type) =>
+      new MouseEvent(type, { button, bubbles: true, cancelable: true }),
+    );
+    for (const event of events) await act(async () => { target.dispatchEvent(event); });
+    return events;
+  };
+
+  it("마우스 뒤로가기는 링크 이전 문서와 스크롤 위치를 복원하며 한 번만 이동한다", async () => {
+    await render({ initial: ["docs/first.md"] });
+    const scroll = panes()[0].querySelector<HTMLElement>("[data-document-scroll]")!;
+    scroll.scrollTop = 420;
+    await clickLink(panes()[0]);
+    await clickLink(panes()[0]);
+    expect(activeTabOf(panes()[0])).toBe("docs/third.md");
+
+    const events = await mouseNavigate(3);
+    expect(activeTabOf(panes()[0])).toBe("docs/second.md");
+    expect(events.every((event) => event.defaultPrevented)).toBe(true);
+    await mouseNavigate(3);
+    expect(activeTabOf(panes()[0])).toBe("docs/first.md");
+    expect(panes()[0].querySelector<HTMLElement>("[data-document-scroll]")!.scrollTop).toBe(420);
+    expect(navigationError).not.toHaveBeenCalled();
+  });
+
+  it("이미 열려 있던 문서의 링크 이동도 뒤로가기와 앞으로가기로 오간다", async () => {
+    await render({ initial: ["docs/second.md", "docs/first.md"] });
+    await clickLink(panes()[0]);
+    await mouseNavigate(3);
+    expect(activeTabOf(panes()[0])).toBe("docs/first.md");
+    await mouseNavigate(4);
+    expect(activeTabOf(panes()[0])).toBe("docs/second.md");
+  });
+
+  it("실패한 링크 열기는 뒤로가기 기록을 만들지 않는다", async () => {
+    await render({ initial: ["docs/first.md"], onOpenFile: async () => false });
+    await clickLink(panes()[0]);
+    const back = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "뒤로");
+    expect(back?.disabled).toBe(true);
+    await mouseNavigate(3);
+    expect(activeTabOf(panes()[0])).toBe("docs/first.md");
+  });
+
+  it("원본 탭을 닫아도 뒤로가기로 문서를 다시 연다", async () => {
+    await render({ initial: ["docs/first.md"] });
+    await clickLink(panes()[0]);
+    await act(async () => closeOne("docs/first.md"));
+    await mouseNavigate(3);
+    expect(activeTabOf(panes()[0])).toBe("docs/first.md");
+    expect(tabsOf(panes()[0])).toContain("docs/first.md");
+    expect(navigationError).not.toHaveBeenCalled();
+  });
+
+  it("문서가 가리키는 이미지 미리보기도 뒤로가기와 앞으로가기로 오간다", async () => {
+    const image = { ...file("docs/picture.png"), kind: "image" as const, content: "data:image/png;base64," };
+    await render({ initial: [image, "docs/picture.md"] });
+    await clickLink(panes()[0]);
+    expect(activeTabOf(panes()[0])).toBe("docs/picture.png");
+    await mouseNavigate(3);
+    expect(activeTabOf(panes()[0])).toBe("docs/picture.md");
+    await mouseNavigate(4);
+    expect(activeTabOf(panes()[0])).toBe("docs/picture.png");
+    const forward = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "앞으로");
+    expect(forward?.disabled).toBe(true);
+    expect(navigationError).not.toHaveBeenCalled();
+  });
+
+  it("분할 창의 링크는 원본 문서가 있던 칸으로 돌아간다", async () => {
+    await render({ initial: ["docs/first.md"] });
+    await click(splitButton(panes()[0], "오른쪽으로 분할"));
+    await clickLink(panes()[0]);
+    await mouseNavigate(3, panes()[1]);
+    expect(activeTabOf(panes()[0])).toBe("docs/first.md");
+    expect(activeTabOf(panes()[1])).toBe("docs/first.md");
+    expect(focusedPane()).toBe(panes()[0]);
+    expect(navigationError).not.toHaveBeenCalled();
+  });
+
+  it("뒤로간 뒤 새 링크를 열면 이전 앞으로가기 기록을 지운다", async () => {
+    await render({ initial: ["docs/first.md"] });
+    await clickLink(panes()[0]);
+    await clickLink(panes()[0]);
+    await mouseNavigate(3);
+    await mouseNavigate(3);
+    await clickLink(panes()[0]);
+    const forward = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "앞으로");
+    expect(forward?.disabled).toBe(true);
+    await mouseNavigate(4);
+    expect(activeTabOf(panes()[0])).toBe("docs/second.md");
+  });
+
+  it("기존 뒤로가기 버튼과 단축키도 문서 링크 기록을 사용한다", async () => {
+    await render({ initial: ["docs/first.md"], ownsWindow: true });
+    await clickLink(panes()[0]);
+    await press({ altKey: true, key: "ArrowLeft" });
+    expect(activeTabOf(panes()[0])).toBe("docs/first.md");
+    await click(Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "앞으로"));
+    expect(activeTabOf(panes()[0])).toBe("docs/second.md");
+  });
+
+  it("일반 클릭과 가운데 클릭은 마우스 탐색으로 처리하지 않는다", async () => {
+    await render({ initial: ["docs/first.md"] });
+    await clickLink(panes()[0]);
+    expect((await mouseNavigate(0)).every((event) => !event.defaultPrevented)).toBe(true);
+    expect((await mouseNavigate(1)).every((event) => !event.defaultPrevented)).toBe(true);
+    expect(activeTabOf(panes()[0])).toBe("docs/second.md");
+  });
+
+  it("비활성 에디터와 에디터 밖에서는 마우스 탐색을 가져오지 않는다", async () => {
+    await render({ initial: ["docs/first.md"] });
+    await clickLink(panes()[0]);
+    expect((await mouseNavigate(3, document.body)).every((event) => !event.defaultPrevented)).toBe(true);
+    await render({ initial: ["docs/first.md"], shortcutsActive: false });
+    expect((await mouseNavigate(3)).every((event) => !event.defaultPrevented)).toBe(true);
+    expect(activeTabOf(panes()[0])).toBe("docs/second.md");
+  });
 
   it("링크가 가리키는 파일은 문서와 같은 칸에 열린다 — 포커스된 칸이 아니라", async () => {
     await render({ initial: ["a.ts", "docs/discovery/example.md"] });

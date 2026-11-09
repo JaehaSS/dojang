@@ -9,6 +9,8 @@ import {
 import type { ConvoStatus, Task } from "../../lib/ipc";
 import { Icon } from "./icons";
 import { WorkContextPanel, type WorkContextDiff } from "./WorkContextPanel";
+import { TaskStatusIcon } from "./TaskStatusIcon";
+import type { StatusTone } from "../../lib/task-status";
 
 /** 플로팅 채널은 좁은 폭의 오버레이라 목록 섹션을 접는다(설계 0018 D3). */
 export type ActivityDensity = "rail" | "panel";
@@ -42,20 +44,20 @@ const labelForState = (busy: boolean, state: ConvoStatus["state"] | undefined) =
 const colorForState = (busy: boolean, state: ConvoStatus["state"] | undefined) => {
   if (state === "ended_without_result") return "text-status-awaiting";
   if (state === "unknown") return "text-text-muted";
-  if (busy) return "text-primary-bright";
+  if (busy) return "text-status-running";
   return "text-status-done";
 };
 
 /** 서브 에이전트 1건의 상태 표기. Claude의 기존 부모-턴 종료 해석은 유지하고, Codex는
  *  명시 관측이 없으면 완료 확인 불가로 남긴다. */
-const subagentStatus = (busy: boolean, s: SubagentEntry) => {
-  if (s.state === "failed") return { mark: "×", color: "text-status-failed", note: "실패" };
-  if (s.state === "done") return { mark: "✓", color: "text-status-done", note: "완료" };
-  if (s.state === "stopped") return { mark: "○", color: "text-status-awaiting", note: "중단됨" };
-  if (s.state === "unknown") return { mark: "?", color: "text-text-muted", note: "완료 확인 불가" };
-  if (s.vendor === "codex") return { mark: "→", color: "text-primary-bright", note: "작업 중" };
-  if (!busy) return { mark: "○", color: "text-status-awaiting", note: "미완료 — 턴 종료로 중단됨" };
-  return { mark: "→", color: "text-primary-bright", note: "작업 중" };
+const subagentStatus = (busy: boolean, s: SubagentEntry): { tone: StatusTone; color: string; note: string } => {
+  if (s.state === "failed") return { tone: "failed", color: "text-status-failed", note: "실패" };
+  if (s.state === "done") return { tone: "done", color: "text-status-done", note: "완료" };
+  if (s.state === "stopped") return { tone: "awaiting", color: "text-status-awaiting", note: "중단됨" };
+  if (s.state === "unknown") return { tone: "muted", color: "text-text-muted", note: "완료 확인 불가" };
+  if (s.vendor === "codex") return { tone: "running", color: "text-status-running", note: "작업 중" };
+  if (!busy) return { tone: "awaiting", color: "text-status-awaiting", note: "미완료 — 턴 종료로 중단됨" };
+  return { tone: "running", color: "text-status-running", note: "작업 중" };
 };
 
 /** 플로팅 채널에서 하위 에이전트를 한 줄로 압축한다 — "완료 3 · 진행 1" 형태. */
@@ -175,7 +177,7 @@ export function ActivityPanel({
                 title="서브 에이전트 탭 열기"
               >
                 <div className="flex items-center gap-1.5">
-                  <span className={st.color}>{st.mark}</span>
+                  <span className="inline-flex"><TaskStatusIcon tone={st.tone} label="" size={12} decorative /></span>
                   <span className="text-text-secondary truncate">{s.title}</span>
                   <span className="ml-auto shrink-0 text-text-muted">{st.note}</span>
                 </div>
@@ -226,10 +228,10 @@ export function ActivityPanel({
                         ? "text-status-failed"
                         : entry.state === "done"
                           ? "text-status-done"
-                          : "text-primary-bright"
+                          : "text-status-running"
                     }
                   >
-                    {entry.state === "failed" ? "×" : entry.state === "done" ? "✓" : "→"}
+                    <TaskStatusIcon tone={entry.state === "failed" ? "failed" : entry.state === "done" ? "done" : "running"} label="" size={12} decorative />
                   </span>
                   <span className="text-text-secondary truncate">{entry.title}</span>
                 </div>

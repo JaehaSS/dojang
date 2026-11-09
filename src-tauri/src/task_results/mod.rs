@@ -2,6 +2,7 @@
 //! observed; it never infers a successful result from an agent's prose.
 
 mod fingerprint;
+pub mod artifacts;
 
 use std::path::{Component, Path};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -149,6 +150,8 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
             .await?;
     }
     tx.commit().await?;
+    artifacts::migrate(pool).await?;
+    crate::task_specs::migrate(pool).await?;
     Ok(())
 }
 

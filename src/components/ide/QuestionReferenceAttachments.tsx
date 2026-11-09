@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { QuestionReference } from "../../lib/side-question";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 
 export interface QuestionReferenceAttachmentsProps {
   references: readonly QuestionReference[];
@@ -44,7 +45,7 @@ export function QuestionReferenceAttachments({
         return (
           <article key={reference.id} className="rounded border border-border bg-surface px-2 py-1.5 text-xs">
             <div className="flex items-start gap-1.5">
-              <Icon name="chat" size={13} />
+              <Icon name="chat" size={14} />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-text-secondary" title={reference.question}>
                   {reference.question}
@@ -59,14 +60,9 @@ export function QuestionReferenceAttachments({
               >
                 편집
               </button>
-              <button
-                type="button"
-                className="rounded p-0.5 text-text-secondary hover:bg-raised hover:text-status-failed"
-                onClick={() => remove(reference.id)}
-                aria-label="참고자료 제거"
-              >
-                <Icon name="x" size={13} />
-              </button>
+              <IconButton size="sm" tone="danger" label="참고자료 제거" onClick={() => remove(reference.id)}>
+                <Icon name="x" size={14} />
+              </IconButton>
             </div>
             {editing ? (
               <div className="mt-1.5">

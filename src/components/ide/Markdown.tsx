@@ -32,7 +32,7 @@ function CodeBlock({ children }: { children?: ReactNode }) {
     <div className="relative my-1.5 overflow-hidden rounded-md border border-border bg-bg">
       <CodeCopyButton text={source} />
       {lang && (
-        <div className="px-2.5 pt-1.5 pr-9 text-[10px] uppercase tracking-wide text-text-muted">
+        <div className="px-2.5 pt-1.5 pr-9 text-[11px] uppercase tracking-wide text-text-muted">
           {lang}
         </div>
       )}
@@ -106,7 +106,7 @@ export const Markdown = memo(function Markdown({
     <div
       className="leading-relaxed break-words
         [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:py-0.5 [&_:not(pre)>code]:rounded
-        [&_:not(pre)>code]:bg-raised [&_:not(pre)>code]:text-primary-bright
+        [&_:not(pre)>code]:bg-raised [&_:not(pre)>code]:text-text
         [&_:not(pre)>code]:font-code [&_:not(pre)>code]:text-[0.88em]"
     >
       <ReactMarkdown

@@ -42,7 +42,7 @@ export function RiskBadge({ risk }: { risk: SettingRisk }) {
   return (
     <span
       title={spec.title}
-      className={`shrink-0 rounded border px-1 text-[10px] leading-[15px] ${spec.cls}`}
+      className={`shrink-0 rounded border px-1 text-[11px] leading-[15px] ${spec.cls}`}
     >
       {spec.label}
     </span>

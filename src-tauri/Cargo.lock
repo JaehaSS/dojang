@@ -4535,6 +4535,7 @@ dependencies = [
  "p256",
  "parquet",
  "portable-pty",
+ "pulldown-cmark",
  "reqwest 0.12.28",
  "rust-embed",
  "serde",
@@ -4648,6 +4649,17 @@ checksum = "4488a4a36b9a4ba6b9334a32a39971f77c1436ec82c38707bce707699cc3bbcb"
 dependencies = [
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
+dependencies = [
+ "bitflags 2.13.0",
+ "memchr",
+ "unicase",
 ]
 
 [[package]]

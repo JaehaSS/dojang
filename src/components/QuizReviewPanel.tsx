@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactElement } from "react";
 
 import { quizApprove, quizPending, quizReport, type QuizPendingItem } from "../lib/ipc";
+import { Icon } from "./ide/icons";
 
 /**
  * 도메인 문제 검수 (설계 0044 DR-4).
@@ -77,8 +78,8 @@ export function QuizReviewPanel({
             {item.choices ? (
               <ul className="flex flex-col gap-0.5 text-[12px] text-text-secondary">
                 {item.choices.map((choice) => (
-                  <li key={choice} className={choice === item.answer ? "text-status-done" : ""}>
-                    {choice === item.answer ? "✓ " : "· "}
+                  <li key={choice} className={`flex items-center gap-1 ${choice === item.answer ? "text-status-done" : ""}`}>
+                    <span className="inline-flex w-3 shrink-0">{choice === item.answer && <Icon name="check" size={12} />}</span>
                     {choice}
                   </li>
                 ))}

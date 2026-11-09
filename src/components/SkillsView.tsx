@@ -10,6 +10,7 @@ import { FilterSegment, type FilterSegmentItem } from "./FilterSegment";
 import { MetaTag } from "./MetaTag";
 import { HarnessExperiencePanel } from "./HarnessExperiencePanel";
 import { useExperimentalFeatures } from "../lib/experimental-features";
+import { Icon } from "./ide/icons";
 
 /** 에이전트 렌즈 — 값은 벤더 문자열과 같다(`all`만 예외). */
 const LENSES = [
@@ -78,12 +79,12 @@ function SortChip({
         onClick={() => setOpen((v) => !v)}
       >
         {current.label}
-        <span aria-hidden="true">▾</span>
+        <Icon name="chevronDown" size={12} />
       </button>
       {open && (
         <div
           role="listbox"
-          className="absolute right-0 top-full mt-1 z-20 min-w-32 rounded-lg border border-border-strong bg-raised py-1 shadow-xl"
+          className="absolute right-0 top-full mt-1 z-20 min-w-32 rounded-lg border border-border-strong bg-raised py-1 shadow-e2"
         >
           {SORTS.map((s) => (
             <button
@@ -98,7 +99,7 @@ function SortChip({
                 setOpen(false);
               }}
             >
-              <span className="w-3 shrink-0">{s.value === value ? "✓" : ""}</span>
+              <span className="inline-flex w-3 shrink-0">{s.value === value && <Icon name="check" size={12} />}</span>
               {s.label}
             </button>
           ))}

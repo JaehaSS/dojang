@@ -8,6 +8,7 @@ import { taskStateLabel } from "./status";
 import { finishedTasks, groupByRepo, repoName, type RepoGroup } from "./grouping";
 import { navigate } from "./router";
 import { taskHref } from "./routes";
+import { Icon } from "../components/ide/icons";
 
 // 작업 목록 — 프로젝트 섹션. (설계 0013 §5.3)
 //
@@ -92,14 +93,14 @@ function Section({
         // sticky: 긴 목록에서 지금 어느 프로젝트를 보고 있는지 잃지 않게 한다.
         className="sticky top-0 z-10 flex min-h-[40px] w-full items-center gap-2 border-y border-border bg-raised px-4 text-left"
       >
-        <span className="w-3 shrink-0 text-xs text-text-muted">{collapsed ? "▸" : "▾"}</span>
+        <span className="inline-flex w-3 shrink-0 text-text-muted"><Icon name={collapsed ? "chevronRight" : "chevronDown"} size={12} /></span>
         {/* section-label: 11px semibold (DESIGN.md Sidebar). 프로젝트명은 경로이므로 code 레지스터. */}
         <span className="min-w-0 flex-1 truncate font-code text-xs font-semibold text-text">
           {title}
         </span>
         {actionable ? (
           // 상태색은 채우지 않고 보더+텍스트로 — 상태 표시 전용 규칙을 지키면서 대비를 유지한다.
-          <span className="shrink-0 rounded border border-status-awaiting px-1.5 text-[10px] font-medium text-status-awaiting">
+          <span className="shrink-0 rounded border border-status-awaiting px-1.5 text-[11px] font-medium text-status-awaiting">
             {actionable}
           </span>
         ) : null}

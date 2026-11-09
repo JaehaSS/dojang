@@ -26,7 +26,7 @@ function Fallback({ error, onReset }: { error: Error; onReset: () => void }) {
 
   return (
     <div className="flex h-screen w-screen items-center justify-center bg-bg p-6 font-ui text-text">
-      <div className="w-full max-w-2xl rounded-lg border border-dangerborder bg-raised p-4 shadow-xl">
+      <div className="w-full max-w-2xl rounded-lg border border-dangerborder bg-raised p-4 shadow-e3">
         <h1 className="text-lg font-semibold text-status-failed">화면을 그리지 못했습니다</h1>
         <p className="mt-1 text-sm text-text-secondary">{error.message || String(error)}</p>
         <pre className="mt-3 max-h-64 select-text overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-bg p-2 font-code text-xs text-text-muted">

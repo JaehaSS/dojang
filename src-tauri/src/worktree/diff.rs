@@ -121,23 +121,35 @@ impl Worktree {
     fn diff_base(&self) -> anyhow::Result<String> {
         let Some(revision) = &self.base_revision else {
             // 구버전 작업 — 기준점이 없으니 종전대로 base 브랜치로 계산한다.
-            return self.merge_base_with(&self.base);
+            return self.merge_base_with_base();
         };
         if !super::is_ancestor(&self.path, revision, "HEAD") {
-            // rebase/amend가 기준점을 버렸다. 근사치로 물러선다 — 호출자는
-            // `baseline_status()`로 이 상태를 알 수 있다.
-            return self.merge_base_with(revision);
+            // rebase/amend/`reset --hard origin/<base>`가 기준점을 버렸다. 근사치로 물러선다 —
+            // 호출자는 `baseline_status()`로 이 상태를 알 수 있다. 버려진 기준점과의 merge-base만
+            // 보면 에이전트가 옮겨 간 최신 base보다 한참 앞이라 남의 커밋이 섞이므로 base 쪽도 함께 본다.
+            let remote = super::remote_base_ref(&self.base);
+            return self.closest_base(&[revision, &self.base, &remote]);
         }
-        if super::is_ancestor(&self.path, "HEAD", &self.base) {
+        if self.base_contains_head() {
             return Ok(revision.clone());
         }
-        self.merge_base_with(&self.base)
+        self.merge_base_with_base()
     }
 
-    fn merge_base_with(&self, other: &str) -> anyhow::Result<String> {
-        let base = run_git(&self.path, &["merge-base", "HEAD", other])?
-            .trim()
-            .to_string();
+    /// base가 이 작업을 삼켰는가. 원격 쪽도 본다 — GitHub에서 PR이 머지되고 아직 pull하지
+    /// 않았으면 로컬 base만으로는 모르고, merge-base가 HEAD가 되어 diff가 통째로 사라진다.
+    fn base_contains_head(&self) -> bool {
+        super::is_ancestor(&self.path, "HEAD", &self.base)
+            || super::is_ancestor(&self.path, "HEAD", &super::remote_base_ref(&self.base))
+    }
+
+    fn merge_base_with_base(&self) -> anyhow::Result<String> {
+        let remote = super::remote_base_ref(&self.base);
+        self.closest_base(&[&self.base, &remote])
+    }
+
+    fn closest_base(&self, candidates: &[&str]) -> anyhow::Result<String> {
+        let base = super::closest_merge_base(&self.path, candidates)?;
         if base.is_empty() {
             anyhow::bail!("task diff 기준 commit을 찾을 수 없습니다");
         }

@@ -14,6 +14,7 @@ import type { HtmlAssetReader } from "../../lib/html-preview-assets";
 import { langFromPath } from "../../lib/monaco";
 import { useTheme } from "../../lib/use-theme";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 import { fileIcon } from "./file-icons";
 import { MarkdownDoc } from "./MarkdownDoc";
 import type { DocumentImageReader } from "./MarkdownImage";
@@ -518,6 +519,8 @@ export function EditorPane({
   /** 활성 탭의 **실경로**. 저장·첨부·정의 이동은 키가 아니라 파일을 다룬다. */
   const activeRef = useRef<string | null>(active?.path ?? null);
   activeRef.current = active?.path ?? null;
+  const showEditorRef = useRef(showEditor);
+  showEditorRef.current = showEditor;
   const runSelectionRef = useRef(onRunSelection);
   runSelectionRef.current = onRunSelection;
   /** ⇧⏎ 게이트 — 활성 파일이 Python이고 콘솔이 있을 때만 참. */
@@ -673,7 +676,27 @@ export function EditorPane({
   const applyReveal = useCallback(() => {
     const target = revealRef.current;
     const ed = editorRef.current;
-    if (!target || !ed || target.path !== activeRef.current) return;
+    if (!target || target.path !== activeRef.current) return;
+    const doc = docRef.current;
+    if (!showEditorRef.current) {
+      if (doc) {
+        doc.scrollTop = target.restore ? target.scrollTop ?? 0 : 0;
+        doc.scrollLeft = target.restore ? target.scrollLeft ?? 0 : 0;
+      }
+      if (target.navId != null && target.epoch != null)
+        revealedRef.current?.({
+          navId: target.navId,
+          epoch: target.epoch,
+          path: target.path,
+          line: target.line,
+          column: target.column,
+          scrollTop: doc?.scrollTop ?? 0,
+          scrollLeft: doc?.scrollLeft ?? 0,
+        });
+      else revealedRef.current?.();
+      return;
+    }
+    if (!ed) return;
     const model = ed.getModel();
     const line = Math.max(
       1,
@@ -1091,7 +1114,7 @@ export function EditorPane({
     [applyReveal, syncBubble],
   );
 
-  useEffect(applyReveal, [reveal, activeKey, applyReveal]);
+  useEffect(applyReveal, [reveal, activeKey, showDoc, applyReveal]);
 
   /**
    * 마크다운 프리뷰의 ⌘L.
@@ -1449,7 +1472,7 @@ export function EditorPane({
             >
               <Icon
                 name={f.kind === "diff" ? "diff" : fileIcon(base(f.path))}
-                size={13}
+                size={14}
               />
             </span>
             <span>{base(f.path)}</span>
@@ -1469,7 +1492,7 @@ export function EditorPane({
               }}
               aria-label="닫기"
             >
-              <Icon name="x" size={13} />
+              <Icon name="x" size={14} />
             </button>
           </div>
         ))}
@@ -1499,7 +1522,7 @@ export function EditorPane({
                 }
                 aria-label={lspInfo.detail ? `${lspLabel}: ${lspInfo.detail}` : lspLabel}
               >
-                <Icon name="plug" size={13} />
+                <Icon name="plug" size={14} />
                 <span>{lspLabel}</span>
               </span>
             )}
@@ -1524,77 +1547,42 @@ export function EditorPane({
             )}
             {/* 기본 앱 / Finder 로 열기 — 모든 파일에 제공(바이너리·이미지·대용량은 유일한 열람 수단). */}
             {supportsExternalPath && (
-              <button
-                className="text-text-muted hover:text-text p-1"
-                onClick={() => onOpenPath(active.path)}
-                title="기본 앱으로 열기"
-                aria-label="기본 앱으로 열기"
-              >
-                <Icon name="desktop" size={15} />
-              </button>
+              <IconButton size="sm" label="기본 앱으로 열기" onClick={() => onOpenPath(active.path)}>
+                <Icon name="desktop" size={14} />
+              </IconButton>
             )}
             {supportsExternalPath && (
-              <button
-                className="text-text-muted hover:text-text p-1"
-                onClick={() => onRevealPath(active.path)}
-                title="Finder에서 보기"
-                aria-label="Finder에서 보기"
-              >
-                <Icon name="folder" size={15} />
-              </button>
+              <IconButton size="sm" label="Finder에서 보기" onClick={() => onRevealPath(active.path)}>
+                <Icon name="folder" size={14} />
+              </IconButton>
             )}
             {/* 다시 불러오기·저장은 디스크 내용을 가진 탭의 것이다 — diff 탭에는 없다. */}
             {active.kind !== "diff" && (
-              <button
-                className="text-text-muted hover:text-text p-1"
-                onClick={() => onReload(active.path)}
-                title="디스크에서 다시 불러오기"
-                aria-label="다시 불러오기"
-              >
-                <Icon name="refresh" size={15} />
-              </button>
+              <IconButton size="sm" label="다시 불러오기" title="디스크에서 다시 불러오기" onClick={() => onReload(active.path)}>
+                <Icon name="refresh" size={14} />
+              </IconButton>
             )}
             {/* 저장은 텍스트 편집 대상에만 (이미지/바이너리/대용량은 편집 불가). */}
             {active.kind === "text" && (
-              <button
-                className={`p-1 ${active.dirty ? "text-primary-bright" : "text-text-muted hover:text-text"}`}
-                onClick={saveActive}
-                title="저장 (⌘S)"
-                aria-label="저장"
-              >
-                <Icon name="save" size={15} />
-              </button>
+              <IconButton size="sm" label="저장" title="저장 (⌘S)" tone={active.dirty ? "accent" : "default"} onClick={saveActive}>
+                <Icon name="save" size={14} />
+              </IconButton>
             )}
             {/* 분할 — 파일이 아니라 **이 칸**에 거는 동작이라 파일 손잡이 뒤에 둔다. */}
             {onSplit && (
               <>
-                <button
-                  className="text-text-muted hover:text-text p-1"
-                  onClick={() => onSplit("row")}
-                  title="오른쪽으로 분할 (⌘\\)"
-                  aria-label="오른쪽으로 분할"
-                >
-                  <Icon name="splitRight" size={15} />
-                </button>
-                <button
-                  className="text-text-muted hover:text-text p-1"
-                  onClick={() => onSplit("column")}
-                  title="아래로 분할 (⇧⌘\\)"
-                  aria-label="아래로 분할"
-                >
-                  <Icon name="splitDown" size={15} />
-                </button>
+                <IconButton size="sm" label="오른쪽으로 분할" title="오른쪽으로 분할 (⌘\\)" onClick={() => onSplit("row")}>
+                  <Icon name="splitRight" size={14} />
+                </IconButton>
+                <IconButton size="sm" label="아래로 분할" title="아래로 분할 (⇧⌘\\)" onClick={() => onSplit("column")}>
+                  <Icon name="splitDown" size={14} />
+                </IconButton>
               </>
             )}
             {onCloseGroup && (
-              <button
-                className="text-text-muted hover:text-text p-1"
-                onClick={onCloseGroup}
-                title="이 칸 접기 — 열린 탭은 옆 칸으로 옮겨진다"
-                aria-label="편집 칸 접기"
-              >
-                <Icon name="x" size={15} />
-              </button>
+              <IconButton size="sm" label="편집 칸 접기" title="이 칸 접기 — 열린 탭은 옆 칸으로 옮겨진다" onClick={onCloseGroup}>
+                <Icon name="x" size={14} />
+              </IconButton>
             )}
           </div>
         )}
@@ -1698,7 +1686,7 @@ export function EditorPane({
         </div>
       ) : active.kind === "text" ? (
         // 마크다운 프리뷰 (활성 마크다운 + 소스 모드 아님)
-        <div ref={docRef} className="flex-1 min-h-0 overflow-auto px-6 py-4">
+        <div ref={docRef} data-document-scroll className="flex-1 min-h-0 overflow-auto px-6 py-4">
           <MarkdownDoc
             text={active.content}
             dark={dark}
@@ -1752,14 +1740,14 @@ export function EditorPane({
                 className="h-8 px-3 rounded-md bg-primary text-bg text-sm font-medium hover:opacity-90 flex items-center gap-1.5"
                 onClick={() => onOpenPath(active.path)}
               >
-                <Icon name="desktop" size={15} />
+                <Icon name="desktop" size={16} />
                 기본 앱으로 열기
               </button>
               <button
                 className="h-8 px-3 rounded border border-border text-text-secondary text-sm hover:text-text hover:border-border-strong flex items-center gap-1.5"
                 onClick={() => onRevealPath(active.path)}
               >
-                <Icon name="folder" size={15} />
+                <Icon name="folder" size={16} />
                 Finder에서 보기
               </button>
             </div>

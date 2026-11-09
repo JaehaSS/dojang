@@ -5,6 +5,12 @@ export default {
   darkMode: "class",
   theme: {
     extend: {
+      // 고도 3단계만 쓴다. 값은 index.css `--shadow-e*`(라이트/다크 분기)
+      boxShadow: {
+        e1: "var(--shadow-e1)",
+        e2: "var(--shadow-e2)",
+        e3: "var(--shadow-e3)",
+      },
       colors: {
         // 표면/텍스트/보더는 CSS 변수로 → .dark 토글로 라이트/다크 전환 (index.css 정의).
         // `rgb(from … / <alpha-value>)` 상대 색 문법이 없으면 Tailwind가 `/40` 같은
@@ -56,8 +62,10 @@ export default {
         code: "var(--font-code)",
       },
       fontSize: {
-        xs: "11px",
-        sm: "12px",
+        // 2026-11-09 한 단계 올림(11→12, 12→13). 11px 이하가 약 950회 쓰여 화면 대부분이
+        // 메타 크기로 읽혔다. 메타·단축키 칩은 `text-[11px]`이 하한이다 — 9·10px은 쓰지 않는다.
+        xs: "12px",
+        sm: "13px",
         base: "13px",
         md: "14px",
         lg: "16px",

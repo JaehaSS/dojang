@@ -274,6 +274,54 @@ pub fn merge_base(repo: &Path, left: &str, right: &str) -> anyhow::Result<String
     Ok(run_git(repo, &["merge-base", left, right])?.trim().to_string())
 }
 
+/// `base`의 원격 추적 ref. 작업은 `origin/<base>`에서 분기할 수 있다(`create`의 `prefers_remote_ref`).
+pub(crate) fn remote_base_ref(base: &str) -> String {
+    format!("refs/remotes/origin/{base}")
+}
+
+/// `HEAD`와 `base`·`origin/<base>` 각각의 공통 조상 중 HEAD에 가장 가까운 것.
+pub fn freshest_merge_base(repo: &Path, base: &str) -> anyhow::Result<String> {
+    closest_merge_base(repo, &[base, &remote_base_ref(base)])
+}
+
+/// `HEAD`와 각 후보의 공통 조상 중 HEAD까지 커밋이 가장 적은 것 — 이 작업이 실제로 얹은 변경만 남긴다.
+///
+/// 로컬 base만 보면, pull하지 않았거나 로컬 머지 커밋으로 원격과 갈라진 저장소에서 원격에 이미
+/// 들어온 남의 커밋이 이 작업의 diff로 끌려온다(ade: 실제 변경 5개 파일이 73개로 보였다).
+/// 공통 조상끼리 조상 관계가 없을 수 있어(로컬·원격이 갈라짐) 조상 판정이 아니라 거리로 고른다.
+/// 하나도 못 구하면 첫 후보의 오류를 돌려준다.
+pub fn closest_merge_base(repo: &Path, candidates: &[&str]) -> anyhow::Result<String> {
+    let mut first_error = None;
+    let mut best: Option<(u64, String)> = None;
+    for candidate in candidates {
+        let sha = match merge_base(repo, "HEAD", candidate) {
+            Ok(sha) if !sha.is_empty() => sha,
+            Ok(_) => continue,
+            Err(error) => {
+                first_error.get_or_insert(error);
+                continue;
+            }
+        };
+        if best.as_ref().is_some_and(|(_, known)| *known == sha) {
+            continue;
+        }
+        let Some(distance) = run_git(repo, &["rev-list", "--count", &format!("{sha}..HEAD")])
+            .ok()
+            .and_then(|out| out.trim().parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(known, _)| distance < *known) {
+            best = Some((distance, sha));
+        }
+    }
+    match (best, first_error) {
+        (Some((_, sha)), _) => Ok(sha),
+        (None, Some(error)) => Err(error),
+        (None, None) => Ok(String::new()),
+    }
+}
+
 /// 현재 HEAD의 불변 commit SHA.
 pub fn current_revision(repo: &Path) -> anyhow::Result<String> {
     Ok(run_git(repo, &["rev-parse", "HEAD"])?.trim().to_string())
@@ -288,6 +336,7 @@ pub fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
     Command::new("git")
         .current_dir(repo)
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -640,7 +689,9 @@ pub fn create(
         .ok_or_else(|| anyhow::anyhow!("worktree 경로가 UTF-8이 아님"))?;
     // 기준점은 worktree를 만들기 **직전**에 잡는다. 만든 뒤에 잡으면 그 사이 base 브랜치가
     // 움직였을 때 실제 분기점과 어긋난다 — 그러면 남의 커밋이 이 작업의 diff로 새어 들어온다.
-    let base_revision = run_git(repo, &["rev-parse", &base])
+    // 실제로 갈라지는 ref(`start_point`)를 읽어야 한다. `base`를 읽으면 원격에서 분기한 작업에
+    // 뒤처진 로컬 SHA가 박혀, 원격에만 있던 커밋이 전부 이 작업의 변경으로 보인다.
+    let base_revision = run_git(repo, &["rev-parse", &format!("{start_point}^{{commit}}")])
         .ok()
         .map(|out| out.trim().to_string())
         .filter(|revision| !revision.is_empty());

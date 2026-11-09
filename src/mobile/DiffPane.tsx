@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { FileDiff } from "../lib/ipc";
+import { Icon } from "../components/ide/icons";
 
 // 모바일 diff 표시 — 읽기 전용. (설계 0013 §10 M1)
 // 좁은 화면에서 split view는 불가능하므로 unified만 쓰고, 파일 단위로 접어둔다.
@@ -35,7 +36,7 @@ function FileBlock({ file, defaultOpen }: { file: FileDiff; defaultOpen: boolean
         aria-expanded={open}
         className="flex min-h-[48px] w-full items-center gap-2 px-4 py-2 text-left active:bg-raised"
       >
-        <span className="w-4 shrink-0 text-xs text-text-muted">{open ? "▾" : "▸"}</span>
+        <span className="inline-flex w-4 shrink-0 text-text-muted"><Icon name={open ? "chevronDown" : "chevronRight"} size={12} /></span>
         <span className="min-w-0 flex-1 truncate text-sm text-text" dir="rtl">
           {file.path}
         </span>

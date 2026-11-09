@@ -16,6 +16,7 @@ describe("matchRoute", () => {
   });
 
   it("단일 세그먼트 화면을 해석한다", () => {
+    expect(matchRoute("/m/assistant")).toEqual({ name: "assistant" });
     expect(matchRoute("/m/new")).toEqual({ name: "new" });
     expect(matchRoute("/m/schedules")).toEqual({ name: "schedules" });
     expect(matchRoute("/m/settings")).toEqual({ name: "settings" });
@@ -58,6 +59,7 @@ describe("hrefFor", () => {
   it("matchRoute의 역함수다", () => {
     const routes: Route[] = [
       { name: "home" },
+      { name: "assistant" },
       { name: "new" },
       { name: "schedules" },
       { name: "settings" },

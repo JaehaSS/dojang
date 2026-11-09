@@ -204,6 +204,7 @@ async fn serve(pool: sqlx::SqlitePool) -> (SocketAddr, tokio::task::JoinHandle<(
         max_concurrent_tasks: 1,
         execution_policy: ExecutionPolicy::RequireApproval,
         pairing_token_file: token_path.clone().into(),
+        ..Default::default()
     };
     let state = RunnerHttpState {
         auth: RunnerAuth::from_file(token_path.as_ref()).unwrap(),

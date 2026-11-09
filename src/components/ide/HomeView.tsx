@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useHostScope } from "../../lib/host-scope";
 import { githubReposList, type GhRepo, type Task } from "../../lib/ipc";
 import { ago } from "../../lib/fmt";
+import { canArchiveTask } from "../../lib/task-archive";
+import { CompletedTaskArchiveList } from "./CompletedTaskArchiveList";
 import { badgeLabelFor } from "../../lib/agents";
 import { taskDotColor } from "../../lib/task-status";
 import { Icon } from "./icons";
@@ -18,6 +20,7 @@ import { HomeProjectEditor } from "./HomeProjectEditor";
 interface Props {
   tasks: Task[];
   onOpenTask: (task: Task) => void;
+  onArchiveTask?: (task: Task) => void;
   onOpenEnsemble: (ensemble: string) => void;
   /** 승인/거부 후 목록 새로고침 (App의 기존 refresh 메커니즘 재사용). */
   onRefresh: () => void;
@@ -32,7 +35,7 @@ const ROW =
   "w-full text-left flex items-center gap-2.5 px-3 py-2.5 border-b border-border last:border-b-0 hover:bg-surface";
 
 /** 홈 대시보드 — 계획(오늘·이슈) → 개입(승인) → 복습·최근 한 방향으로 읽힌다. */
-export function HomeView({ tasks, onOpenTask, onOpenEnsemble, onRefresh, onOpenProject }: Props) {
+export function HomeView({ tasks, onOpenTask, onArchiveTask, onOpenEnsemble, onRefresh, onOpenProject }: Props) {
   // 세션에 속하지 않는 화면이라 호스트를 스코프에서 받는다 (ADR 0133).
   const host = useHostScope();
   // 앙상블은 '비교 실행' 별도 섹션이 아니라 최근 목록 안의 접힌 그룹 행으로 산다.
@@ -129,7 +132,7 @@ export function HomeView({ tasks, onOpenTask, onOpenEnsemble, onRefresh, onOpenP
               item.kind === "ensemble" ? (
                 <button key={item.key} onClick={() => onOpenEnsemble(item.id)} className={ROW}>
                   <span className="text-primary-bright shrink-0">
-                    <Icon name="scale" size={15} />
+                    <Icon name="scale" size={16} />
                   </span>
                   <span className="text-sm text-text truncate">
                     {item.tasks[0]?.instruction}
@@ -149,7 +152,8 @@ export function HomeView({ tasks, onOpenTask, onOpenEnsemble, onRefresh, onOpenP
                   </span>
                 </button>
               ) : (
-                <button key={item.key} onClick={() => onOpenTask(item.task)} className={ROW}>
+                <div key={item.key} className="flex items-center border-b border-border last:border-b-0">
+                <button onClick={() => onOpenTask(item.task)} className={`${ROW} flex-1 min-w-0 border-b-0`}>
                   <span
                     className="w-2 h-2 rounded-full shrink-0"
                     style={{ background: taskDotColor(item.task) }}
@@ -164,10 +168,15 @@ export function HomeView({ tasks, onOpenTask, onOpenEnsemble, onRefresh, onOpenP
                     {repoBase(item.task.repo)} · {ago(item.at)}
                   </span>
                 </button>
+                {onArchiveTask && canArchiveTask(item.task) && (
+                  <button className="shrink-0 px-3 py-2 text-xs text-text-muted hover:text-text" title="기록·폴더·브랜치를 유지하고 보관합니다" onClick={() => onArchiveTask(item.task)}>보관</button>
+                )}
+                </div>
               ),
             )}
           </div>
         )}
+        {onArchiveTask && <CompletedTaskArchiveList tasks={tasks} onOpenTask={onOpenTask} onArchiveTask={onArchiveTask} />}
       </div>
     </div>
   );

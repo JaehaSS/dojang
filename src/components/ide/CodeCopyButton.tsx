@@ -38,7 +38,7 @@ export function CodeCopyButton({ text }: { text: string }) {
         text-text-muted opacity-50 transition
         hover:border-border hover:text-text hover:opacity-100 focus-visible:opacity-100"
     >
-      <Icon name={copied ? "check" : "copy"} size={13} />
+      <Icon name={copied ? "check" : "copy"} size={14} />
     </button>
   );
 }

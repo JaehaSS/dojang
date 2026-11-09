@@ -730,8 +730,8 @@ export const ConversationView = memo(function ConversationView({
                 role={openable ? "button" : undefined}
                 title={openable ? "서브 에이전트 열기" : undefined}
               >
-                <span className="text-primary-bright shrink-0">
-                  <Icon name="plug" size={13} />
+                <span className="text-text-muted shrink-0">
+                  <Icon name="plug" size={14} />
                 </span>
                 <span className="font-code shrink-0">{it.name}</span>
                 {it.summary && <span className="font-code text-text-muted truncate">{it.summary}</span>}
@@ -835,7 +835,7 @@ export const ConversationView = memo(function ConversationView({
         {busy && (
           <div className="border border-border rounded-md px-2.5 py-2 text-xs text-text-secondary space-y-1">
             <div className="flex items-center gap-2">
-              <span className={activity?.state === "running" ? "text-primary-bright" : "animate-pulse text-primary-bright"}>●</span>
+              <span className={activity?.state === "running" ? "text-status-running" : "animate-pulse text-status-running"}>●</span>
               <span>{activity?.state === "running" ? "에이전트 실행 중" : activity?.state === "starting" ? "에이전트 시작 중" : activity?.state === "ended_without_result" ? "로컬 실행 종료 — 응답을 받지 못했습니다" : activity?.state === "unknown" ? "실행 상태 확인 불가" : "에이전트 작업 중…"}</span>
             </div>
             {activity?.last_operation && <div className="font-code text-text-muted truncate">현재: {activity.last_operation}</div>}

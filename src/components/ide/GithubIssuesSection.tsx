@@ -12,6 +12,7 @@ import {
   type Task,
 } from "../../lib/ipc";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 import {
   ALL_REPOS,
   hasNotice,
@@ -286,16 +287,9 @@ export function GithubIssuesSection({
           )}
           {/* 새로고침 중에는 목록을 비우지 않고 버튼만 진행 중임을 알린다 — 있던 것을 지웠다
               다시 그리면 방금 고친 그 깜빡임이 새로고침마다 돌아온다. */}
-          <button
-            className={`text-text-muted hover:text-text shrink-0 ${refreshing ? "opacity-40" : ""}`}
-            onClick={load}
-            disabled={refreshing}
-            aria-busy={refreshing}
-            title="새로고침"
-            aria-label="새로고침"
-          >
-            <Icon name="refresh" size={13} />
-          </button>
+          <IconButton size="sm" label="새로고침" onClick={load} disabled={refreshing} aria-busy={refreshing}>
+            <Icon name="refresh" size={14} />
+          </IconButton>
         </div>
       </div>
       {status === "loading" && (
@@ -374,19 +368,18 @@ export function GithubIssuesSection({
                     >
                       태스크 생성
                     </button>
-                    <button
-                      type="button"
-                      className="text-text-muted hover:text-status-failed disabled:opacity-40 shrink-0"
-                      title="이슈 삭제"
-                      aria-label={`#${issue.number} 삭제`}
+                    <IconButton
+                      size="sm"
+                      tone="danger"
+                      label={`#${issue.number} 삭제`}
                       disabled={deleting === key}
                       onClick={() => {
                         setFailure(null);
                         setConfirming(key);
                       }}
                     >
-                      <Icon name="x" size={13} />
-                    </button>
+                      <Icon name="x" size={14} />
+                    </IconButton>
                   </div>
                   {/* 확인은 행 아래 줄로 편다 — 한 줄에 밀어 넣으면 제목이 밀려 무엇을 지우는지 흐려진다. */}
                   {confirming === key && (

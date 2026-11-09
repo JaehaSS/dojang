@@ -1,11 +1,16 @@
+import { TaskRuntimePanel } from "./TaskRuntimePanel";
+import { PullRequestComposer } from "./PullRequestComposer";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { purposeGet, type PurposeSnapshot } from "../../lib/project-plan";
 import { taskCapsule, type Capsule } from "../../lib/ipc";
 import { taskResultGet, taskResultReference, taskReviewGet, taskReviewDecide, taskReviewDeliver, type TaskResult, type ReviewSnapshot, type ReviewInput } from "../../lib/task-results";
+import { ArtifactReviewPanel } from "./ArtifactReviewPanel";
+import { PullRequestStatusPanel } from "./PullRequestStatusPanel";
+import { SpecEvidencePanel } from "./SpecEvidencePanel";
 
 const stateLabel:Record<string,string>={pending:"검토 중",changes_requested:"수정 요청",accepted:"검토 완료",cancelled:"취소",closed:"작업 종료",current:"현재 소스",stale:"과거 결과",unknown:"미확인",passed:"통과",failed:"실패",not_run:"미실행",infrastructure_error:"실행 환경 오류",cancelled_check:"취소",sent:"접수됨",queued:"접수 대기",dispatching:"접수 확인 중",delivery_unknown:"전송 상태 미확인"};
-export function TaskResultPanel({taskId,onClose,onOpenFile,onChanges}:{taskId:number;onClose:()=>void;onOpenFile:(path:string)=>void;onChanges:()=>void}) {
+export function TaskResultPanel({taskId,onClose,onOpenFile,onChanges,onAttachInput}:{taskId:number;onClose:()=>void;onOpenFile:(path:string)=>void;onChanges:()=>void;onAttachInput?:(text:string)=>void}) {
   const [result,setResult]=useState<TaskResult|null>(null);
   const [review,setReview]=useState<ReviewSnapshot|null>(null);
   const [purpose,setPurpose]=useState<PurposeSnapshot|null>(null);
@@ -14,7 +19,9 @@ export function TaskResultPanel({taskId,onClose,onOpenFile,onChanges}:{taskId:nu
   const [error,setError]=useState<string|null>(null);
   const [capsuleError,setCapsuleError]=useState<string|null>(null);
   const [busy,setBusy]=useState(false);
+  const [prRefresh,setPrRefresh]=useState(0);
   const [reason,setReason]=useState("");
+  const [contextError,setContextError]=useState<string|null>(null);
   const [criteria,setCriteria]=useState("");
   const [checked,setChecked]=useState<boolean[]>([]);
   const [path,setPath]=useState("");
@@ -37,7 +44,7 @@ export function TaskResultPanel({taskId,onClose,onOpenFile,onChanges}:{taskId:nu
     if(c.status==="fulfilled"){setCapsule(c.value);setCapsuleError(null);}else setCapsuleError(String(c.reason));
   },[taskId]);
   useEffect(()=>{
-    setResult(null);setReview(null);setCapsule(null);setPurpose(null);setReason("");setChecked([]);mutation.current=null;
+    setResult(null);setReview(null);setCapsule(null);setPurpose(null);setReason("");setContextError(null);setChecked([]);mutation.current=null;
     const origin=document.activeElement as HTMLElement|null;
     void reload();close.current?.focus();
     const key=(event:KeyboardEvent)=>{if(event.key==="Escape")onClose();};
@@ -67,11 +74,24 @@ export function TaskResultPanel({taskId,onClose,onOpenFile,onChanges}:{taskId:nu
     if(!result)return;setBusy(true);
     try{await taskResultReference(taskId,result.source_id,result.result_revision,kind,path);setPath("");await reload();}catch(e){setError(String(e));}finally{setBusy(false);}
   };
+  const attachReview=(text:string)=>{
+    const next=reason.trim()?`${reason}\n\n${text}`:text;
+    if(new TextEncoder().encode(next).length>8000){setContextError("검토 사유가 8,000바이트 제한을 넘습니다. 기존 의견을 줄인 뒤 다시 연결하세요.");return;}
+    setReason(next);setContextError(null);
+  };
   return <section aria-label="작업 결과" className="shrink-0 max-h-[55vh] overflow-auto border-b border-border bg-surface p-3 text-sm">
     <div className="flex items-center gap-3"><h2 className="font-medium">작업 #{taskId} 결과</h2><button onClick={()=>void reload()} disabled={busy}>새로고침</button><button ref={close} onClick={onClose} className="ml-auto" aria-label="결과 닫기">닫기</button></div>
     {error&&<p role="alert" className="text-status-failed">상태 확인 필요: {error}</p>}
+    <TaskRuntimePanel key={`runtime:${taskId}`} taskId={taskId}/>
+    <SpecEvidencePanel key={`spec:${taskId}`} taskId={taskId} disabled={busy} onOpenFile={onOpenFile} onAttachInput={onAttachInput} onAttachReview={attachReview}/>
     {!result?<p aria-live="polite">결과를 불러오는 중</p>:<>
       <p className="text-text-muted">결과 v{result.result_revision} · {stateLabel[result.freshness]??result.freshness} · 현재 소스 판정은 외부 환경의 재현성을 보장하지 않습니다.</p>
+      <PullRequestComposer key={`pr-compose:${taskId}`} taskId={taskId} onChanged={()=>{setPrRefresh(value=>value+1);void reload();}}/>
+      <PullRequestStatusPanel key={`${taskId}:${prRefresh}`} taskId={taskId} disabled={busy||!!error} onAttachReview={attachReview}/>
+      <ArtifactReviewPanel taskId={taskId} sourceId={result.source_id} resultRevision={result.result_revision}
+        paths={result.references.map(reference=>reference.relative_path)} disabled={busy||!!error}
+        onOpenFile={onOpenFile}
+        onAttachReview={attachReview} />
       <div className="grid gap-4 md:grid-cols-2 mt-3">
         <div><h3 className="font-medium">산출물과 변경</h3>{result.references.length===0?<p>대표 결과 미지정</p>:result.references.map(ref=><p key={`${ref.kind}:${ref.relative_path}`}><button disabled={ref.availability!=null&&ref.availability!=="ready"&&ref.availability!=="available"} onClick={()=>onOpenFile(ref.relative_path)} className="text-primary-bright">{ref.relative_path}</button>{ref.result_revision!=null&&<span className="text-text-muted"> · 지정 v{ref.result_revision}</span>}{ref.availability&&ref.availability!=="ready"&&ref.availability!=="available"&&` · ${ref.availability}`}</p>)}
           <div className="flex flex-wrap gap-2 mt-2"><select aria-label="산출물 종류" value={kind} onChange={e=>setKind(e.target.value)}><option value="file">파일</option><option value="report">보고서</option></select><input aria-label="산출물 상대 경로" placeholder="작업 폴더 안 상대 경로" value={path} onChange={e=>setPath(e.target.value)} className="bg-bg border border-border px-2"/><button disabled={busy||!!error||!path.trim()} onClick={()=>void add()}>대표 결과 지정</button></div>
@@ -83,7 +103,8 @@ export function TaskResultPanel({taskId,onClose,onOpenFile,onChanges}:{taskId:nu
         <div><h3 className="font-medium">사람 검토 · {current?stateLabel[current.state]??current.state:"시작하지 않음"}</h3><p className="text-text-muted">검토 완료는 Git 적용을 실행하지 않습니다.</p>
           {current?.criteria.map((c,i)=><label key={i} className="flex gap-2"><input type="checkbox" checked={checked[i]??false} disabled={busy||current.state!=="pending"} onChange={e=>setChecked(values=>values.map((v,j)=>j===i?e.target.checked:v))}/>{c.text}</label>)}
           {!current&&<textarea aria-label="검토 완료 기준" placeholder="추가 완료 기준 (한 줄에 하나)" value={criteria} onChange={e=>setCriteria(e.target.value)} className="w-full bg-bg border border-border mt-2"/>}
-          <textarea aria-label="검토 사유" placeholder="검토 시작·결정·수정 요청 사유" value={reason} onChange={e=>setReason(e.target.value)} className="w-full bg-bg border border-border mt-2"/>
+          <textarea aria-label="검토 사유" placeholder="검토 시작·결정·수정 요청 사유" value={reason} onChange={e=>{setReason(e.target.value);setContextError(null);}} className="w-full bg-bg border border-border mt-2"/>
+          {contextError&&<p role="alert" className="text-status-failed">{contextError}</p>}
           <div className="flex flex-wrap gap-2"><button disabled={busy||!!error||!reason.trim()} onClick={()=>void act(current?"cancel":"start")}>{current?"검토 취소":"검토 시작"}</button>
             {current?.state==="pending"&&<><button disabled={busy||!!error||!reason.trim()||result.freshness!=="current"||checked.some(v=>!v)} onClick={()=>void act("accept")}>검토 완료</button><button disabled={busy||!!error||!reason.trim()} onClick={()=>void act("request_changes")}>수정 요청 보내기</button></>}
             {current?.state==="changes_requested"&&<><button disabled={busy||!!error||!reason.trim()||review!.completion_epoch<=current.completion_epoch} onClick={()=>void act("resubmit")}>새 실행 결과 재검토</button>{review?.deliveries.some(d=>d.state==="delivery_unknown"||d.state==="dispatching")&&<button disabled={busy||!!error||!reason.trim()} onClick={()=>void act("request_changes")}>전송 상태 확인 후 새 요청 보내기</button>}</>}

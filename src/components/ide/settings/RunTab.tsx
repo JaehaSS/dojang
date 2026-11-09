@@ -25,6 +25,7 @@ import {
 } from "../../../lib/ipc";
 import { modelsForAgentWithObserved, AGENT_MODEL_CATALOG } from "../../../lib/models";
 import { useObservedModels } from "../../../lib/use-observed-models";
+import { useAvailableModels } from "../../../lib/use-available-models";
 import { AGENT_PRESETS } from "../../../lib/agents";
 import { SettingRow, SettingSection, SettingsTabShell, Switch, TabSummary } from "./SettingRow";
 import { setSessionStyle, useSessionStyle, type SessionStyle } from "../../../lib/session-style";
@@ -52,6 +53,7 @@ interface Props {
 /** 작업 실행 — 모델·동시 실행·작업 생성 기본값처럼 "작업이 어떻게 도는가"를 정하는 설정. */
 export function RunTab({ onUseWorktreeChange }: Props) {
   const observedModelList = useObservedModels();
+  const availableAgyModels = useAvailableModels("agy");
   const [captureProfile, setCaptureProfile] = useState<CaptureProfile | null>(null);
   const style = useSessionStyle();
   const [blockUnverified, setBlockUnverified] = useState(false);
@@ -236,7 +238,9 @@ export function RunTab({ onUseWorktreeChange }: Props) {
               }}
             />
             <datalist id={`praxis-models-${p.key}`}>
-              {modelsForAgentWithObserved(p.key, observedModelList).map((m) => (
+              {modelsForAgentWithObserved(
+                p.key, observedModelList, p.key === "agy" ? availableAgyModels : null,
+              ).map((m) => (
                 <option key={m.id} value={m.id} label={m.label} />
               ))}
             </datalist>

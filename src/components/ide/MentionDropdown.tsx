@@ -39,7 +39,7 @@ export function MentionDropdown({
   return (
     <div
       ref={listRef}
-      className="absolute bottom-full left-0 mb-1 z-30 w-[28rem] max-h-56 overflow-auto rounded-lg border border-border-strong bg-raised py-1 shadow-xl"
+      className="absolute bottom-full left-0 mb-1 z-30 w-[28rem] max-h-56 overflow-auto rounded-lg border border-border-strong bg-raised py-1 shadow-e2"
     >
       <div className="px-3 py-1 text-xs text-text-muted flex items-center gap-1">
         <Icon name="at" size={12} /> 멘션{token && ` · ${token}`}
@@ -60,7 +60,7 @@ export function MentionDropdown({
           ) : (
             <>
               {/* 출처 배지 — 어디서 온 지식인지 모르면 결과를 신뢰할 수 없다. */}
-              <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] bg-surface text-text-muted">
+              <span className="shrink-0 rounded px-1.5 py-0.5 text-[11px] bg-surface text-text-muted">
                 {sourceLabel(item.hit.source)}
               </span>
               <span className="truncate">{item.hit.title}</span>

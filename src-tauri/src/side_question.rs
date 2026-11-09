@@ -498,7 +498,7 @@ pub async fn read(
         (false, Some(reason))
     } else if !parent_allows_side_question(&task) {
         (false, Some("대화 모드의 실행 가능하거나 검토 대기 중인 작업에서만 별도 질의를 사용할 수 있습니다".into()))
-    } else if frozen_provider == "claude" {
+    } else if crate::task_observation::supports_isolated_provider(&frozen_provider) {
         match claude_policy_available() {
             Ok(()) => (true, None),
             Err(reason) => (false, Some(reason)),

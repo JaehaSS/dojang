@@ -622,6 +622,38 @@ describe("EditorWindow", () => {
     ).toBe("src/a.ts:7:1");
   });
 
+  it("메인 창의 변경 칩은 접힌 트리 열을 펴고 변경 렌즈를 세운다", async () => {
+    await mount();
+    await send(EDITOR_SESSION_EVENT, session());
+    await act(async () => {
+      container?.querySelector<HTMLButtonElement>("[aria-label='파일 트리 닫기']")?.click();
+    });
+    const lens = (label: string) =>
+      Array.from(container?.querySelectorAll<HTMLButtonElement>("[role=tablist] button") ?? []).find(
+        (button) => button.textContent === label,
+      );
+    expect(lens("변경")?.getAttribute("aria-pressed")).toBe("false");
+    mocks.fsRead.mockClear();
+
+    await send(EDITOR_REVEAL_EVENT, { task_id: 42, host: "local", path: "", line: null, column: null, kind: "changes" });
+
+    expect(lens("변경")?.getAttribute("aria-pressed")).toBe("true");
+    expect(container?.querySelector("[aria-label='파일 트리 열기']")).toBeNull();
+    expect(mocks.fsRead).not.toHaveBeenCalled();
+  });
+
+  it("세션보다 먼저 온 변경 칩도 세션이 오면 변경 렌즈를 세운다", async () => {
+    await mount();
+
+    await send(EDITOR_REVEAL_EVENT, { task_id: 42, host: "local", path: "", line: null, column: null, kind: "changes" });
+    await send(EDITOR_SESSION_EVENT, session());
+
+    const changes = Array.from(
+      container?.querySelectorAll<HTMLButtonElement>("[role=tablist] button") ?? [],
+    ).find((button) => button.textContent === "변경");
+    expect(changes?.getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("열지 못한 파일에는 착지 지점을 걸지 않는다", async () => {
     // 남은 착지 지점은 소비되지 않고 대기하다가, 나중에 그 경로를 열 때 커서를 튀게 한다.
     await mount();

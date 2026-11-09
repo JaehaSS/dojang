@@ -21,6 +21,7 @@ import {
 } from "../../lib/usage";
 import { ago } from "../../lib/fmt";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 
 /** 스냅샷 폴링 간격(ms). 백엔드가 OAuth 재조회를 자체 캐시로 눌러 준다. */
 const POLL_MS = 60_000;
@@ -271,17 +272,12 @@ export function UsageBar() {
         />
       ))}
 
-      <button
-        className="ml-auto h-6 px-1.5 rounded text-text-muted hover:text-text hover:bg-raised"
-        onClick={() => void load(true)}
-        title="사용량 새로고침"
-        aria-label="사용량 새로고침"
-      >
-        <Icon name="refresh" size={12} />
-      </button>
+      <IconButton size="sm" className="ml-auto" label="사용량 새로고침" onClick={() => void load(true)}>
+        <Icon name="refresh" size={14} />
+      </IconButton>
 
       {opened && (
-        <div className="absolute left-3 bottom-full mb-1 z-30 w-72 rounded-lg border border-border-strong bg-raised shadow-xl p-3">
+        <div className="absolute left-3 bottom-full mb-1 z-30 w-72 rounded-lg border border-border-strong bg-raised shadow-e2 p-3">
           <VendorDetail
             usage={opened}
             now={now}

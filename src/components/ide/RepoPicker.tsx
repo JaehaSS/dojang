@@ -124,14 +124,14 @@ export function RepoPicker({
         aria-haspopup="listbox"
         title={repo || "레포 선택"}
       >
-        <Icon name="folder" size={13} />
+        <Icon name="folder" size={14} />
         <span className="max-w-[160px] truncate">{repo ? base(repo) : (triggerLabel ?? "레포 미선택")}</span>
         <Icon name="chevronDown" size={12} />
       </button>
 
       {openMenu && (
         <div
-          className={`absolute z-20 w-72 rounded-lg border border-border-strong bg-raised py-1 shadow-xl ${
+          className={`absolute z-20 w-72 rounded-lg border border-border-strong bg-raised py-1 shadow-e2 ${
             placement === "down" ? "top-full mt-1" : "bottom-full mb-1"
           } ${align === "right" ? "right-0" : "left-0"}`}
         >

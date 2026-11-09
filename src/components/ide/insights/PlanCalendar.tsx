@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactElement } from "react";
 import { todayRange } from "../../../lib/ipc";
 import { repoBadge, showRepoBadges, type DayItem } from "../today-items";
+import { Icon } from "../icons";
 import {
   addMonth,
   fmtDayLabel,
@@ -60,7 +61,7 @@ function Dots({ summary }: { summary: DaySummary }) {
           aria-hidden
         />
       ))}
-      {rest > 0 && <span className="text-[9px] leading-none text-text-muted">+{rest}</span>}
+      {rest > 0 && <span className="text-[11px] leading-none text-text-muted">+{rest}</span>}
     </div>
   );
 }
@@ -201,7 +202,7 @@ export function PlanCalendar({ onOpenHome, nowMs, api }: Props = {}): ReactEleme
                   item.status === "done" ? "text-primary-bright" : "text-text-muted"
                 }`}
               >
-                {item.status === "done" ? "✓" : "○"}
+                <Icon name={item.status === "done" ? "check" : "circle"} size={12} />
               </span>
               <span
                 className={`flex-1 text-sm truncate ${

@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import { Icon } from "./icons";
 import type { PreviewWorkbenchState } from "../../lib/preview-workbench/types";
+import { IconButton } from "../ui";
 
 interface Props {
   state: PreviewWorkbenchState;
@@ -47,9 +48,9 @@ export function PreviewWorkbenchStrip({
           {state.takenOver ? "사용자 제어" : reason ? "제어 불가" : "제어 가능"}
         </span>
         {state.lastAction && <span className="min-w-0 truncate text-text-muted">마지막 동작: {state.lastAction}</span>}
-        <button className="ml-auto text-text-muted hover:text-text" type="button" onClick={onRefresh} aria-label="프리뷰 상태 다시 확인">
+        <IconButton size="sm" className="ml-auto" label="프리뷰 상태 다시 확인" onClick={onRefresh}>
           <Icon name="refresh" size={14} />
-        </button>
+        </IconButton>
       </div>
       <div className={`flex gap-2 px-3 pb-2 ${compact ? "flex-row" : "flex-col sm:flex-row"}`}>
         <textarea

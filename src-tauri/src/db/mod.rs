@@ -55,6 +55,22 @@ pub mod runner_event_kind {
     pub const AWAITING_REVIEW: &str = "awaiting_review";
     /// 에이전트가 질문하고 멈춤 — 답이 없으면 대화가 이어지지 않는다.
     pub const AWAITING_ANSWER: &str = "awaiting_answer";
+    /// 상시 비서가 부작용 행동 승인을 요청함.
+    pub const ASSISTANT_APPROVAL_REQUESTED: &str = "assistant_approval_requested";
+    /// 상시 비서의 대화 턴 응답 완료.
+    pub const ASSISTANT_REPLY: &str = "assistant_reply";
+    /// 스케줄러 리마인더 발화.
+    pub const REMINDER_FIRED: &str = "reminder_fired";
+}
+
+/// `tasks.kind` — 일반 코딩·하네스 작업과 호스트당 1개인 상시 비서 세션을 구분한다.
+pub mod task_kind {
+    pub const CODING: &str = "coding";
+    pub const ASSISTANT: &str = "assistant";
+}
+
+fn default_task_kind() -> String {
+    task_kind::CODING.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -143,6 +159,10 @@ pub struct Task {
     #[sqlx(default)]
     #[serde(default)]
     pub worktree_missing: bool,
+    /// 작업 성격 — `"coding"`(일반 코딩·하네스 작업) | `"assistant"`(호스트당 1개인 주 비서 세션).
+    #[sqlx(default)]
+    #[serde(default = "default_task_kind")]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -333,6 +353,13 @@ pub async fn init_pool(db_path: &str) -> anyhow::Result<SqlitePool> {
     add_column_if_missing(&pool, "tasks", "resumed_vendor TEXT").await?;
     sqlx::query("UPDATE tasks SET resumed_vendor = 'claude' WHERE resumed_session IS NOT NULL AND resumed_vendor IS NULL")
         .execute(&pool).await?;
+    add_column_if_missing(&pool, "tasks", "kind TEXT NOT NULL DEFAULT 'coding'").await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_singleton_assistant \
+         ON tasks(kind) WHERE kind = 'assistant' AND state != 'Discarded'",
+    )
+    .execute(&pool)
+    .await?;
     // 대화 이벤트 영속화 — 재진입/재시작 시 트랜스크립트 복원 (event = ConvoEvent 또는 user 메시지 JSON).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS convo_events (\
@@ -546,6 +573,7 @@ pub async fn init_pool(db_path: &str) -> anyhow::Result<SqlitePool> {
     crate::project_plan::migrate(&pool).await?;
     crate::pipeline::db::migrate(&pool).await?;
     crate::task_review::migrate(&pool).await?;
+    crate::task_archive::migrate(&pool).await?;
     crate::know_cards::migrate(&pool).await?;
     Ok(pool)
 }
@@ -768,12 +796,13 @@ pub async fn latest_runner_event_ts(pool: &SqlitePool) -> anyhow::Result<Option<
     Ok(ts)
 }
 
-/// 주어진 상태의 task 수. 상태 문자열은 `state` 상수만 넘긴다.
+/// 주어진 상태의 코딩 task 수 (`kind = 'coding'`). 상태 문자열은 `state` 상수만 넘긴다.
 pub async fn count_tasks_in_state(pool: &SqlitePool, state: &str) -> anyhow::Result<i64> {
-    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE state = ?")
-        .bind(state)
-        .fetch_one(pool)
-        .await?;
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE state = ? AND kind = 'coding'")
+            .bind(state)
+            .fetch_one(pool)
+            .await?;
     Ok(count)
 }
 
@@ -919,13 +948,15 @@ pub async fn requeue_conversation_followup(
     let mut transaction = pool.begin().await?;
     let updated = sqlx::query(
         "UPDATE tasks SET instruction = ?, state = ?, updated_at = ? \
-         WHERE id = ? AND mode = 'conversation' AND state = ?",
+         WHERE id = ? AND mode = 'conversation' \
+           AND (state = ? OR (kind = 'assistant' AND state = ?))",
     )
     .bind(message)
     .bind(state::QUEUED)
     .bind(now)
     .bind(task_id)
     .bind(state::AWAITING_REVIEW)
+    .bind(state::FAILED)
     .execute(&mut *transaction)
     .await?;
     if updated.rows_affected() == 0 {
@@ -2344,9 +2375,47 @@ pub async fn claim_oldest_queued_task(pool: &SqlitePool, now: i64) -> anyhow::Re
     let task = sqlx::query_as::<_, Task>(
         "UPDATE tasks SET state = ?, updated_at = ? \
          WHERE id = (SELECT id FROM tasks WHERE state = ? \
+           AND kind = 'coding' \
            AND blocked_reason IS NULL \
            AND NOT EXISTS (SELECT 1 FROM review_process_leases lease WHERE lease.task_id = tasks.id) \
            ORDER BY created_at ASC, id ASC LIMIT 1) \
+           AND state = ? \
+         RETURNING *",
+    )
+    .bind(state::STARTING)
+    .bind(now)
+    .bind(state::QUEUED)
+    .bind(state::QUEUED)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if let Some(task) = task {
+        let task = validate_loaded_task(task)?;
+        sqlx::query(
+            "INSERT INTO runner_events (task_id, ts, kind, detail) VALUES (?, ?, 'starting_lease', NULL)",
+        )
+        .bind(task.id)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        return Ok(Some(task));
+    }
+    transaction.commit().await?;
+    Ok(None)
+}
+
+/// 상시 비서(`kind = 'assistant'`) 전용 큐 선점 — 일반 코딩 작업 슬롯과 독립적으로 동작한다.
+pub async fn claim_queued_assistant_task(
+    pool: &SqlitePool,
+    now: i64,
+) -> anyhow::Result<Option<Task>> {
+    let mut transaction = pool.begin().await?;
+    let task = sqlx::query_as::<_, Task>(
+        "UPDATE tasks SET state = ?, updated_at = ? \
+         WHERE id = (SELECT id FROM tasks WHERE state = ? \
+           AND kind = 'assistant' \
+           AND blocked_reason IS NULL \
+           ORDER BY id ASC LIMIT 1) \
            AND state = ? \
          RETURNING *",
     )
@@ -2549,17 +2618,33 @@ pub async fn count_done_tasks(pool: &SqlitePool, repo: &str) -> anyhow::Result<i
 }
 
 pub async fn list_tasks(pool: &SqlitePool) -> anyhow::Result<Vec<Task>> {
-    let rows = sqlx::query_as::<_, Task>("SELECT * FROM tasks ORDER BY id DESC")
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE kind = 'coding' ORDER BY id DESC",
+    )
+    .fetch_all(pool)
+    .await?;
     validate_loaded_tasks(rows)
+}
+
+/// 호스트의 단일 주 비서 세션(`kind = 'assistant'`)을 조회한다.
+pub async fn get_assistant_task(pool: &SqlitePool) -> anyhow::Result<Option<Task>> {
+    let row = sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE kind = 'assistant' AND state != ? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(state::DISCARDED)
+    .fetch_optional(pool)
+    .await?;
+    match row {
+        Some(task) => Ok(Some(validate_loaded_task(task)?)),
+        None => Ok(None),
+    }
 }
 
 /// 메인 checkout을 공유하는 비종료 direct 작업만 소형 행으로 조회한다.
 pub async fn list_open_direct_tasks(pool: &SqlitePool) -> anyhow::Result<Vec<OpenDirectTask>> {
     let rows = sqlx::query_as::<_, OpenDirectTask>(
         "SELECT id, repo FROM tasks \
-         WHERE repo = worktree_path AND state NOT IN (?, ?, ?) ORDER BY id ASC",
+         WHERE kind = 'coding' AND repo = worktree_path AND state NOT IN (?, ?, ?) ORDER BY id ASC",
     )
     .bind(state::DONE)
     .bind(state::FAILED)
@@ -2573,7 +2658,7 @@ pub async fn list_open_direct_tasks(pool: &SqlitePool) -> anyhow::Result<Vec<Ope
 pub async fn list_created_direct_tasks(pool: &SqlitePool) -> anyhow::Result<Vec<OpenDirectTask>> {
     let rows = sqlx::query_as::<_, OpenDirectTask>(
         "SELECT id, repo FROM tasks \
-         WHERE repo = worktree_path AND state = ? ORDER BY id ASC",
+         WHERE kind = 'coding' AND repo = worktree_path AND state = ? ORDER BY id ASC",
     )
     .bind(state::CREATED)
     .fetch_all(pool)
@@ -2594,10 +2679,12 @@ pub async fn list_running_tasks(pool: &SqlitePool) -> anyhow::Result<Vec<Task>> 
 
 /// 최근 작업 N개 (최신순) — 텔레그램 봇 `/tasks` 명령용(Phase 2).
 pub async fn recent_tasks(pool: &SqlitePool, limit: i64) -> anyhow::Result<Vec<Task>> {
-    let rows = sqlx::query_as::<_, Task>("SELECT * FROM tasks ORDER BY id DESC LIMIT ?")
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE kind = 'coding' ORDER BY id DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
     validate_loaded_tasks(rows)
 }
 
@@ -2607,12 +2694,13 @@ pub async fn recent_tasks_by_state(
     state: &str,
     limit: i64,
 ) -> anyhow::Result<Vec<Task>> {
-    let rows =
-        sqlx::query_as::<_, Task>("SELECT * FROM tasks WHERE state = ? ORDER BY id DESC LIMIT ?")
-            .bind(state)
-            .bind(limit)
-            .fetch_all(pool)
-            .await?;
+    let rows = sqlx::query_as::<_, Task>(
+        "SELECT * FROM tasks WHERE kind = 'coding' AND state = ? ORDER BY id DESC LIMIT ?",
+    )
+    .bind(state)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
     validate_loaded_tasks(rows)
 }
 
@@ -2621,8 +2709,8 @@ pub async fn recent_tasks_by_state(
 pub async fn search_tasks(pool: &SqlitePool, query: &str, limit: i64) -> anyhow::Result<Vec<Task>> {
     let pattern = format!("%{}%", escape_like_pattern(query));
     let rows = sqlx::query_as::<_, Task>(
-        "SELECT * FROM tasks WHERE instruction LIKE ? ESCAPE '\\' OR repo LIKE ? ESCAPE '\\' \
-         OR branch LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?",
+        "SELECT * FROM tasks WHERE kind = 'coding' AND (instruction LIKE ? ESCAPE '\\' OR repo LIKE ? ESCAPE '\\' \
+         OR branch LIKE ? ESCAPE '\\') ORDER BY updated_at DESC LIMIT ?",
     )
     .bind(&pattern)
     .bind(&pattern)

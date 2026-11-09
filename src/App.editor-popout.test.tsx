@@ -165,6 +165,22 @@ describe("에디터 팝아웃과 코드 열", () => {
     expect(button("파일 트리 닫기")).toBeNull();
   });
 
+  it("에디터가 나가 있으면 변경 칩은 그 창에 변경 목록을 세우고 이 창의 트리는 두지 않는다", async () => {
+    await click("에디터를 새 창으로");
+    tauri.emitTo.mockClear();
+
+    await click("변경 보기");
+    await act(async () => { await new Promise((done) => setTimeout(done, 0)); });
+
+    expect(tauri.emitTo).toHaveBeenCalledWith("editor", "editor://reveal",
+      expect.objectContaining({ task_id: 2, host: "local", kind: "changes" }));
+    const lens = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((el) => el.textContent?.trim() === "변경" && el.getAttribute("aria-selected") === "true");
+    expect(lens, "메인 창 트리에 변경 렌즈를 세우지 않는다").toBeUndefined();
+    // 눌린 상태가 없으므로 다시 눌러도 닫기가 아니라 같은 배달이다.
+    expect(button("변경 보기")).not.toBeNull();
+  });
+
   it("나가 있는 동안 파일 탭을 열어 두었던 세션으로 옮기면 그 세션의 코드 열도 닫힌다", async () => {
     await openTask(3);
     await click("파일 보기");

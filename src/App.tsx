@@ -39,7 +39,7 @@ import { ActivityColumnTab, ActivityRail } from "./components/ide/ActivityRail";
 import { knowCardQuestion } from "./components/ide/KnowCardsSection";
 import { DebateView } from "./components/ide/DebateView";
 import { endsSequence } from "./components/ide/debate-rounds";
-import { applyStateOverrides, noteStateOverride, type StateOverrides } from "./lib/task-state-overlay";
+import { applyStateOverrides, archivedStateRaces, noteStateOverride, type StateOverrides } from "./lib/task-state-overlay";
 import type { DebateEventLike } from "./components/ide/debate-rounds";
 import { debateSessionWidth, MIN_SESSION_WIDTH } from "./components/ide/workspace-split-width";
 import {
@@ -60,6 +60,7 @@ import { WorkspacePaneButtons } from "./components/ide/WorkspacePaneButtons";
 import { useSessionPanels } from "./components/ide/useSessionPanels";
 import { CodeColumnTabs, type CodeTab } from "./components/ide/CodeColumnTabs";
 import { SessionModelSwitch } from "./components/ide/SessionModelSwitch";
+import { TaskStatusIcon } from "./components/ide/TaskStatusIcon";
 import {
   EMPTY_CONTEXT_OBSERVATION,
   foldContextObservation,
@@ -77,6 +78,7 @@ import { SubagentView } from "./components/ide/SubagentView";
 import { subagentRootMap, subagentThreadRootOf, subagentThreads } from "./lib/activity";
 import { TerminalDock } from "./components/ide/TerminalDock";
 import { UsageBar } from "./components/ide/UsageBar";
+import { AssistantView } from "./components/ide/AssistantView";
 import { InsightsView } from "./components/ide/InsightsView";
 import { PipelineView } from "./components/ide/pipeline/PipelineView";
 import { attentionCount, isAutoRunning } from "./lib/pipeline";
@@ -98,6 +100,8 @@ import { ConversationQueue } from "./components/ide/ConversationQueue";
 import { contextSourceHash, formatQuestionReferences, type SideQuestionApi, type SideQuestionContext } from "./lib/side-question";
 import type { SplitMode } from "./components/ide/workspace-split-width";
 import { requestComposerFocus } from "./lib/composer-focus";
+import { appendSpecReference } from "./lib/task-specs";
+import { taskArchive, taskRestore } from "./lib/task-archive";
 import { useSessionDraft } from "./components/ide/useSessionDraft";
 import { FileTree } from "./components/ide/FileTree";
 import { ChangedFileCount, ChangesList } from "./components/ide/ChangesList";
@@ -134,6 +138,7 @@ import { TaskResultPanel } from "./components/ide/TaskResultPanel";
 import { CapsulePanel } from "./components/ide/CapsulePanel";
 import { Menu } from "./components/ide/Menu";
 import { Icon } from "./components/ide/icons";
+import { Badge, IconButton } from "./components/ui";
 import { QuickOpen } from "./components/QuickOpen";
 import { SessionNavigator } from "./components/SessionNavigator";
 import type { QuickOpenScope, RankedQuickOpenItem } from "./lib/quickopen";
@@ -142,6 +147,7 @@ import {
   taskCreate,
   taskResume,
   taskListAll,
+  taskList,
   taskWrite,
   taskDiffStat,
   taskApprove,
@@ -192,7 +198,7 @@ import {
   normalizeEditorSettings,
 } from "./lib/editor-settings";
 import { singleAgentSelection } from "./lib/agents";
-import { isTerminalState, taskStatusLabel, taskTextClass, taskTone } from "./lib/task-status";
+import { isTerminalState, taskStatusLabel, taskTone } from "./lib/task-status";
 import { inferAgentRole } from "./lib/agent-role";
 import { normalizeReasoningEffort } from "./lib/models";
 import {
@@ -209,6 +215,10 @@ import {
   type TaskRef,
 } from "./lib/transport";
 import { RunnerTransport } from "./lib/transport/runner";
+import {
+  loadRemoteRunnerProfile,
+  syncRemoteRunnerTransport,
+} from "./lib/transport/remote-host";
 import { describeSessionResumeError } from "./lib/session-resume";
 import { resolveAgentLink, type AgentLinkTarget } from "./lib/agent-link";
 import {
@@ -242,23 +252,6 @@ import {
   runGrillRound,
   type GrillFlowDeps,
 } from "./lib/grill";
-
-const stateText: Record<string, string> = {
-  Running: "text-status-running",
-  AwaitingReview: "text-status-awaiting",
-  PendingApproval: "text-status-awaiting",
-  Finalizing: "text-status-awaiting",
-  Done: "text-status-done",
-  Failed: "text-status-failed",
-  Discarded: "text-status-failed",
-  Created: "text-text-secondary",
-};
-
-/** 검토 대기는 대기 성격에 따라 색이 갈린다 — 그 외 상태는 위 표를 그대로 쓴다. */
-const stateTextFor = (task: Pick<Task, "state" | "awaiting_kind">): string =>
-  task.state === "AwaitingReview"
-    ? taskTextClass(task)
-    : (stateText[task.state] ?? "text-text-secondary");
 
 /** 리뷰 바 안내 한 줄. 바가 한 줄로 고정되며 잘릴 수 있어 title로도 같이 준다.
  *  답을 기다리는 턴에 "변경을 검토해 머지하세요"를 띄우면, 정작 필요한 행동(대답)이 아니라
@@ -864,6 +857,13 @@ function App() {
     try {
       // 호스트별 독립 조회 — 느린 호스트 하나가 목록 전체를 잡지 않게 한다.
       const merged = await taskListAll();
+      const archiveRaces = archivedStateRaces(merged.tasks, stateOverridesRef.current, startedAt);
+      if (archiveRaces.length > 0) {
+        for (const id of archiveRaces) stateOverridesRef.current.delete(id);
+        const local = await taskList(LOCAL_HOST);
+        merged.tasks = [...merged.tasks.filter((task) => task.host !== LOCAL_HOST), ...local];
+        merged.failures = merged.failures.filter((failure) => failure.host !== LOCAL_HOST);
+      }
       if (startedAt < refreshAppliedAtRef.current) return;
       refreshAppliedAtRef.current = startedAt;
       setTasks(applyStateOverrides(merged.tasks, stateOverridesRef.current, startedAt));
@@ -877,6 +877,15 @@ function App() {
       setErr(String(e));
     }
   }, [reconcileNotifications]);
+
+  useEffect(() => {
+    const unlisten = listen<number>("task://archive-changed", () => {
+      // 보관 이전에 시작한 조회가 나중에 돌아와 목록을 되돌리지 않도록 무효화한다.
+      refreshAppliedAtRef.current = performance.now();
+      void refresh();
+    });
+    return () => { void unlisten.then((stop) => stop()); };
+  }, [refresh]);
 
   // 원격 구독은 sequence 0부터 이벤트를 replay하므로, 이벤트당 refresh를 걸면 부팅 순간
   // 같은 taskList 요청이 수십 번 몰린다(측정: 15회 이상). 짧게 모아 마지막 한 번만 보낸다.
@@ -926,9 +935,16 @@ function App() {
       "task://state",
       (e) => {
         const { id, state: next, awaiting_kind: nextKind = null } = e.payload;
+        const current = tasksRef.current.find((t) => t.host === LOCAL_HOST && t.id === id);
+        if (current?.archive) {
+          // 보관 전에 발생한 지연 이벤트와 새 실행은 이벤트만으로 구별할 수 없다.
+          stateOverridesRef.current.delete(id);
+          refreshAppliedAtRef.current = performance.now();
+          void refresh();
+          return;
+        }
         // 진행 중인 재조회보다 이 전이가 새롭다 — 그 결과가 돌아올 때 되돌리지 않도록 남긴다.
         noteStateOverride(stateOverridesRef.current, id, next, nextKind, performance.now());
-        const current = tasksRef.current.find((t) => t.host === LOCAL_HOST && t.id === id);
         if (!current) {
           void refresh();
           return;
@@ -975,6 +991,9 @@ function App() {
     const unsubscribeTransport = subscribeTransportChange(() => {
       bindTransports();
     });
+    if (loadRemoteRunnerProfile().enabled) {
+      syncRemoteRunnerTransport();
+    }
     bindTransports();
     return () => {
       void un.then((f) => f());
@@ -1570,6 +1589,27 @@ function App() {
     [openDiff, revealInEditorWindow],
   );
 
+  /**
+   * 변경 칩이 변경 목록을 세우는 곳. 에디터가 나가 있으면 그 창의 트리 열에 세운다 — 행을 누르면
+   * diff 탭도 그 창에 열리므로, 목록과 diff가 한 창에 모인다. 창이 받지 못했으면 이 창의 트리에 연다.
+   */
+  const showChangesList = useCallback(() => {
+    const task = selectedRef.current;
+    if (!task || !editorWindow.poppedOut) return void openChangesLens();
+    void revealInEditorWindow({
+      task_id: task.id,
+      host: task.host,
+      path: "",
+      line: null,
+      column: null,
+      kind: "changes",
+    }).then((delivered) => {
+      if (delivered) return;
+      if (selectedRef.current?.id !== task.id || selectedRef.current.host !== task.host) return;
+      openChangesLens();
+    });
+  }, [editorWindow.poppedOut, openChangesLens, revealInEditorWindow]);
+
   /** 나가 있으면 그 창을 앞으로, 아니면 빼낸다 — 되돌리기는 그 창을 닫는 쪽이 담당한다. */
   const togglePopOut = useCallback(() => {
     if (!editorWindow.poppedOut) return void editorWindow.popOut();
@@ -2082,7 +2122,7 @@ function App() {
       throw new Error(message);
     }
     openTask(task);
-    window.setTimeout(openChangesLens, 0);
+    window.setTimeout(showChangesList, 0);
   };
   popupNotificationRef.current = (payload) => {
     void (async () => {
@@ -2127,6 +2167,21 @@ function App() {
       setErr(String(e));
     } finally {
       await refresh();
+    }
+  };
+
+  const changeTaskArchive = async (task: Task, archived: boolean): Promise<void> => {
+    if (task.host !== LOCAL_HOST || task.stale) {
+      setErr("연결된 로컬 작업만 보관하거나 복귀할 수 있습니다.");
+      return;
+    }
+    try {
+      if (archived) await taskArchive(task.id);
+      else await taskRestore(task.id);
+      refreshAppliedAtRef.current = performance.now();
+      await refresh();
+    } catch (error) {
+      setErr(String(error));
     }
   };
 
@@ -3032,6 +3087,50 @@ function App() {
     />
   );
 
+  /** 이 작업에 하단 컴포저가 서는가. 토론 중에는 분할 뷰가 자기 컴포저를 갖고, 로컬 터미널 세션은
+   *  xterm이 곧 입력창이다. 에이전트·모델 손잡이가 컴포저 줄과 헤더 중 어디에 설지도 이것이 정한다. */
+  const composerShownFor = (task: Task): boolean =>
+    debateSeats == null && !(task.mode === "terminal" && !task.ensemble && getTransport(task.host).kind === "local");
+
+  /** 에이전트·모델·속도 손잡이. 컴포저가 있으면 그 아래 줄(위로 열림), 없으면 헤더(아래로 열림)에 한 번만 선다. */
+  const renderModelSwitch = (task: Task, placement: "up" | "down") => (
+    // 모델 교체는 원격에서도 된다 — 호출이 `TaskRef`로 transport를 타므로 원격 3번이 로컬 3번을
+    // 고치던 좌표 혼동이 구조적으로 없다. 에이전트 전환·토론만 로컬 전용이고, 판정은 컴포넌트가 능력 표로 한다.
+    <SessionModelSwitch
+      inDebate={debateSeats != null}
+      key={taskKey(task)}
+      task={task}
+      placement={placement}
+      contextTokens={contextTokens}
+      observedModel={modelSnapshot.resolved}
+      // 응답 행은 명령이 돈 시점의 상태를 싣는다 — 그 사이 온 `task://state` 전이를
+      // 되돌리지 않도록 상태 필드는 화면의 것을 지킨다(후속 전이는 이벤트가 다시 패치한다).
+      onServiceTierChanged={(updated) => setTasks((prev) => prev.map((t) =>
+        t.host === task.host && t.id === task.id
+          ? { ...updated, host: t.host, state: t.state, awaiting_kind: t.awaiting_kind, archive: t.archive }
+          : t,
+      ))}
+      onDebateStarted={refreshDebateSide}
+      onChanged={(nextModel, updatedTask) => {
+        setTasks((prev) =>
+          prev.map((t) =>
+            t.host === task.host && t.id === task.id
+              ? updatedTask
+                ? { ...updatedTask, host: t.host, state: t.state, awaiting_kind: t.awaiting_kind, archive: t.archive }
+                : { ...t, model: nextModel, service_tier: t.service_tier != null && (t.model ?? "") !== nextModel ? "default" : t.service_tier }
+              : t,
+          ),
+        );
+        // 관측은 직전 턴의 것이라 전환과 함께 낡는다. 지우지 않으면 게이지가 옛
+        // 모델의 윈도로 잔량을 계산하고, 칩이 바뀐 적 없다는 듯 옛 모델을 계속 건다.
+        if (selectedRef.current?.host === task.host && selectedRef.current.id === task.id) {
+          setModelSnapshot(EMPTY_MODEL_SNAPSHOT);
+          setContextObservation(MODEL_CHANGE_INVALIDATION);
+        }
+      }}
+    />
+  );
+
   return (
     <HostScopeProvider value={scopedHost}>
     <div className="flex h-screen bg-bg text-text font-ui text-[length:var(--font-ui-size)]">
@@ -3056,6 +3155,8 @@ function App() {
         }}
         onDeleteTask={removal.schedule}
         onMergeTask={(task) => void mergeTask(task)}
+        onArchiveTask={(task) => void changeTaskArchive(task, true)}
+        onRestoreTask={(task) => void changeTaskArchive(task, false)}
         onRemoveProject={removeProject}
         groups={projectGroups}
         onProjectGroupsChange={changeProjectGroups}
@@ -3096,7 +3197,17 @@ function App() {
           </div>
         )}
         {view === "workspace" && selectedHost === LOCAL_HOST && selectedId != null && resultTask === selectedId && (
-          <TaskResultPanel key={selectedId} taskId={selectedId} onClose={closeResult} onOpenFile={(path) => { void openFile(path); }} onChanges={() => { setResultTask(null); openChangesLens(); }} />
+          <TaskResultPanel key={selectedId} taskId={selectedId} onClose={closeResult} onOpenFile={(path) => { void openFile(path); }} onChanges={() => { setResultTask(null); showChangesList(); }}
+            onAttachInput={selected?.mode === "conversation" && debateSeats == null ? (text) => {
+              if (!selectedRef.current || taskKey(selectedRef.current) !== selectedKey) return;
+              try {
+                setAgentInput(appendSpecReference(agentInput, text));
+                setResultTask(null);
+                setCenterTab("conversation");
+                if (splitMode === "tabs") showCode(false);
+                requestAnimationFrame(() => requestComposerFocus(selectedId));
+              } catch (error) { setErr(String(error)); }
+            } : undefined} />
         )}
         {conflictTask != null && (
           <ConflictResolver
@@ -3112,7 +3223,18 @@ function App() {
           />
         )}
 
-        {view === "insights" ? (
+        {view === "assistant" ? (
+          <AssistantView
+            onOpenSettings={() => {
+              setSettingsTab("connection");
+              setView("settings");
+            }}
+            onOpenTask={(ref) => {
+              const found = visibleTasks.find((t) => t.host === ref.host && t.id === ref.id);
+              if (found) openTask(found);
+            }}
+          />
+        ) : view === "insights" ? (
           <InsightsView
             onOpenHome={goHome}
             tasks={visibleTasks}
@@ -3163,19 +3285,19 @@ function App() {
             >
               {/* 상단바: 제목 + 상태 + 우측 액션 (이미지 chrome) */}
               <header className="h-11 border-b border-border flex items-center gap-2 px-3 shrink-0">
-                <button className="text-text-secondary hover:text-text shrink-0" onClick={goHome} title="홈" aria-label="홈">
+                <IconButton label="홈" onClick={goHome}>
                   <Icon name="home" size={16} />
-                </button>
+                </IconButton>
                 {/* 프로젝트·에이전트 칩은 여기 없다 — 둘 다 이 화면 안 다른 곳이 이미 말한다
                     (프로젝트는 사이드바 그룹 머리와 트리 열 머리, 에이전트는 사이드바 작업 배지와
                     바로 오른쪽 전환 칩). 같은 말을 세 번 하느라 정작 한 줄뿐인 제목이 34%에서
                     잘리고 있었다 — 그 폭을 제목에 돌려준다. */}
-                <span className="font-medium truncate max-w-[60%]" title={selected.instruction}>
+                {/* 상태는 모양이 다른 마크 + 문구를 묶은 Badge로 적는다 — "●"는 색으로만 갈렸다(DESIGN.md Do #2).
+                    에이전트·모델 피커가 컴포저 줄로 내려가 제목이 남는 폭을 다 쓴다(2026-11-09). */}
+                <span className="text-md font-medium truncate min-w-0" title={selected.instruction}>
                   {selected.instruction || selected.branch}
                 </span>
-                <span className={`text-xs shrink-0 ${stateTextFor(selected)}`}>
-                  ● {taskStatusLabel(selected)}
-                </span>
+                <Badge tone={taskTone(selected)}>{taskStatusLabel(selected)}</Badge>
                 {/* 손잡이 줄은 세션의 것이다 — 채널이 떠 있으면 그 예약선까지만 오고, 창 끝에 붙어
                     채널의 머리처럼 읽히지 않는다.
                     `shrink-0`: 폭이 모자랄 때 물러서는 쪽은 손잡이가 아니라 제목이다. 없으면
@@ -3188,54 +3310,22 @@ function App() {
                       : undefined
                   }
                 >
-                  {/* 모델 교체는 이제 원격에서도 된다 — 호출이 `TaskRef`로 transport를 타므로
-                      원격 3번이 로컬 3번을 고치던 좌표 혼동이 구조적으로 없다. 이 줄의 손잡이 중
-                      에이전트 전환·토론만 로컬 전용이고, 그 판정은 컴포넌트가 능력 표로 한다. */}
-                  <SessionModelSwitch
-                    inDebate={debateSeats != null}
-                    key={selected.id}
-                    task={selected}
-                    contextTokens={contextTokens}
-                    observedModel={modelSnapshot.resolved}
-                    // 응답 행은 명령이 돈 시점의 상태를 싣는다 — 그 사이 온 `task://state` 전이를
-                    // 되돌리지 않도록 상태 필드는 화면의 것을 지킨다(후속 전이는 이벤트가 다시 패치한다).
-                    onServiceTierChanged={(updated) => setTasks((prev) => prev.map((task) =>
-                      task.host === selected.host && task.id === selected.id
-                        ? { ...updated, host: task.host, state: task.state, awaiting_kind: task.awaiting_kind }
-                        : task,
-                    ))}
-                    onDebateStarted={refreshDebateSide}
-                    onChanged={(nextModel, updatedTask) => {
-                      setTasks((prev) =>
-                        prev.map((t) =>
-                          t.host === selected.host && t.id === selected.id
-                            ? updatedTask
-                              ? { ...updatedTask, host: t.host, state: t.state, awaiting_kind: t.awaiting_kind }
-                              : { ...t, model: nextModel, service_tier: t.service_tier != null && (t.model ?? "") !== nextModel ? "default" : t.service_tier }
-                            : t,
-                        ),
-                      );
-                      // 관측은 직전 턴의 것이라 전환과 함께 낡는다. 지우지 않으면 게이지가 옛
-                      // 모델의 윈도로 잔량을 계산하고, 칩이 바뀐 적 없다는 듯 옛 모델을 계속 건다.
-                      if (selectedRef.current?.host === selected.host && selectedRef.current.id === selected.id) {
-                        setModelSnapshot(EMPTY_MODEL_SNAPSHOT);
-                        setContextObservation(MODEL_CHANGE_INVALIDATION);
-                      }
-                    }}
-                  />
+                  {/* 에이전트·모델 손잡이는 컴포저 줄에 산다 — 컴포저가 없는 세션(로컬 터미널·토론)만 여기 남는다. */}
+                  {!composerShownFor(selected) && renderModelSwitch(selected, "down")}
                   {/* 코드 열·터미널의 손잡이 줄 — 목적지마다 버튼을 준다(ADR 0112, 트리 칩은 ADR 0188에서 제거). */}
                   <ChangedFileCount>
                     {(diffCount) => <WorkspacePaneButtons
                     open={codeOpen}
                     active={codeTab}
                     // 변경 칩은 트리 열 렌즈의 손잡이다. 눌린 채 누르면 트리를 닫는다 — 파일 칩이
-                    // 코드 열을 닫듯, 보고 있던 면을 다시 누르면 접힌다.
+                    // 코드 열을 닫듯, 보고 있던 면을 다시 누르면 접힌다. 에디터가 나가 있으면
+                    // 목록은 그 창에 서므로 이 창에서는 눌린 상태가 없고, 누를 때마다 그 창으로 보낸다.
                     changes={{
-                      on: showTree && treeLens === "changes",
+                      on: !editorWindow.poppedOut && showTree && treeLens === "changes",
                       count: diffCount,
                       onToggle: () => {
-                        if (showTree && treeLens === "changes") setShowTree(false);
-                        else openChangesLens();
+                        if (!editorWindow.poppedOut && showTree && treeLens === "changes") setShowTree(false);
+                        else showChangesList();
                       },
                     }}
                     previewAvailable={advancedFeatures && selectedCaps.designPreview}
@@ -3313,10 +3403,12 @@ function App() {
                           </button>
                         ))}
                       </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center gap-0.5 shrink-0">
                         {treeLens === "files" && (<>
-                        <button
-                          className={previewTabs ? "text-primary-bright" : "text-text-secondary hover:text-text"}
+                        <IconButton
+                          size="sm"
+                          pressed={previewTabs}
+                          label="미리보기 탭"
                           onClick={() => {
                             const next = !previewTabs;
                             setPreviewTabsEnabled(next);
@@ -3330,39 +3422,27 @@ function App() {
                               ? "미리보기 탭 켬 — 한 번 클릭한 파일은 탭 하나를 돌려 씁니다 (더블클릭하면 고정)"
                               : "미리보기 탭 끔 — 클릭할 때마다 탭이 새로 열립니다"
                           }
-                          aria-label="미리보기 탭"
-                          aria-pressed={previewTabs}
                         >
                           <Icon name="file" size={14} />
-                        </button>
-                        <button
-                          className={showHidden ? "text-primary-bright" : "text-text-secondary hover:text-text"}
-                          onClick={() => setShowHidden((v) => !v)}
+                        </IconButton>
+                        <IconButton
+                          size="sm"
+                          pressed={showHidden}
+                          label="숨김 항목"
                           title={showHidden ? "숨김 항목 감추기" : "숨김 항목 보기 (.*)"}
-                          aria-label="숨김 항목"
-                          aria-pressed={showHidden}
+                          onClick={() => setShowHidden((v) => !v)}
                         >
                           <Icon name={showHidden ? "eye" : "eyeOff"} size={14} />
-                        </button>
-                        <button
-                          className="text-text-secondary hover:text-text"
-                          onClick={refreshTree}
-                          title="트리 새로고침"
-                          aria-label="새로고침"
-                        >
+                        </IconButton>
+                        <IconButton size="sm" label="새로고침" title="트리 새로고침" onClick={refreshTree}>
                           <Icon name="refresh" size={14} />
-                        </button>
+                        </IconButton>
                         </>)}
                         {/* 소환된 면은 자기 위에 닫기를 갖는다(Do #11). 헤더의 폴더 칩과
                             ⌘B는 보조 경로다 — 트리를 보고 있는 손은 트리 곁에 있다. */}
-                        <button
-                          className="text-text-secondary hover:text-text"
-                          onClick={() => setShowTree(false)}
-                          title="트리 닫기 (⌘B)"
-                          aria-label="파일 트리 닫기"
-                        >
+                        <IconButton size="sm" label="파일 트리 닫기" title="트리 닫기 (⌘B)" onClick={() => setShowTree(false)}>
                           <Icon name="x" size={14} />
-                        </button>
+                        </IconButton>
                       </div>
                     </div>
                     {treeLens === "changes" ? (
@@ -3416,7 +3496,7 @@ function App() {
                                   onClick={() => setCenterTab(`sub:${tid}`)}
                                   title={title}
                                 >
-                                  ⑂ {title}
+                                  <span className="inline-flex items-center gap-1"><Icon name="branch" size={12} />{title}</span>
                                 </button>
                                 <button
                                   className="px-0.5 text-text-muted hover:text-text"
@@ -3424,7 +3504,7 @@ function App() {
                                   title="서브 에이전트 탭 닫기"
                                   aria-label="서브 에이전트 탭 닫기"
                                 >
-                                  <Icon name="x" size={11} />
+                                  <Icon name="x" size={12} />
                                 </button>
                               </span>
                             );
@@ -3508,7 +3588,7 @@ function App() {
                       {channelProps != null &&
                         channelHandleVisible({ centerWidth, pinned: channelPinned, codeOpen, sessionMin }) && (
                           <button
-                            className="absolute top-4 right-4 z-30 rounded-md border border-border-strong bg-raised p-1.5 text-text-secondary shadow-[0_4px_12px_rgba(0,0,0,0.5)] hover:text-text"
+                            className="absolute top-4 right-4 z-30 rounded-md border border-border-strong bg-raised p-1.5 text-text-secondary shadow-e2 hover:text-text"
                             onClick={() => setChannelPinned(true)}
                             title={channelHandleLabel(knowCards.unread)}
                             aria-label={channelHandleLabel(knowCards.unread)}
@@ -3517,7 +3597,7 @@ function App() {
                             {knowCards.unread > 0 && (
                               <span
                                 aria-hidden
-                                className="absolute -top-1.5 -right-1.5 h-4 min-w-4 rounded-full bg-primary px-1 text-center text-[10px] font-medium leading-4 text-bg tabular-nums"
+                                className="absolute -top-1.5 -right-1.5 h-4 min-w-4 rounded-full bg-primary px-1 text-center text-[11px] font-medium leading-4 text-bg tabular-nums"
                               >
                                 {knowCards.unread}
                               </span>
@@ -3537,7 +3617,7 @@ function App() {
                   창이 아주 좁아 줄바꿈이 나기 전까지 항상 한 줄이다. */}
               {selected.mode === "conversation" && selected.state === "AwaitingReview" && (
                 <div className="border-t border-border bg-raised px-3 py-2 shrink-0 flex flex-wrap items-center gap-2 text-sm">
-                  <span className={stateTextFor(selected)}>●</span>
+                  <TaskStatusIcon tone={taskTone(selected)} label={taskStatusLabel(selected)} />
                   <span className="min-w-0 flex-1 truncate text-text-secondary" title={reviewBarMessage(taskTone(selected), selectedIsDirect)}>
                     {reviewBarMessage(taskTone(selected), selectedIsDirect)}
                   </span>
@@ -3565,7 +3645,7 @@ function App() {
                     <TaskVendorReview repo={selected.repo} taskId={selected.id} host={selected.host} />
                     <button
                       className="h-7 px-2.5 rounded text-text-secondary hover:text-text"
-                      onClick={openChangesLens}
+                      onClick={showChangesList}
                     >
                       변경 보기
                     </button>
@@ -3598,7 +3678,7 @@ function App() {
                   (task_resume). 리뷰 바와 자리가 겹치지 않는다 — 저쪽은 AwaitingReview 전용. */}
               {selected.mode === "conversation" && isTerminalState(selected.state) && (
                 <div className="border-t border-border bg-raised px-3 py-2 shrink-0 flex items-center gap-2 text-sm">
-                  <span className={stateTextFor(selected)}>●</span>
+                  <TaskStatusIcon tone={taskTone(selected)} label={taskStatusLabel(selected)} />
                   <span className="min-w-0 flex-1 text-text-secondary">
                     {getTransport(selectedHost).kind === "remote"
                       ? "끝난 대화입니다 — 원격 세션은 대화 이어받기를 지원하지 않습니다."
@@ -3611,10 +3691,9 @@ function App() {
                   토론 중에는 분할 뷰가 자기 컴포저를 갖는다 — 둘을 함께 두지 않는다.
                   터미널 세션도 두지 않는다 — xterm이 곧 입력창이라 CLI 입력창과 둘로 보인다.
                   원격·앙상블 PTY는 xterm이 입력을 받지 않으므로 컴포저가 유일한 입력 경로로 남는다. */}
-              {debateSeats == null &&
-                !(selected.mode === "terminal" && !selected.ensemble && getTransport(selectedHost).kind === "local") && (
+              {composerShownFor(selected) && (
                 <footer
-                  className="border-t border-border px-3 py-2 shrink-0"
+                  className="px-3 pt-1 pb-3 shrink-0"
                   hidden={codeOpen && codeTab === "question" && splitMode === "tabs"}
                   inert={codeOpen && codeTab === "question" && splitMode === "tabs"}
                 >
@@ -3654,6 +3733,7 @@ function App() {
                     repo={selected.repo}
                     taskId={selected.id}
                     draftKey={selectedKey}
+                    toolbar={renderModelSwitch(selected, "up")}
                     active={!(codeOpen && codeTab === "question" && splitMode === "tabs")}
                     gauge={
                       <>
@@ -3715,16 +3795,12 @@ function App() {
 
             {/* Diff Stat 플로팅 패널 (⋮ 메뉴) */}
             {diffStat !== null && (
-              <div className="absolute right-4 bottom-20 z-30 w-96 max-h-64 overflow-auto rounded-lg border border-border-strong bg-raised shadow-xl p-3">
+              <div className="absolute right-4 bottom-20 z-30 w-96 max-h-64 overflow-auto rounded-lg border border-border-strong bg-raised shadow-e2 p-3">
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-xs uppercase tracking-wide text-text-muted">Diff Stat</span>
-                  <button
-                    className="text-text-muted hover:text-text"
-                    onClick={() => setDiffStat(null)}
-                    aria-label="닫기"
-                  >
+                  <IconButton size="sm" label="닫기" onClick={() => setDiffStat(null)}>
                     <Icon name="x" size={14} />
-                  </button>
+                  </IconButton>
                 </div>
                 <pre className="text-xs font-code text-text-secondary whitespace-pre-wrap">
                   {diffStat.trim() || "(변경 없음)"}
@@ -3736,7 +3812,7 @@ function App() {
         ) : (
           // 홈: 대시보드 + 하단 컴포저
           <>
-            <HomeView tasks={visibleTasks} onOpenTask={openTask} onOpenEnsemble={openEnsemble} onRefresh={refresh} onOpenProject={editorWindow.openProject} />
+            <HomeView tasks={visibleTasks.filter((task) => !task.archive)} onArchiveTask={(task) => void changeTaskArchive(task, true)} onOpenTask={openTask} onOpenEnsemble={openEnsemble} onRefresh={refresh} onOpenProject={editorWindow.openProject} />
             <Composer
               host={composerHost}
               setHost={switchComposerHost}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { todayAdd, todayList, todayMove, todayRemove } from "../../lib/ipc";
 import { BACKLOG, repoBadge, showRepoBadges, sortItems, staleDays, type DayItem } from "./today-items";
+import { Icon } from "./icons";
 
 /**
  * IPC 경계를 주입 가능하게 열어 둔다 — `TodaySection`과 같은 규약.
@@ -155,11 +156,11 @@ export function BacklogSection({ repo, nowMs, api = defaultApi }: Props) {
                   <button
                     type="button"
                     aria-label={`${item.title} 삭제`}
-                    className="shrink-0 text-xs text-text-muted hover:text-status-failed"
+                    className="inline-flex shrink-0 items-center text-text-muted hover:text-status-failed"
                     disabled={busy}
                     onClick={() => void run(() => api.remove(item.id))}
                   >
-                    ×
+                    <Icon name="x" size={12} />
                   </button>
                 </div>
               );

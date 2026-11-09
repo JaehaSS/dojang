@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactElement, type ReactNode } from "react";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 
 export type CodeTab = "activity" | "file" | "preview" | "design" | "question";
 
@@ -125,14 +126,9 @@ export function CodeColumnTabs({
         </div>
         {onClose && (
           <div className="shrink-0 border-l border-border px-1 py-1">
-            <button
-              className="rounded p-1 text-text-secondary hover:bg-raised hover:text-text"
-              onClick={onClose}
-              title="코드 열 닫기 (⌥⌘S)"
-              aria-label="코드 열 닫기"
-            >
+            <IconButton size="sm" label="코드 열 닫기" title="코드 열 닫기 (⌥⌘S)" onClick={onClose}>
               <Icon name="x" size={14} />
-            </button>
+            </IconButton>
           </div>
         )}
       </div>

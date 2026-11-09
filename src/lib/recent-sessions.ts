@@ -1,4 +1,5 @@
 import type { Task } from "./ipc";
+import { isTaskArchived } from "./task-archive";
 
 /**
  * 목록에서 감추는 종료 상태. 사이드바 트리(`SessionTaskNavigation`)와 최근 세션이 같은 집합을
@@ -24,7 +25,7 @@ export function recentSessions(
   windowSec = RECENT_SESSION_WINDOW_SEC,
 ): Task[] {
   return tasks
-    .filter((task) => !HIDDEN_STATES.has(task.state) && nowSec - task.updated_at <= windowSec)
+    .filter((task) => !isTaskArchived(task) && !HIDDEN_STATES.has(task.state) && nowSec - task.updated_at <= windowSec)
     // 같은 시각이면 id 내림차순 — 목록 갱신마다 순서가 흔들리지 않게 전순서로 못 박는다.
     .sort((left, right) => right.updated_at - left.updated_at || right.id - left.id);
 }

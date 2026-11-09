@@ -16,6 +16,7 @@ import {
 } from "../../lib/ipc";
 import { taskStatusLabel, taskTextClass } from "../../lib/task-status";
 import { ChannelCard } from "./ChannelCard";
+import { Icon } from "./icons";
 import {
   BACKLOG,
   carriedLabel,
@@ -403,11 +404,11 @@ export function TodaySection({
               <button
                 type="button"
                 aria-label={`${item.title} 삭제`}
-                className="text-xs text-text-muted hover:text-status-failed"
+                className="inline-flex items-center text-text-muted hover:text-status-failed"
                 disabled={busy}
                 onClick={() => void run(() => api.remove(item.id))}
               >
-                ×
+                <Icon name="x" size={12} />
               </button>
             </div>
           );

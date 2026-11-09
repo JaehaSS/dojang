@@ -37,7 +37,7 @@ export function RemovalUndoBar({ pending, onUndo }: RemovalUndoBarProps) {
     <div
       role="status"
       aria-live="polite"
-      className="fixed bottom-6 left-1/2 z-50 flex max-w-[min(560px,calc(100vw-3rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-border-strong bg-raised px-3 py-2 text-xs shadow-xl"
+      className="fixed bottom-6 left-1/2 z-50 flex max-w-[min(560px,calc(100vw-3rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-border-strong bg-raised px-3 py-2 text-xs shadow-e2"
     >
       <span className="min-w-0 flex-1">
         <span className="block truncate text-text">

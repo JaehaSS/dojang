@@ -82,4 +82,14 @@ describe("HomeView", () => {
     expect(html).not.toContain("버린 비교");
     expect(html).toContain("표시할 작업이 없습니다. 아래 입력창에서 새 작업을 시작하세요.");
   });
+  it.each(["Done", "Failed", "Discarded"])("%s 종료 이력에도 기록 열기와 별도 보관 진입점을 보인다", (state) => {
+    const html = renderToStaticMarkup(<HomeView
+      tasks={[{ ...task, instruction: "완료 기록", state }]}
+      onOpenTask={() => {}} onOpenEnsemble={() => {}} onRefresh={() => {}} onArchiveTask={() => {}}
+    />);
+    expect(html).toContain("종료 작업 보관 (1)");
+    expect(html).toContain("완료 기록 보관");
+    expect(html).toContain("기록·폴더·브랜치를 유지합니다");
+  });
+
 });

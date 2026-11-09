@@ -38,6 +38,7 @@ async fn missing_or_wrong_token_and_untrusted_peer_are_rejected() {
             max_concurrent_tasks: 2,
             execution_policy: praxis_lib::runner::config::ExecutionPolicy::AlwaysApprove,
             pairing_token_file: token_path.clone().into(),
+            ..Default::default()
         },
         recovered_tasks: 0,
         events: EventHub::start(pool.clone()),

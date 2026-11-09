@@ -14,6 +14,9 @@ import {
 import { orderSections, visibleProjectRepos } from "../../lib/project-group-tree";
 import { taskKey } from "../../lib/transport";
 import { HIDDEN_STATES } from "../../lib/recent-sessions";
+import { isTaskArchived } from "../../lib/task-archive";
+import { attentionRank } from "../../lib/task-status";
+import { TaskArchiveList } from "./TaskArchiveList";
 import { RecentSessions } from "./RecentSessions";
 import { SessionTaskProject } from "./SessionTaskProject";
 import { SessionTaskSections, type RenamingGroup } from "./SessionTaskSections";
@@ -35,6 +38,10 @@ export interface SessionTaskNavigationProps {
   onDeleteTask: (task: Task) => void;
   /** 우클릭 메뉴의 "<base>에 머지" — 검토 대기 워크트리 작업에만 나타난다. */
   onMergeTask?: (task: Task) => void;
+  /** 로컬 종료 작업을 기록·워크트리를 유지한 채 보관한다. */
+  onArchiveTask?: (task: Task) => void;
+  /** 보관 목록에서 다시 활성 목록으로 돌린다. 워크트리는 다시 만들지 않는다. */
+  onRestoreTask?: (task: Task) => void;
   onRemoveProject: (repo: string) => void;
   /** 워크트리가 사라진 작업 일괄 종결 — 배너는 그런 작업이 있을 때만 나타난다. */
   onDiscardOrphans: () => void;
@@ -93,13 +100,20 @@ export function SessionTaskNavigation(props: SessionTaskNavigationProps) {
     (notifications.snapshot?.items ?? []).map((item) => [taskKey({ host: item.host, id: item.task_id }), item.kind]),
   );
   const questionTasks = props.questionTasks ?? NO_QUESTIONS;
-  const activeTasks = props.tasks.filter(
-    (task) => !HIDDEN_STATES.has(task.state)
-      && (ACTIVE_STATES.includes(task.state) || task.stale || unread.has(taskKey(task))),
-  );
+  // 사람을 기다리는 작업이 프로젝트 안에서 위로 온다 — 답변 대기 → 검토·실패 → 실행·대기열.
+  // 렌더와 ⌘번호가 모두 이 배열에서 나오므로 ⌘1은 늘 가장 급한 작업이다. `sort`는 안정 정렬이라
+  // 같은 순위 안의 순서는 그대로다.
+  const activeTasks = props.tasks
+    .filter(
+      (task) => !isTaskArchived(task)
+        && !HIDDEN_STATES.has(task.state)
+        && (ACTIVE_STATES.includes(task.state) || task.stale || unread.has(taskKey(task))),
+    )
+    .sort((left, right) =>
+      attentionRank(left, questionTasks.has(taskKey(left))) - attentionRank(right, questionTasks.has(taskKey(right))));
   const queuedPosition = new Map(
     props.tasks
-      .filter((task) => task.state === "Queued")
+      .filter((task) => !isTaskArchived(task) && task.state === "Queued")
       .sort((left, right) => left.created_at - right.created_at || left.id - right.id)
       .map((task, index) => [task.id, index + 1]),
   );
@@ -113,7 +127,7 @@ export function SessionTaskNavigation(props: SessionTaskNavigationProps) {
   const emit = props.onProjectGroupsChange ?? NO_GROUP_CHANGE;
   const [renaming, setRenaming] = useState<RenamingGroup>(null);
   const drag = useProjectGroupDrag(groups, emit);
-  const sections = orderSections(props.projects, props.tasks, groups);
+  const sections = orderSections(props.projects, props.tasks.filter((task) => !isTaskArchived(task)), groups);
   const grouped = sections.filter((section) => section.group !== null);
   const unassigned = sections[sections.length - 1]?.repos ?? [];
   // 번호는 화면에 보이는 카드에만 붙인다 — 접힌 그룹·프로젝트의 작업까지 세면 목록에 2, 5, 7처럼
@@ -242,12 +256,21 @@ export function SessionTaskNavigation(props: SessionTaskNavigationProps) {
             renderProject={renderProject}
           />
         </div>
+        <TaskArchiveList
+          tasks={props.tasks}
+          selectedKey={props.selectedKey}
+          onOpenTask={props.onOpenTask}
+          onRestoreTask={props.onRestoreTask}
+          onOpenMenu={setMenu}
+        />
         <TaskNavigationMenu
           menu={menu}
           activeTasks={activeTasks}
           onClose={closeMenu}
           onDeleteTask={props.onDeleteTask}
           onMergeTask={props.onMergeTask}
+          onArchiveTask={props.onArchiveTask}
+          onRestoreTask={props.onRestoreTask}
           onRemoveProject={props.onRemoveProject}
           groups={groups.groups}
           groupOf={(repo) => {

@@ -10,6 +10,7 @@ import {
 } from "../../lib/ipc";
 import { summarizePatch } from "../../lib/diff";
 import { SplitDiff } from "../DiffPresentation";
+import { Icon } from "./icons";
 
 /** 좌우 라벨 — 역방향 머지라 ours가 작업, theirs가 base다. 헷갈리기 쉬워 한 곳에 둔다. */
 const OURS_LABEL = "내 작업 (ours)";
@@ -145,9 +146,9 @@ export function ConflictResolver({ taskId, onClose }: Props): ReactElement {
                   : "border-border text-text-secondary hover:bg-surface"
               }`}
             >
-              <span className={pending ? "text-status-failed" : "text-status-done"}>
-                {pending ? "●" : "✓"}
-              </span>{" "}
+              <span className={`mr-1 inline-flex align-[-2px] ${pending ? "text-status-failed" : "text-status-done"}`}>
+                <Icon name={pending ? "alert" : "check"} size={12} />
+              </span>
               {file.path}
             </button>
           );

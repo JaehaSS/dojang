@@ -1,5 +1,7 @@
 import type { SubagentEntry } from "../../lib/activity";
 import { ConversationView, type ConvoItem } from "./ConversationView";
+import { TaskStatusIcon } from "./TaskStatusIcon";
+import type { StatusTone } from "../../lib/task-status";
 
 interface Props {
   /** 이 서브 에이전트의 파생 상태 — 이력에서 스폰 카드가 사라진 경우 null(제목만 폴백). */
@@ -14,16 +16,16 @@ interface Props {
   conversationId?: string;
 }
 
-const headerStatus = (entry: SubagentEntry | null, parentBusy: boolean) => {
-  if (!entry) return { mark: "●", color: "text-text-muted", label: "기록된 서브 에이전트" };
-  if (entry.state === "failed") return { mark: "×", color: "text-status-failed", label: "실패" };
-  if (entry.state === "done") return { mark: "✓", color: "text-status-done", label: "완료" };
-  if (entry.state === "stopped") return { mark: "○", color: "text-status-awaiting", label: "중단됨" };
-  if (entry.state === "unknown") return { mark: "?", color: "text-text-muted", label: "완료 확인 불가" };
-  if (entry.vendor === "codex") return { mark: "→", color: "text-primary-bright", label: "작업 중" };
+const headerStatus = (entry: SubagentEntry | null, parentBusy: boolean): { tone: StatusTone; color: string; label: string } => {
+  if (!entry) return { tone: "muted", color: "text-text-muted", label: "기록된 서브 에이전트" };
+  if (entry.state === "failed") return { tone: "failed", color: "text-status-failed", label: "실패" };
+  if (entry.state === "done") return { tone: "done", color: "text-status-done", label: "완료" };
+  if (entry.state === "stopped") return { tone: "awaiting", color: "text-status-awaiting", label: "중단됨" };
+  if (entry.state === "unknown") return { tone: "muted", color: "text-text-muted", label: "완료 확인 불가" };
+  if (entry.vendor === "codex") return { tone: "running", color: "text-primary-bright", label: "작업 중" };
   if (!parentBusy)
-    return { mark: "○", color: "text-status-awaiting", label: "미완료 — 턴 종료로 중단됨" };
-  return { mark: "→", color: "text-primary-bright", label: "작업 중" };
+    return { tone: "awaiting", color: "text-status-awaiting", label: "미완료 — 턴 종료로 중단됨" };
+  return { tone: "running", color: "text-primary-bright", label: "작업 중" };
 };
 
 /** 서브 에이전트 전용 탭 — 헤더(이름·상태) + 해당 서브의 트랜스크립트(ConversationView 재사용).
@@ -43,7 +45,7 @@ export function SubagentView({
   return (
     <div className="flex flex-1 min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-border bg-bg px-4 py-2 text-sm">
-        <span className={st.color}>{st.mark}</span>
+        <span className={`inline-flex ${st.color}`}><TaskStatusIcon tone={st.tone} label="" size={12} decorative /></span>
         <span className="text-text truncate">{entry?.title ?? "서브 에이전트"}</span>
         <span className="ml-auto shrink-0 text-xs text-text-muted">{st.label}</span>
       </div>

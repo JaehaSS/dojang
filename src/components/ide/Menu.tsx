@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 
 export interface MenuItem {
   label: string;
@@ -23,18 +24,11 @@ export function Menu({ items, label = "더보기" }: { items: MenuItem[]; label?
 
   return (
     <div className="relative" ref={ref}>
-      <button
-        className={`rounded p-1 ${
-          open ? "bg-primary/10 text-primary-bright" : "text-text-secondary hover:text-text"
-        }`}
-        onClick={() => setOpen((v) => !v)}
-        aria-label={label}
-        title={label}
-      >
-        <Icon name="more" size={18} />
-      </button>
+      <IconButton label={label} expanded={open} aria-haspopup="menu" onClick={() => setOpen((v) => !v)}>
+        <Icon name="more" size={16} />
+      </IconButton>
       {open && (
-        <div className="absolute top-full right-0 mt-1 z-20 w-40 rounded-lg border border-border-strong bg-raised py-1 shadow-xl">
+        <div className="absolute top-full right-0 mt-1 z-20 w-40 rounded-lg border border-border-strong bg-raised py-1 shadow-e2">
           {items.map((it) => (
             <button
               key={it.label}

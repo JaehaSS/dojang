@@ -138,13 +138,13 @@ export function BranchPicker({
               : `'${selected}'에서 시작해 승인 시 '${selected}'에 머지합니다`
         }
       >
-        <Icon name="branch" size={13} />
+        <Icon name="branch" size={14} />
         <span className="max-w-[160px] truncate">{selected || "브랜치"}</span>
         <Icon name="chevronDown" size={12} />
       </button>
 
       {openMenu && (
-        <div className="absolute bottom-full left-0 mb-1 z-20 w-80 rounded-lg border border-border-strong bg-raised py-1 shadow-xl">
+        <div className="absolute bottom-full left-0 mb-1 z-20 w-80 rounded-lg border border-border-strong bg-raised py-1 shadow-e2">
           <div className="flex items-center justify-between gap-2 px-3 py-1">
             <span className="text-xs text-text-muted">
               시작할 브랜치

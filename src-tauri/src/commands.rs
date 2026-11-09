@@ -337,6 +337,16 @@ fn now() -> i64 {
 pub mod service_tier;
 mod side_question_slots;
 mod task_results;
+mod task_specs;
+mod task_archive;
+mod task_pr;
+pub use task_pr::*;
+mod task_observation;
+pub mod thinkrail_probe;
+pub use thinkrail_probe::*;
+pub use task_observation::*;
+pub use task_archive::*;
+pub use task_specs::*;
 mod project_plan;
 pub use project_plan::*;
 pub(crate) mod pipeline_driver;
@@ -344,6 +354,8 @@ mod pipeline;
 pub use pipeline::*;
 #[cfg(test)]
 mod task_removal_tests;
+#[cfg(test)]
+mod task_archive_tests;
 pub use task_results::*;
 
 mod quiz;
@@ -3866,6 +3878,9 @@ async fn start_convo_turn(
     let sent =
         crate::skills::resolve_message(&repo, vendor, &message).unwrap_or_else(|| message.clone());
     prompt_metrics.skill_added_bytes = crate::convo::prompt_metrics::added_bytes(&message, &sent);
+    // Freeze input references before purpose/goal composition; the single user_expanded event
+    // below records the same document bodies that the vendor receives.
+    let sent = crate::task_specs::expand_message(&pool, id, &sent).await?;
     let execution_round_id = crate::preview_bridge::random_hex_id()?;
     let purpose = crate::project_plan::prepare_purpose(&pool, id, &execution_round_id, now()).await.map_err(|e|e.to_string())?;
     let sent = purpose.as_ref().map(|p| crate::project_plan::render_purpose(p, &sent)).unwrap_or(sent);
@@ -4295,12 +4310,11 @@ async fn start_convo_turn(
                         let _ = db::set_convo_pgid(&p, id, Some(pid as i64)).await;
                     });
                     // 차례 사이의 중단과 spawn이 경합해도 새 프로세스를 계속 실행하지 않는다.
-                    if convo_interrupted(&active, id)
-                        || (structured && crate::convo::interaction_commands::ensure_generation(admission_generation).is_err())
+                    if (convo_interrupted(&active, id)
+                        || (structured && crate::convo::interaction_commands::ensure_generation(admission_generation).is_err()))
+                        && !crate::convo::app_server::cancel(id)
                     {
-                        if !crate::convo::app_server::cancel(id) {
-                            crate::verify::kill_group(pid);
-                        }
+                        crate::verify::kill_group(pid);
                     }
                 },
                 |ev| {
@@ -4761,6 +4775,8 @@ pub async fn side_question_send(
     let pool = pool_of(&state)?;
     let (turn_id, inserted) = crate::side_question::send(&pool, task_id, input, now()).await?;
     if inserted {
+        // 새 질문 admission의 DB 트리거가 보관 표지를 해제한다.
+        let _ = app.emit("task://archive-changed", task_id);
         let pool = pool.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -6880,6 +6896,14 @@ pub async fn agent_models_get(
     Ok(out)
 }
 
+/// 설치된 CLI가 제공하는 모델 후보. 기본 모델 설정과 사용 이력은 변경하지 않는다.
+#[tauri::command]
+pub async fn agent_available_models(
+    agent: String,
+) -> Result<Vec<crate::agent::model_catalog::ModelOption>, String> {
+    crate::agent::model_catalog::available_models(&agent).await
+}
+
 /// 에이전트(CLI 벤더)별 기본 모델 설정. agent는 프리셋 3종만 허용, model은 trim 후 저장
 /// (빈 값 저장 = 해제).
 #[tauri::command]
@@ -6958,7 +6982,7 @@ const AGENT_SWITCH_DIALOGUE_CHARS: usize = 6_000;
 const AGENT_SWITCH_LINE_CHARS: usize = 1_200;
 
 fn supports_convo_agent_switch(agent: &str) -> bool {
-    matches!(agent.trim(), "claude" | "codex" | "agy")
+    crate::task_observation::supports_agent_switch(agent)
 }
 
 fn recent_agent_switch_dialogue(events: Vec<String>) -> String {
@@ -7705,6 +7729,11 @@ pub(crate) async fn discard_task(
 ) -> Result<(), String> {
     let _review_claim = state.review_claims.claim_finalization(id)?;
     let pool = pool_of(state)?;
+    if matches!(disposal, BranchDisposal::Preserve)
+        && crate::task_archive::is_archived(&pool, id).await?
+    {
+        return Err("보관한 작업은 고아 일괄 정리에서 제외합니다".into());
+    }
     if decision::approval_journal::has_incomplete(&pool, id)
         .await
         .map_err(|error| error.to_string())?
@@ -8060,7 +8089,10 @@ pub struct OrphanFailure {
 pub async fn tasks_discard_orphans(state: State<'_, AppState>) -> Result<OrphanCleanup, String> {
     let pool = pool_of(&state)?;
     let tasks = db::list_tasks(&pool).await.map_err(|e| e.to_string())?;
-    let orphans: Vec<i64> = tasks.iter().filter(|t| is_orphan(t)).map(|t| t.id).collect();
+    let archives = crate::task_archive::list(&pool).await?;
+    let orphans: Vec<i64> = tasks.iter()
+        .filter(|t| !archives.contains_key(&t.id) && is_orphan(t))
+        .map(|t| t.id).collect();
     let mut retired = Vec::new();
     let mut failed = Vec::new();
     for id in orphans {
@@ -8076,10 +8108,22 @@ pub async fn tasks_discard_orphans(state: State<'_, AppState>) -> Result<OrphanC
 
 /// 전체 Task 이력 (대시보드는 비종료 상태를 카드로 표시).
 #[tauri::command]
-pub async fn task_list(state: State<'_, AppState>) -> Result<Vec<Task>, String> {
+pub async fn task_list(state: State<'_, AppState>) -> Result<Vec<TaskListEntry>, String> {
     let pool = pool_of(&state)?;
     let tasks = db::list_tasks(&pool).await.map_err(|e| e.to_string())?;
-    Ok(mark_missing_worktrees(tasks))
+    let mut archives = crate::task_archive::list(&pool).await?;
+    Ok(mark_missing_worktrees(tasks).into_iter().map(|task| {
+        let archive = archives.remove(&task.id);
+        TaskListEntry { task, archive }
+    }).collect())
+}
+
+/// 보관은 데스크톱 목록에만 붙인다. 실행 엔진의 Task·상태 계약은 유지한다.
+#[derive(Debug, Serialize)]
+pub struct TaskListEntry {
+    #[serde(flatten)]
+    pub task: Task,
+    pub archive: Option<crate::task_archive::Archive>,
 }
 
 /// 지금까지 관측된 실행 모델 (벤더별, 최근 사용순) — 모델 드롭다운의 하드코딩 카탈로그 보강용.
@@ -9723,6 +9767,40 @@ mod convo_admission_tests {
             },
             request.request_id,
         )
+    }
+
+    #[tokio::test]
+    async fn admission_keeps_spec_reference_and_exact_frozen_expansion() {
+        let (pool, task, database_path) = fixture().await;
+        let path = Path::new(&task.worktree_path).join("requirement.md");
+        std::fs::write(&path, "# 인증 조건\n기존 세션을 보존한다.\n").unwrap();
+        let document = crate::task_specs::read(&pool, task.id, "requirement.md").await.unwrap();
+        let saved = crate::task_specs::save(&pool, task.id, crate::task_specs::SpecSaveInput {
+            relative_path: document.relative_path,
+            expected_hash: document.content_hash,
+        }).await.unwrap();
+        std::fs::write(&path, "# 변경된 요구사항").unwrap();
+        std::fs::remove_file(path).unwrap();
+        let raw = format!("다음 조건을 참고하세요.\n[[dojang-spec:{}:{}]]", saved.id, saved.content_hash);
+        let sent = crate::task_specs::expand_message(&pool, task.id, &raw).await.unwrap();
+        let event = serde_json::json!({"kind":"user","text":raw,"receipt_request_id":"spec-admission-test"}).to_string();
+        let expanded = expansion_event(Some(&sent));
+        persist_convo_admission(&pool, &task, ConversationInputOrigin::UserMessage, &event, expanded.as_deref(), 10, None).await.unwrap();
+        let events: Vec<String> = sqlx::query_scalar("SELECT event FROM convo_events WHERE task_id=? ORDER BY id")
+            .bind(task.id).fetch_all(&pool).await.unwrap();
+        assert_eq!(events.len(), 2);
+        let user: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
+        let delivered: serde_json::Value = serde_json::from_str(&events[1]).unwrap();
+        assert_eq!(user["text"], raw);
+        assert_eq!(user["receipt_request_id"], "spec-admission-test");
+        assert_eq!(delivered["kind"], "user_expanded");
+        assert_eq!(delivered["text"], sent);
+        assert!(sent.contains("기존 세션을 보존한다."));
+        assert!(sent.contains(&saved.content_hash));
+        assert!(!sent.contains("변경된 요구사항"));
+        assert!(db::get_task(&pool, task.id).await.unwrap().unwrap().goal_contract.is_none());
+        pool.close().await;
+        std::fs::remove_file(database_path).unwrap();
     }
 
     #[tokio::test]

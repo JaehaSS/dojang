@@ -42,6 +42,7 @@ async fn active_review_claim_blocks_runner_terminal_transitions() {
             max_concurrent_tasks: 1,
             execution_policy: ExecutionPolicy::AlwaysApprove,
             pairing_token_file: token_path,
+            ..Default::default()
         },
         recovered_tasks: 0,
         started_at: 0,
@@ -166,6 +167,7 @@ fn state(pool: sqlx::SqlitePool, root: &std::path::Path) -> RunnerHttpState {
             max_concurrent_tasks: 1,
             execution_policy: ExecutionPolicy::AlwaysApprove,
             pairing_token_file: token_path,
+            ..Default::default()
         },
         recovered_tasks: 0,
         started_at: 0,

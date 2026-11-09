@@ -16,6 +16,7 @@ import {
 import { tokensForLine, type HunkTokens, type TokenSpan } from "../lib/diff-highlight";
 import type { Theme } from "../lib/themes";
 import { DiffLineText, HunkCheckbox, useDiffTheme, useHunkTokens } from "./DiffPresentation";
+import { Icon } from "./ide/icons";
 
 const cellTone: Record<string, string> = {
   add: "bg-addbg text-status-done",
@@ -62,13 +63,14 @@ function SplitCellView({
   return (
     <div className={`group/cell w-1/2 min-w-0 shrink-0 flex ${cellTone[line.kind] ?? ""}`}>
       <button
-        className={`w-4 shrink-0 text-[10px] leading-5 ${
+        className={`inline-flex h-5 w-4 shrink-0 items-center justify-center text-text-muted hover:text-primary-bright ${
           hasThread ? "opacity-100" : "opacity-0 group-hover/cell:opacity-100"
         }`}
         title="주석 남기기"
+        aria-label="주석 남기기"
         onClick={onAnnotate}
       >
-        💬
+        <Icon name="chat" size={12} />
       </button>
       <span className="w-10 shrink-0 text-right pr-2 text-text-muted select-none">
         {lineNumber ?? ""}

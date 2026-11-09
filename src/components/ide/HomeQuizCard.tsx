@@ -62,7 +62,7 @@ export function HomeQuizCard(): ReactElement | null {
         className="w-full text-left flex items-center gap-2.5 px-3 py-2.5 border border-border rounded-md mb-6 hover:bg-surface"
       >
         <span className="text-status-awaiting shrink-0">
-          <Icon name="bulb" size={15} />
+          <Icon name="bulb" size={16} />
         </span>
         <span className="text-sm text-text">
           {mode === "quiz" ? "풀 문제가 쌓여 있습니다" : "검수를 기다리는 문제가 있습니다"}

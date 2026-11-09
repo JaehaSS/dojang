@@ -23,6 +23,7 @@ import {
 } from "../../../lib/theme-files";
 import { useTheme } from "../../../lib/use-theme";
 import { ThemeEditor } from "../ThemeEditor";
+import { Icon, type IconName } from "../icons";
 
 /**
  * 테마 미리보기 — 패널·본문·구문색과 액센트·상태색을 작은 작업 공간으로 그린다.
@@ -66,7 +67,7 @@ function ThemeCard({
           </span>
           <span className="flex min-w-0 flex-1 flex-col gap-1.5 p-2.5">
             <span className="text-[11px] font-medium">나의 작업 공간</span>
-            <span className="truncate font-mono text-[10px]" style={{ color: theme.syntax?.keyword ?? t.question }}>
+            <span className="truncate font-mono text-[11px]" style={{ color: theme.syntax?.keyword ?? t.question }}>
               const <span style={{ color: theme.syntax?.variable ?? t.text }}>idea</span> = <span style={{ color: theme.syntax?.string ?? t.done }}>"hello"</span>
             </span>
             <span className="mt-auto flex items-center gap-1.5">
@@ -80,7 +81,7 @@ function ThemeCard({
         <span className="w-full min-w-0">
           <span className="flex items-center gap-2 text-[13px] text-text">
             <span className="truncate font-medium">{theme.label}</span>
-            {active && <span className="ml-auto shrink-0 text-[11px] text-primary">✓ 적용 중</span>}
+            {active && <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-[11px] text-primary"><Icon name="check" size={12} />적용 중</span>}
           </span>
           <span className="mt-0.5 block text-[11px] leading-relaxed text-text-muted">{theme.blurb}</span>
         </span>
@@ -92,11 +93,11 @@ function ThemeCard({
 
 /** 카드 위 소형 손잡이 (DESIGN.md IconButton 문법 — 기본 secondary, hover는 raised 배경). */
 function CardAction({
-  glyph,
+  icon,
   title,
   onClick,
 }: {
-  glyph: string;
+  icon: IconName;
   title: string;
   onClick: () => void;
 }) {
@@ -106,9 +107,9 @@ function CardAction({
       title={title}
       aria-label={title}
       onClick={onClick}
-      className="h-6 w-6 shrink-0 rounded text-[12px] text-text-secondary hover:bg-raised hover:text-text"
+      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-secondary hover:bg-text/[.08] hover:text-text"
     >
-      {glyph}
+      <Icon name={icon} size={14} />
     </button>
   );
 }
@@ -236,12 +237,12 @@ export function ThemeSection() {
               actions={
                 <span className="flex shrink-0 flex-col">
                   <span className="flex">
-                    <CardAction glyph="✎" title="편집" onClick={() => setEditing(spec)} />
-                    <CardAction glyph="⧉" title="복제" onClick={() => setEditing(duplicateOf(spec))} />
+                    <CardAction icon="pencil" title="편집" onClick={() => setEditing(spec)} />
+                    <CardAction icon="copy" title="복제" onClick={() => setEditing(duplicateOf(spec))} />
                   </span>
                   <span className="flex">
-                    <CardAction glyph="⬇" title="내보내기" onClick={() => run(exportTheme(spec))} />
-                    <CardAction glyph="✕" title="삭제" onClick={() => run(removeTheme(spec))} />
+                    <CardAction icon="download" title="내보내기" onClick={() => run(exportTheme(spec))} />
+                    <CardAction icon="x" title="삭제" onClick={() => run(removeTheme(spec))} />
                   </span>
                 </span>
               }

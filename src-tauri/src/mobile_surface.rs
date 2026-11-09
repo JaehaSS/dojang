@@ -117,6 +117,7 @@ impl MobileSurface {
 pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     crate::runner::session::migrate(pool).await?;
     crate::runner::push::migrate(pool).await?;
+    crate::runner::assistant::migrate(pool).await?;
     Ok(())
 }
 
@@ -170,15 +171,22 @@ pub async fn start(app: &AppHandle, pool: &SqlitePool) -> Result<MobileSurfaceSt
 
     migrate(pool).await.map_err(|error| error.to_string())?;
 
+    let roots = repository_roots(pool).await;
+    let assistant_workspace = roots
+        .first()
+        .cloned()
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
     let config = RunnerConfig {
         bind: SocketAddr::from(([127, 0, 0, 1], port)),
-        repository_roots: repository_roots(pool).await,
+        repository_roots: roots,
         // 폰에서 만든 작업은 데스크톱이 직접 돌린다. 큐 워커가 없으므로 이 값은
         // health 표시용이다.
         max_concurrent_tasks: 1,
         // 외부기원 작업은 승인 없이 시작하지 않는다 — 폰이 원격이라는 사실은 변하지 않는다.
         execution_policy: ExecutionPolicy::RequireApproval,
         pairing_token_file: token_file,
+        assistant_workspace,
+        ..RunnerConfig::default()
     };
 
     let listener = tokio::net::TcpListener::bind(config.bind)

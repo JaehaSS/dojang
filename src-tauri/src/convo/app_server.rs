@@ -1210,7 +1210,7 @@ pub fn run(
                     events.out_tokens = p["tokenUsage"]["last"]["outputTokens"]
                         .as_i64()
                         .unwrap_or(0);
-                    on_event(context_usage_event(&p));
+                    on_event(context_usage_event(p));
                 }
                 _ => {}
             }

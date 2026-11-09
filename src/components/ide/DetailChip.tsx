@@ -63,7 +63,7 @@ export function DetailChip({ label, summary, open, onOpenChange, attention, chil
         <div
           role="dialog"
           aria-label={label}
-          className="absolute bottom-full right-0 z-30 mb-1 max-h-[50vh] w-[min(640px,calc(100vw-2rem))] overflow-auto rounded-lg border border-border-strong bg-raised p-3 text-xs text-text-secondary shadow-xl"
+          className="absolute bottom-full right-0 z-30 mb-1 max-h-[50vh] w-[min(640px,calc(100vw-2rem))] overflow-auto rounded-lg border border-border-strong bg-raised p-3 text-xs text-text-secondary shadow-e2"
         >
           {children}
         </div>

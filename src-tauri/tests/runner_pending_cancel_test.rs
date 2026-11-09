@@ -24,6 +24,7 @@ async fn pending_cancel_uses_the_shared_worktree_lock_and_discards_once() {
         max_concurrent_tasks: 1,
         execution_policy: ExecutionPolicy::RequireApproval,
         pairing_token_file: temp_root::dir().join("unused-runner-token"),
+        ..Default::default()
     };
     let locks = runner::worktree_lock::WorktreeLocks::default();
     let task = runner::create_queued_task(

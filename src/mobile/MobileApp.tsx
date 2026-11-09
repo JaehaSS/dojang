@@ -4,6 +4,7 @@ import { linkProps, useRoute } from "./router";
 import { blocksApp, useSession } from "./session";
 import { api, probeConnection } from "./api";
 import { StatusBanner } from "./StatusBanner";
+import { AssistantScreen } from "./AssistantScreen";
 import { TaskListScreen } from "./TaskListScreen";
 import { TaskDetailScreen } from "./TaskDetailScreen";
 import { NewTaskScreen } from "./NewTaskScreen";
@@ -18,6 +19,7 @@ import { actionableCount, type ConnectionState } from "./status";
 type NavItem = { route: Route; label: string };
 
 const NAV: NavItem[] = [
+  { route: { name: "assistant" }, label: "비서" },
   { route: { name: "home" }, label: "작업" },
   { route: { name: "new" }, label: "새 작업" },
   { route: { name: "schedules" }, label: "스케줄" },
@@ -26,6 +28,8 @@ const NAV: NavItem[] = [
 
 function titleOf(route: Route): string {
   switch (route.name) {
+    case "assistant":
+      return "비서";
     case "home":
       return "작업";
     case "task":
@@ -43,6 +47,8 @@ function titleOf(route: Route): string {
 
 function Screen({ route, revision }: { route: Route; revision: number }) {
   switch (route.name) {
+    case "assistant":
+      return <AssistantScreen revision={revision} />;
     case "home":
       return <TaskListScreen revision={revision} />;
     case "task":
@@ -90,7 +96,7 @@ function BottomNav({ current, badge }: { current: Route; badge: number }) {
           >
             {item.label}
             {showBadge ? (
-              <span className="ml-1 rounded-full bg-status-awaiting px-1.5 text-[10px] text-black">
+              <span className="ml-1 rounded-full bg-status-awaiting px-1.5 text-[11px] text-black">
                 {badge}
               </span>
             ) : null}

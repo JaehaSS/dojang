@@ -3,6 +3,7 @@ import type { MultiReviewResult, ReviewDetail } from "../../lib/ipc";
 import { Icon } from "./icons";
 import { Markdown } from "./Markdown";
 import { ReviewModal } from "../ReviewModal";
+import { IconButton } from "../ui";
 
 interface Props {
   result: MultiReviewResult;
@@ -16,24 +17,20 @@ export function ReviewPanel({ result, detail, onClose }: Props) {
 
   return (
     <>
-      <div className="absolute right-4 bottom-20 z-30 w-[30rem] max-h-96 overflow-auto rounded-lg border border-border-strong bg-raised shadow-xl p-3">
+      <div className="absolute right-4 bottom-20 z-30 w-[30rem] max-h-96 overflow-auto rounded-lg border border-border-strong bg-raised shadow-e2 p-3">
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs uppercase tracking-wide text-text-muted">
             리뷰 · {result.items.length}개 모델
           </span>
           <div className="flex items-center gap-2">
             {detail && (
-              <button
-                onClick={() => setShowDetail(true)}
-                className="text-text-muted hover:text-text"
-                title="상세 정보"
-              >
+              <IconButton size="sm" label="상세 정보" onClick={() => setShowDetail(true)}>
                 <Icon name="search" size={14} />
-              </button>
+              </IconButton>
             )}
-            <button className="text-text-muted hover:text-text" onClick={onClose} aria-label="닫기">
+            <IconButton size="sm" label="닫기" onClick={onClose}>
               <Icon name="x" size={14} />
-            </button>
+            </IconButton>
           </div>
         </div>
 

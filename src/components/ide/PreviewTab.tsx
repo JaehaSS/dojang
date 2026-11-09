@@ -24,6 +24,7 @@ import { enqueueDesignTransition, waitForDesignTransition } from "../../lib/desi
 import { EditorCaptureButton } from "./EditorCaptureButton";
 import { PreviewWorkbenchStrip } from "./PreviewWorkbenchStrip";
 import type { PreviewWorkbenchState } from "../../lib/preview-workbench/types";
+import { IconButton } from "../ui";
 
 /** 마지막으로 연 URL — 탭을 닫았다 다시 열어도(같은 세션 내) 입력을 잃지 않게 기억한다. */
 const lastUrlByTask = new Map<number, string>();
@@ -333,14 +334,9 @@ export const PreviewTab = memo(function PreviewTab({
           placeholder="http://localhost:3000"
           aria-label="프리뷰 URL"
         />
-        <button
-          className="text-text-muted hover:text-text shrink-0"
-          onClick={() => void openPreview(url)}
-          title="새로고침"
-          aria-label="새로고침"
-        >
-          <Icon name="refresh" size={15} />
-        </button>
+        <IconButton size="sm" label="새로고침" onClick={() => void openPreview(url)}>
+          <Icon name="refresh" size={14} />
+        </IconButton>
         <button
           className={`shrink-0 px-2 py-1 rounded text-xs border ${
             selecting ? "border-primary text-primary-bright bg-primary/10" : "border-border text-text-muted"
@@ -350,7 +346,7 @@ export const PreviewTab = memo(function PreviewTab({
           title="요소 선택 모드"
           aria-pressed={selecting}
         >
-          <Icon name="code" size={13} /> 선택
+          <Icon name="code" size={14} /> 선택
         </button>
         <button
           className={`shrink-0 px-2 py-1 rounded text-xs border ${
@@ -367,7 +363,7 @@ export const PreviewTab = memo(function PreviewTab({
           aria-label="별도 창"
           aria-pressed={mode === "window"}
         >
-          <Icon name="desktop" size={13} /> 창
+          <Icon name="desktop" size={14} /> 창
         </button>
         <EditorCaptureButton taskId={taskId} available={editorAvailable} onError={setError} />
         {controlling && (
@@ -400,13 +396,13 @@ export const PreviewTab = memo(function PreviewTab({
       <div ref={containerRef} className="flex-1 min-h-0 relative">
         {!loaded && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-text-muted text-sm">
-            <Icon name="desktop" size={22} />
+            <Icon name="desktop" size={20} />
             <span>dev 서버 URL을 입력하고 Enter — 실험 기능(macOS 우선)</span>
           </div>
         )}
         {loaded && mode === "window" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-text-muted text-sm">
-            <Icon name="desktop" size={22} />
+            <Icon name="desktop" size={20} />
             <span>프리뷰 창이 열려 있습니다</span>
           </div>
         )}

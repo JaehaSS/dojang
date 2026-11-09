@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { type Expression, extractExpressions, segmentByExpressions } from "../../lib/expressions";
+import { Icon } from "./icons";
 
 /**
  * 영어 표현 공부 — 모델이 짚은 표현에 점선 밑줄을 긋고, 올리면 뜻 카드를 띄운다.
@@ -98,13 +99,13 @@ function ExpressionCard({ expression, onClose }: { expression: Expression; onClo
     <span
       role="dialog"
       aria-label={`${expression.phrase} 뜻`}
-      className="absolute left-0 top-full z-50 mt-1 block w-72 cursor-default rounded-md border border-border bg-bg p-2.5 text-left text-sm font-normal not-italic text-text shadow-lg"
+      className="absolute left-0 top-full z-50 mt-1 block w-72 cursor-default rounded-md border border-border bg-bg p-2.5 text-left text-sm font-normal not-italic text-text shadow-e2"
       onMouseDown={(e) => e.stopPropagation()}
     >
       <span className="flex items-start gap-2">
         <span className="min-w-0 flex-1 font-semibold">{expression.phrase}</span>
-        <button type="button" aria-label="카드 닫기" className="text-xs text-text-muted hover:text-text" onClick={onClose}>
-          ✕
+        <button type="button" aria-label="카드 닫기" className="inline-flex items-center text-text-muted hover:text-text" onClick={onClose}>
+          <Icon name="x" size={12} />
         </button>
       </span>
       <span className="mt-0.5 block">{expression.meaning}</span>

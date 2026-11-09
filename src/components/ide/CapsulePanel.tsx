@@ -1,6 +1,7 @@
 import { canvasProgress, parseCanvasNodes, type CanvasStatus } from "../../lib/canvas";
 import type { Capsule } from "../../lib/ipc";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 
 const STATUS_MARK: Record<CanvasStatus, string> = { done: "●", doing: "◐", todo: "○" };
 const STATUS_TONE: Record<CanvasStatus, string> = {
@@ -52,12 +53,12 @@ interface Props {
 export function CapsulePanel({ capsule, onForward, onInject, onClose }: Props) {
   const c = capsule;
   return (
-    <div className="absolute right-4 bottom-20 z-30 w-[30rem] max-h-80 overflow-auto rounded-lg border border-border-strong bg-raised shadow-xl p-3">
+    <div className="absolute right-4 bottom-20 z-30 w-[30rem] max-h-80 overflow-auto rounded-lg border border-border-strong bg-raised shadow-e2 p-3">
       <div className="flex items-center justify-between mb-2">
         <span className="text-xs uppercase tracking-wide text-text-muted">Capsule · {c.state}</span>
-        <button className="text-text-muted hover:text-text" onClick={onClose} aria-label="닫기">
+        <IconButton size="sm" label="닫기" onClick={onClose}>
           <Icon name="x" size={14} />
-        </button>
+        </IconButton>
       </div>
 
       <div className="mb-2 p-2 rounded bg-bg border border-border">

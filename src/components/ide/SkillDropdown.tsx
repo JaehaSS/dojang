@@ -26,7 +26,7 @@ export function SkillDropdown({ open, items, sel, onHover, onSelect }: Props) {
   return (
     <div
       ref={listRef}
-      className="absolute bottom-full left-0 mb-1 z-30 w-[32rem] max-h-64 overflow-auto rounded-lg border border-border-strong bg-raised py-1 shadow-xl"
+      className="absolute bottom-full left-0 mb-1 z-30 w-[32rem] max-h-64 overflow-auto rounded-lg border border-border-strong bg-raised py-1 shadow-e2"
     >
       <div className="px-3 py-1 text-xs text-text-muted">/ 스킬 · Tab으로 완성</div>
       {items.map((sk, i) => (
@@ -45,7 +45,7 @@ export function SkillDropdown({ open, items, sel, onHover, onSelect }: Props) {
           </span>
           <span className="text-xs text-text-muted truncate flex-1">{sk.description}</span>
           {sk.global && (
-            <span className="text-[10px] px-1 py-0.5 rounded bg-raised text-text-muted shrink-0 border border-border">
+            <span className="text-[11px] px-1 py-0.5 rounded bg-raised text-text-muted shrink-0 border border-border">
               global
             </span>
           )}

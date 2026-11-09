@@ -15,6 +15,22 @@ const observed = (agent: string, model: string, last_used_at: number): ObservedM
 });
 
 describe("modelsForAgentWithObserved", () => {
+  it("조회 목록을 우선하고 사용 이력과 합치면서 중복을 제거한다", () => {
+    const available = [{ id: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" }];
+    const merged = modelsForAgentWithObserved("agy", [
+      observed("agy", "gemini-4-argon-high", 200),
+      observed("agy", "custom-model", 100),
+      observed("codex", "gpt-5.6-sol", 300),
+    ], available);
+    expect(merged.map((m) => m.id)).toEqual(["gemini-4-argon-high", "custom-model"]);
+    expect(merged[0].label).toBe("Gemini 4 Argon (High)");
+  });
+
+  it("조회 목록이 없거나 비어 있으면 내장 목록을 유지한다", () => {
+    expect(modelsForAgentWithObserved("agy", [], null)).toEqual(modelsForAgent("agy"));
+    expect(modelsForAgentWithObserved("agy", [], [])).toEqual(modelsForAgent("agy"));
+  });
+
   it("카탈로그에 없는 관측 모델을 뒤에 덧붙인다", () => {
     const merged = modelsForAgentWithObserved("claude", [
       observed("claude", "claude-mythos-1", 100),

@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import type { LspTarget } from "../../lib/ipc";
 import { targetLabel } from "../../lib/lsp";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 
 /** 정의 이동 한 번의 진행 상태. 결과가 하나면 곧장 점프하므로 여기 오지 않는다. */
 export type GotoState =
@@ -42,19 +43,15 @@ export function GotoOverlay({ state, onPick, onClose }: Props) {
   return (
     <div
       ref={boxRef}
-      className="absolute right-3 top-3 z-20 w-96 max-h-80 flex flex-col rounded-md border border-border bg-raised shadow-lg overflow-hidden"
+      className="absolute right-3 top-3 z-20 w-96 max-h-80 flex flex-col rounded-md border border-border bg-raised shadow-e2 overflow-hidden"
       role="dialog"
       aria-label="정의 이동 결과"
     >
       <div className="h-8 flex items-center gap-2 px-3 border-b border-border shrink-0">
         <span className="text-xs text-text-secondary">{state.label}</span>
-        <button
-          className="ml-auto text-text-muted hover:text-text"
-          onClick={onClose}
-          aria-label="닫기"
-        >
-          <Icon name="x" size={13} />
-        </button>
+        <IconButton size="sm" className="ml-auto" label="닫기" onClick={onClose}>
+          <Icon name="x" size={14} />
+        </IconButton>
       </div>
 
       {state.phase === "loading" ? (

@@ -49,7 +49,7 @@ export function AutosaveUndoBar({ notice, onUndo, onDismiss }: Props) {
     <div
       role="status"
       aria-live="polite"
-      className="fixed bottom-6 left-1/2 z-50 flex max-w-[min(560px,calc(100vw-3rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-border-strong bg-raised px-3 py-2 text-xs shadow-xl"
+      className="fixed bottom-6 left-1/2 z-50 flex max-w-[min(560px,calc(100vw-3rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-border-strong bg-raised px-3 py-2 text-xs shadow-e2"
     >
       <span className="truncate">
         코드 창에서 파일 {notice.entries.length}개를 자동 저장했습니다

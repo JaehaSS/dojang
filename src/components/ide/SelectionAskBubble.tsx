@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Icon } from "./icons";
 
 export interface BubbleAnchor {
   top: number;
@@ -81,19 +82,20 @@ export function SelectionAskBubble({
       <div
         role="dialog"
         aria-label="선택한 코드로 질문"
-        className="absolute z-30 flex items-center gap-1.5 rounded-full border border-border-strong bg-raised px-2 py-1 text-[11px] shadow-lg"
+        className="absolute z-30 flex items-center gap-1.5 rounded-full border border-border-strong bg-raised px-2 py-1 text-[11px] shadow-e2"
         style={position}
       >
         <span className="text-text-muted">{lineLabel}</span>
-        <button className="text-text-secondary hover:text-text" onClick={() => setExpanded(true)}>
-          💬 질문
+        <button className="inline-flex items-center gap-1 text-text-secondary hover:text-text" onClick={() => setExpanded(true)}>
+          <Icon name="chat" size={12} />
+          질문
         </button>
         {onAskSeparately && <button className="text-text-secondary hover:text-text" onClick={onAskSeparately}>따로 질문</button>}
         <button className="text-text-muted hover:text-text" onClick={onAttachOnly}>
           ⌘L 첨부
         </button>
-        <button className="px-0.5 text-text-muted hover:text-text" onClick={onClose} aria-label="질문 닫기" title="닫기">
-          ×
+        <button className="inline-flex items-center px-0.5 text-text-muted hover:text-text" onClick={onClose} aria-label="질문 닫기" title="닫기">
+          <Icon name="x" size={12} />
         </button>
       </div>
     );
@@ -103,7 +105,7 @@ export function SelectionAskBubble({
     <div
       role="dialog"
       aria-label="선택한 코드로 질문"
-      className="absolute z-30 w-80 rounded-lg border border-border-strong bg-raised p-2 shadow-xl"
+      className="absolute z-30 w-80 rounded-lg border border-border-strong bg-raised p-2 shadow-e2"
       style={position}
       onKeyDown={(e) => {
         if (e.key === "Escape") {
@@ -113,14 +115,14 @@ export function SelectionAskBubble({
       }}
     >
       <div className="flex items-center gap-1 text-[11px] text-text-muted">
-        <span>💬 {lineLabel}</span>
+        <span className="inline-flex items-center gap-1"><Icon name="chat" size={12} />{lineLabel}</span>
         <button
-          className="ml-auto px-1 hover:text-text"
+          className="ml-auto inline-flex items-center px-1 hover:text-text"
           onClick={onClose}
           aria-label="질문 닫기"
           title="닫기 (Esc)"
         >
-          ×
+          <Icon name="x" size={12} />
         </button>
       </div>
       <textarea

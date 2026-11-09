@@ -87,7 +87,7 @@ function PaneChip(props: {
       <Icon name={props.icon} size={props.showLabel ? 14 : 16} />
       {props.showLabel && <span>{props.label}</span>}
       {props.badge != null && props.badge > 0 && (
-        <span className="tabular-nums text-[10px] text-text-muted">{props.badge}</span>
+        <span className="tabular-nums text-[11px] text-text-muted">{props.badge}</span>
       )}
     </button>
   );

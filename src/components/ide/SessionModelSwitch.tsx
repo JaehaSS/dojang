@@ -18,11 +18,13 @@ interface Props {
   inDebate?: boolean;
   /** 토론이 시작됐다 — App이 우측 자리를 다시 읽어 분할 뷰로 간다. */
   onDebateStarted?: () => void;
+  /** 목록이 열리는 방향. 컴포저 아래 줄에 서면 위로 열어야 창 밖으로 잘리지 않는다. */
+  placement?: "up" | "down";
 }
 
 const CONVERSATION_AGENTS = AGENT_PRESETS.filter(({ key }) => key === "claude" || key === "codex" || key === "agy");
 
-function AgentDraftPicker({ agent, disabled, onChange, agents = CONVERSATION_AGENTS, heading = "다음 메시지의 에이전트", label, title, extra }: {
+function AgentDraftPicker({ agent, disabled, onChange, agents = CONVERSATION_AGENTS, heading = "다음 메시지의 에이전트", label, title, extra, placement = "down" }: {
   agent: string;
   disabled: boolean;
   onChange: (agent: string) => void;
@@ -33,6 +35,7 @@ function AgentDraftPicker({ agent, disabled, onChange, agents = CONVERSATION_AGE
   title?: string;
   /** 목록 끝의 추가 선택지 — 토론의 "모두 (3자 토론)"이 여기 온다. */
   extra?: { label: string; hint: string; onSelect: () => void };
+  placement?: "up" | "down";
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -62,12 +65,12 @@ function AgentDraftPicker({ agent, disabled, onChange, agents = CONVERSATION_AGE
         onClick={() => setOpen((value) => !value)}
         title={title ?? (disabled ? "에이전트 전환은 대화 작업이 검토 대기일 때만 할 수 있습니다" : "다음 메시지를 처리할 에이전트")}
       >
-        <Icon name="sparkle" size={13} />
+        <Icon name="sparkle" size={14} />
         <span className="max-w-[150px] truncate">{label ?? labelFor(agent)}</span>
         <Icon name="chevronDown" size={12} />
       </button>
       {open && (
-        <div className="absolute left-0 top-full z-20 mt-1 w-56 rounded-lg border border-border-strong bg-raised py-1 shadow-xl">
+        <div className={`absolute left-0 z-20 w-56 ${placement === "up" ? "bottom-full mb-1" : "top-full mt-1"} rounded-lg border border-border-strong bg-raised py-1 shadow-e2`}>
           <div className="px-3 py-1 text-xs text-text-muted">{heading}</div>
           {agents.map((preset) => (
             <button
@@ -78,7 +81,7 @@ function AgentDraftPicker({ agent, disabled, onChange, agents = CONVERSATION_AGE
                 setOpen(false);
               }}
             >
-              <Icon name={agent === preset.key ? "check" : "sparkle"} size={13} />
+              <Icon name={agent === preset.key ? "check" : "sparkle"} size={14} />
               <span className="flex-1">{preset.label}</span>
               <span className="font-code text-xs text-text-muted">{preset.key}</span>
             </button>
@@ -91,7 +94,7 @@ function AgentDraftPicker({ agent, disabled, onChange, agents = CONVERSATION_AGE
                 setOpen(false);
               }}
             >
-              <Icon name="sparkle" size={13} />
+              <Icon name="sparkle" size={14} />
               <span className="flex-1">{extra.label}</span>
               <span className="font-code text-xs text-text-muted">{extra.hint}</span>
             </button>
@@ -102,10 +105,10 @@ function AgentDraftPicker({ agent, disabled, onChange, agents = CONVERSATION_AGE
   );
 }
 
-function CrossAgentDraft({ agent, model, busy, allowed, onModelChange, onSubmit }: { agent: string; model: string; busy: boolean; allowed: boolean; onModelChange: (model: string) => void; onSubmit: () => void }) {
+function CrossAgentDraft({ agent, model, busy, allowed, onModelChange, onSubmit, placement }: { agent: string; model: string; busy: boolean; allowed: boolean; onModelChange: (model: string) => void; onSubmit: () => void; placement: "up" | "down" }) {
   return (
     <>
-      <ModelPicker agent={agent} model={model} onChange={onModelChange} placement="down" />
+      <ModelPicker agent={agent} model={model} onChange={onModelChange} placement={placement} />
       <button
         type="button"
         className="rounded-md border border-primary/50 px-2 py-1 text-xs text-primary-bright hover:border-primary disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted"
@@ -118,9 +121,9 @@ function CrossAgentDraft({ agent, model, busy, allowed, onModelChange, onSubmit 
   );
 }
 
-/** 세션 헤더의 모델 전환. 같은 에이전트의 모델은 즉시 저장하고, 다른 에이전트는 다음 메시지용
+/** 세션의 에이전트·모델 전환. 대화 세션에서는 컴포저 아래 줄에, 컴포저가 없는 세션에서는 헤더에 선다. 같은 에이전트의 모델은 즉시 저장하고, 다른 에이전트는 다음 메시지용
  * 모델을 선택하거나 벤더 기본값으로 둔 뒤 전환한다. 작업·파일·표시 이력은 남지만 새 CLI의 네이티브 이력은 잇지 않는다. */
-export function SessionModelSwitch({ task, contextTokens, observedModel, inDebate = false, onChanged, onServiceTierChanged, onDebateStarted }: Props): ReactElement | null {
+export function SessionModelSwitch({ task, contextTokens, observedModel, inDebate = false, onChanged, onServiceTierChanged, onDebateStarted, placement = "down" }: Props): ReactElement | null {
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const agent = (task.agent ?? "").trim();
@@ -147,6 +150,7 @@ export function SessionModelSwitch({ task, contextTokens, observedModel, inDebat
   const agentSwitchBlockedReason = canSwitchAgentHere
     ? null
     : `에이전트 전환·토론은 ${LOCAL_ONLY_REASON} — 모델은 원격에서도 바꿀 수 있습니다`;
+  const transientBlockedReason = "에이전트 전환은 대화 작업이 검토 대기일 때만 할 수 있습니다";
   const changeModel = (raw: string) => {
     const next = raw.trim();
     if (busyRef.current || next === (task.model ?? "").trim()) return;
@@ -200,13 +204,15 @@ export function SessionModelSwitch({ task, contextTokens, observedModel, inDebat
   };
 
   return (
-    <div className={`flex items-center gap-1 ${busy ? "pointer-events-none opacity-60" : ""}`}>
+    // 컴포저 줄은 세션 열 폭(최소 360px)을 따른다 — 접히지 않으면 게이지·전송 버튼을 덮는다.
+    <div className={`flex min-w-0 flex-wrap items-center gap-1 ${busy ? "pointer-events-none opacity-60" : ""}`}>
       {isConversationAgent && (
         <AgentDraftPicker
           agent={draftAgent}
           disabled={!canSwitchAgent || busy}
-          title={agentSwitchBlockedReason ?? undefined}
+          title={agentSwitchBlockedReason ?? (canSwitchAgent ? undefined : transientBlockedReason)}
           onChange={changeAgent}
+          placement={placement}
         />
       )}
       {isConversationAgent && !inDebate && (
@@ -218,6 +224,7 @@ export function SessionModelSwitch({ task, contextTokens, observedModel, inDebat
           label="토론 시작"
           title={agentSwitchBlockedReason ?? (canSwitchAgent ? "고른 상대와 라운드를 주고받습니다 — 라운드 상한은 설정에서 바꿉니다" : "토론은 대화 작업이 검토 대기일 때만 시작할 수 있습니다")}
           onChange={(opponent) => startDebate([opponent])}
+          placement={placement}
           extra={
             opponents.length >= 2
               ? { label: "모두 (3자 토론)", hint: opponents.slice(0, 2).map((preset) => preset.key).join("+"), onSelect: () => startDebate(opponents.slice(0, 2).map((preset) => preset.key)) }
@@ -225,12 +232,15 @@ export function SessionModelSwitch({ task, contextTokens, observedModel, inDebat
           }
         />
       )}
-      {crossAgent ? <CrossAgentDraft agent={draftAgent} model={draftModel} busy={busy} allowed={canSwitchAgent} onModelChange={setDraftModel} onSubmit={submitAgent} /> : <ModelPicker agent={agent} model={task.model ?? ""} observedModel={observedModel} onChange={changeModel} placement="down" disabled={inDebate} disabledTitle="토론 중에는 모델을 바꿀 수 없습니다" />}
+      {crossAgent ? <CrossAgentDraft agent={draftAgent} model={draftModel} busy={busy} allowed={canSwitchAgent} onModelChange={setDraftModel} onSubmit={submitAgent} placement={placement} /> : <ModelPicker agent={agent} model={task.model ?? ""} observedModel={observedModel} onChange={changeModel} placement={placement} disabled={inDebate} disabledTitle="토론 중에는 모델을 바꿀 수 없습니다" />}
       {!crossAgent && !inDebate && task.host === LOCAL_HOST && agent === "codex" && task.mode === "conversation" && !task.ensemble && (
         <SpeedPicker model={task.model ?? ""} value={task.service_tier ?? null} onChange={changeServiceTier} disabled={busy} />
       )}
-      {isConversationAgent && !canSwitchAgent && (
-        <span className="text-xs text-text-muted">{agentSwitchBlockedReason ?? (inDebate ? "토론이 끝나면 전환할 수 있습니다" : "대화 작업 검토 대기에서 전환 가능")}</span>
+      {/* 구조적으로 막힌 이유(원격·토론)만 줄에 적는다 — 기다리면 열리지 않으니 말해야 한다.
+          "검토 대기에서 전환 가능"은 턴마다 저절로 풀리는 잠금이라 매 턴 줄을 차지하면 소음이다.
+          그 문구는 잠긴 버튼의 title로 간다. */}
+      {isConversationAgent && !canSwitchAgent && (agentSwitchBlockedReason != null || inDebate) && (
+        <span className="text-xs text-text-muted">{agentSwitchBlockedReason ?? "토론이 끝나면 전환할 수 있습니다"}</span>
       )}
       {crossAgent && <span className="text-xs text-text-muted" title="같은 작업·파일과 표시 이력은 유지됩니다. 전체 대화 이력은 새 에이전트에 그대로 이어지지 않습니다.">작업 요약과 최근 대화를 전달해 이어갑니다</span>}
     </div>

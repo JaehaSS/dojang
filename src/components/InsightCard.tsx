@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { insightNext, type InsightCard as Card } from "../lib/ipc";
 import { MetaTag } from "./MetaTag";
 import { Icon } from "./ide/icons";
+import { IconButton } from "./ui";
 
 interface Props {
   onClose: () => void;
@@ -54,13 +55,9 @@ export function InsightCard({ onClose }: Props) {
       <header className="flex items-center justify-between gap-2">
         {/* 덱 이름은 상태가 아니라 분류다 — Badge가 아니라 MetaTag다(DESIGN.md). */}
         {card ? <MetaTag>{card.deck}</MetaTag> : <span className="text-text-secondary">대기 인사이트</span>}
-        <button
-          className="text-text-muted hover:text-text-secondary"
-          aria-label="인사이트 닫기"
-          onClick={onClose}
-        >
+        <IconButton size="sm" label="인사이트 닫기" onClick={onClose}>
           <Icon name="x" size={14} />
-        </button>
+        </IconButton>
       </header>
 
       {busy ? (

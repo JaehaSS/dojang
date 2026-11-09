@@ -54,6 +54,11 @@ interface Props {
   sendLabel?: string;
   disabled?: boolean;
   attachments?: ReactNode;
+  /**
+   * 입력 상자 아래 줄 왼쪽의 세션 손잡이 — 에이전트·모델·속도. 헤더에 있을 때는 제목을 밀어냈고,
+   * 고른 값이 쓰이는 자리(다음 메시지)와도 멀었다. 오른쪽에는 게이지와 전송이 선다.
+   */
+  toolbar?: ReactNode;
 }
 
 /** 고도화된 에이전트 질의 입력창 — 멀티라인 + @파일 멘션 + /스킬 + 인터럽트 + 히스토리 +
@@ -75,6 +80,7 @@ export function AgentComposer({
   sendLabel,
   disabled = false,
   attachments,
+  toolbar,
 }: Props) {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const undo = useTextareaUndo({ value, setValue: onChange, ref: taRef, resetKey: draftKey });
@@ -287,14 +293,14 @@ export function AgentComposer({
       {pasteError && (
         <div className="mb-1 text-xs text-status-failed">이미지 첨부 실패: {pasteError}</div>
       )}
-      <div className="flex items-end gap-2 border border-border-strong rounded-md px-3 py-2 focus-within:border-primary bg-bg">
+      <div className="flex flex-col gap-1.5 border border-border-strong rounded-lg px-3 pt-2.5 pb-2 focus-within:border-primary bg-surface">
         <textarea
           id={`agent-composer-${draftKey ?? taskId}`}
           aria-label={label ?? "에이전트에게 질의"}
           ref={taRef}
           rows={1}
-          className="flex-1 bg-transparent outline-none text-md text-text placeholder:text-text-muted resize-none leading-relaxed max-h-52"
-          placeholder="에이전트에게 질의 — Enter 전송 · Shift+Enter 줄바꿈 · @파일 · /스킬 · ⌘L 선택 코드 · 이미지 붙여넣기 · ↑↓ 히스토리 · ⌘J 영어로"
+          className="w-full bg-transparent outline-none text-md text-text placeholder:text-text-muted resize-none leading-relaxed max-h-52"
+          placeholder="에이전트에게 질의 — @파일 · /스킬 · ⌘L 선택 코드 · ⌘J 영어로"
           value={value}
           onChange={undo.onChange}
           onKeyDown={onKeyDown}
@@ -303,13 +309,17 @@ export function AgentComposer({
           onCompositionEnd={undo.onCompositionEnd}
           onPaste={onPaste}
         />
-        {gauge}
-        <AgentComposerActions
-          canSend={Boolean(value.trim()) && !disabled}
-          sendLabel={sendLabel}
-          onInterrupt={onInterrupt}
-          onSend={() => { if (!disabled) void captureAttachments.send(); }}
-        />
+        {/* items-end: 피커가 두 줄로 접혀도 게이지·전송 버튼은 마지막 줄에 맞춘다. */}
+        <div className="flex items-end gap-2 min-w-0">
+          <div className="flex flex-1 min-w-0 items-center gap-1 flex-wrap">{toolbar}</div>
+          {gauge}
+          <AgentComposerActions
+            canSend={Boolean(value.trim()) && !disabled}
+            sendLabel={sendLabel}
+            onInterrupt={onInterrupt}
+            onSend={() => { if (!disabled) void captureAttachments.send(); }}
+          />
+        </div>
       </div>
     </div>
   );

@@ -5,6 +5,7 @@ import { contextPercent, contextWindowFor } from "../../lib/context-window";
 import { ChannelCard } from "./ChannelCard";
 import { ContextDetails } from "./ContextDetails";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 
 export interface ContextChannelBinding {
   agent: string | null | undefined;
@@ -90,9 +91,8 @@ export function ContextChannel({ context, density, active = true }: Props): Reac
           <h2 className="font-medium text-text">컨텍스트</h2>
           <div className="flex items-center gap-2">
             <span className={`tabular-nums ${tone}`}>{remaining == null ? "확인 불가" : `약 ${remaining}% 남음`}</span>
-            {onRefresh && <button type="button" onClick={() => void refresh()} disabled={busy || refreshState === "loading"}
-              aria-label="컨텍스트 기록 새로고침" title="저장된 입력과 실행 기록 새로고침"
-              className="rounded p-1 hover:bg-surface hover:text-text disabled:opacity-40 focus-visible:outline-primary"><Icon name="refresh" size={14} /></button>}
+            {onRefresh && <IconButton size="sm" label="컨텍스트 기록 새로고침" title="저장된 입력과 실행 기록 새로고침"
+              onClick={() => void refresh()} disabled={busy || refreshState === "loading"}><Icon name="refresh" size={14} /></IconButton>}
           </div>
         </div>
         <p className="mt-1 truncate text-text-muted" title={`${provider}${model ? ` · ${model}` : ""}`}>{provider}{model ? ` · ${model}` : ""}</p>

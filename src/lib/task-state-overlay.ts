@@ -64,10 +64,17 @@ export function applyStateOverrides(
   return tasks.map((task) => {
     if (task.host !== LOCAL_HOST) return task;
     const override = overrides.get(task.id);
-    if (!override) return task;
+    if (!override || task.archive) return task;
     if (task.state === override.state && (task.awaiting_kind ?? null) === override.awaiting_kind) {
       return task;
     }
     return { ...task, state: override.state, awaiting_kind: override.awaiting_kind };
   });
+}
+
+/** 보관 여부와 경합한 상태 이벤트는 DB에서 다시 확인한다. 이벤트에는 발생 순서가 없다. */
+export function archivedStateRaces(tasks: Task[], overrides: StateOverrides, startedAt: number): number[] {
+  return tasks.filter((task) => task.host === LOCAL_HOST && task.archive
+    && overrides.has(task.id) && (task.stale || overrides.get(task.id)!.at >= startedAt))
+    .map((task) => task.id);
 }

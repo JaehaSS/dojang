@@ -90,8 +90,10 @@ describe("Sidebar session task navigation", () => {
 
     expect(html.indexOf("Orchestrator Views")).toBeLessThan(html.indexOf("세션 작업 (1)"));
     expect(html.indexOf("인사이트")).toBeLessThan(html.indexOf("세션 작업 (1)"));
-    expect(html).toContain("rounded-lg border border-border/80");
-    expect(html).toContain("bg-raised border-primary");
+    // 카드 테두리 대신 테두리 없는 행이고, 선택은 배경으로만 드러난다(2026-11-09 Orca 차용).
+    expect(html).not.toContain("border-border/80");
+    expect(html).toContain('aria-current="true"');
+    expect(html).toContain("bg-raised text-text");
     expect(html).toContain("praxis");
     expect(html).toContain("세션 작업을 왼쪽으로 이동");
     expect(html).not.toContain("완료된 작업");
@@ -138,9 +140,9 @@ describe("Sidebar session task navigation", () => {
   );
 
   // 색은 점이 진다 — 본문 문구는 브랜치명과 같은 무게로 가라앉혀 목록의 소음을 줄였다.
-  it("답변 대기와 검토 대기를 점 색으로 구분한다", () => {
-    expect(renderSidebar(false, "AwaitingReview", "question")).toContain("var(--c-question)");
-    expect(renderSidebar(false, "AwaitingReview")).toContain("var(--c-awaiting)");
+  it("답변 대기와 검토 대기를 상태 마크로 구분한다", () => {
+    expect(renderSidebar(false, "AwaitingReview", "question")).toContain('data-tone="question"');
+    expect(renderSidebar(false, "AwaitingReview")).toContain('data-tone="awaiting"');
   });
 
   // 목록은 ACTIVE_STATES만 그리므로 종료 상태(실패·완료)는 여기 나타나지 않는다 —
@@ -149,15 +151,18 @@ describe("Sidebar session task navigation", () => {
     const html = renderSidebar(false, "AwaitingReview");
 
     expect(html).toContain(">검토</span>");
-    expect(html).not.toContain("text-status-awaiting");
+    // 상태색은 마크(svg) 하나만 진다 — 문구 span에 붙으면 검토 대기가 줄줄이 앰버로 물든다.
+    expect(html.match(/text-status-awaiting/g)).toHaveLength(1);
+    expect(html).toMatch(/<svg[^>]*text-status-awaiting/);
   });
 
   // 미소속에는 헤더를 두지 않는다 — 그룹을 쓰지 않는 사람의 화면까지 바뀐다.
   it("그룹 순서로 그리고 미소속 프로젝트를 그 아래 헤더 없이 둔다", () => {
     const html = renderGrouped();
 
-    expect(html.indexOf("사내용")).toBeLessThan(html.indexOf("praxis"));
-    expect(html.indexOf("praxis")).toBeLessThan(html.indexOf("archive"));
+    expect(html.indexOf(">사내용</span>")).toBeGreaterThan(-1);
+    expect(html.indexOf(">사내용</span>")).toBeLessThan(html.indexOf(">praxis</span>"));
+    expect(html.indexOf(">praxis</span>")).toBeLessThan(html.indexOf(">archive</span>"));
     expect(html).not.toContain("미소속");
   });
 
@@ -165,7 +170,8 @@ describe("Sidebar session task navigation", () => {
   it("헤더에 실행·검토·답변 카운터를 그리지 않는다", () => {
     const html = renderSidebar(false, "AwaitingReview", "question");
 
-    expect(html).not.toContain("text-status-question");
+    // 상태 마크 하나만 질문 색을 쓴다 — 헤더 카운터가 있으면 둘 이상이 된다.
+    expect(html.match(/text-status-question/g)).toHaveLength(1);
     expect(html).not.toContain("· 검토");
   });
 });

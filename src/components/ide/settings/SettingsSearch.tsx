@@ -68,7 +68,7 @@ export function SettingsSearch({ onPick }: { onPick: (entry: SettingEntry) => vo
         onKeyDown={onKeyDown}
       />
       {open && query.trim() !== "" && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-72 overflow-hidden rounded-md border border-border bg-surface shadow-lg">
+        <div className="absolute right-0 top-full z-20 mt-1 w-72 overflow-hidden rounded-md border border-border bg-surface shadow-e2">
           {results.length === 0 ? (
             <div className="px-3 py-2 text-xs text-text-muted">찾는 설정이 없습니다.</div>
           ) : (
@@ -83,7 +83,7 @@ export function SettingsSearch({ onPick }: { onPick: (entry: SettingEntry) => vo
               >
                 <div className="flex items-baseline gap-2">
                   <span className="truncate text-xs text-text">{entry.label}</span>
-                  <span className="ml-auto shrink-0 text-[10px] text-text-muted">
+                  <span className="ml-auto shrink-0 text-[11px] text-text-muted">
                     {tabLabel(entry.tab)}
                   </span>
                 </div>

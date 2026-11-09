@@ -82,6 +82,7 @@ fn config(repo: &std::path::Path) -> RunnerConfig {
         max_concurrent_tasks: 1,
         execution_policy: ExecutionPolicy::AlwaysApprove,
         pairing_token_file: super::temp_root::dir().join("unused-runner-token"),
+        ..Default::default()
     }
 }
 

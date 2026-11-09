@@ -17,7 +17,7 @@ import { tauriTransport } from "./transport/tauri";
 import { mergeTaskLists, type HostTaskResult, type MergedTaskList } from "./task-list-merge";
 import { taskListCache } from "./task-list-cache";
 import type { AgentRole } from "./agent-role";
-import type { ObservedModel } from "./models";
+import type { ModelOption, ObservedModel } from "./models";
 import type { DesignBoundingRect, DesignCaptureRecord } from "./designmode/types";
 import type { EditorCaptureTarget } from "./designmode/editor-capture-target";
 import type { DesignEditRequest, DesignEditResult } from "./design-canvas/edit";
@@ -148,6 +148,9 @@ export const grillSaveNote = (repo: string, slug: string, markdown: string, date
  * 화면이 쓰는 타입은 아래 `Task`이고, transport가 경계에서 `host`를 붙여 승격시킨다.
  */
 export interface TaskRow {
+  /** 로컬 수동 보관. 원격·구버전 응답에는 없음. */
+  archive?: import("./task-archive").TaskArchive | null;
+  convo_pgid?: number | null;
   id: number;
   repo: string;
   branch: string;
@@ -168,6 +171,8 @@ export interface TaskRow {
   service_tier?: ServiceTier | null;
   /** 실행 모드 — "terminal"(PTY) 또는 "conversation"(stream-json). */
   mode: string;
+  /** 작업 성격 — "coding"(일반 저장소 작업) | "assistant"(단일 상시 비서 세션). */
+  kind?: "coding" | "assistant" | string;
   /** 대화 모드 claude session_id — 재시작 후 --resume 근거. 터미널 작업은 null. */
   convo_session_id?: string | null;
   /** 명시적 immutable Goal Contract. null이면 기존 instruction-only 작업. */
@@ -228,6 +233,10 @@ export interface MobileSession {
  * 로컬 DB 전용(Runner 미지원): 원격 연결 중에는 빈 목록이 되고 카탈로그만 보인다.
  */
 export const observedModels = () => invoke<ObservedModel[]>("observed_models");
+
+/** 설치된 CLI의 모델 후보. 조회 실패 시 화면에서는 내장 목록으로 돌아간다. */
+export const agentAvailableModels = (agent: string) =>
+  invoke<ModelOption[]>("agent_available_models", { agent });
 
 /** 봇 `/run`·크론 task가 만든 작업의 실행 전 게이트 상태 — 사용자 승인 전까지 에이전트 미실행. */
 export const PENDING_APPROVAL = "PendingApproval";

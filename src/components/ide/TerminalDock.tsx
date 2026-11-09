@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
 import { ShellTerminal } from "./ShellTerminal";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 import { useTerminalDockHeight } from "./terminal-dock-height";
 
 interface Props {
@@ -42,19 +43,14 @@ export function TerminalDock({
         onKeyDown={resize.onKeyDown}
       />
       <div className="h-8 shrink-0 flex items-center gap-2 px-3 border-b border-border">
-        <Icon name="terminal" size={13} />
+        <Icon name="terminal" size={14} />
         <span className="text-xs uppercase tracking-wide text-text-muted">터미널</span>
         {label != null && (
           <span className="text-xs text-text-muted truncate opacity-70">{label}</span>
         )}
-        <button
-          className="ml-auto p-1 text-text-muted hover:text-text"
-          onClick={onClose}
-          title="터미널 닫기 (⌃`)"
-          aria-label="터미널 닫기"
-        >
-          <Icon name="x" size={13} />
-        </button>
+        <IconButton size="sm" className="ml-auto" label="터미널 닫기" title="터미널 닫기 (⌃`)" onClick={onClose}>
+          <Icon name="x" size={14} />
+        </IconButton>
       </div>
       {available ? (
         <ShellTerminal

@@ -133,7 +133,7 @@ export function ContextMenuShell({ at, ariaLabel, header, rows, onClose, resetKe
   return (
     <div
       ref={ref}
-      className="fixed z-50 min-w-[180px] max-w-[260px] rounded-md border border-border-strong bg-raised py-1 shadow-xl"
+      className="fixed z-50 min-w-[180px] max-w-[260px] rounded-md border border-border-strong bg-raised py-1 shadow-e2"
       style={{ top: pos.top, left: pos.left }}
       onMouseDown={(e) => e.stopPropagation()}
       role="menu"

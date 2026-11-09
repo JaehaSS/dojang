@@ -199,7 +199,7 @@ pub async fn consume_expected(
 ) -> anyhow::Result<ReferencePreview> {
     let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
     let preview = load_preview_connection(
-        &mut *transaction,
+        &mut transaction,
         binding,
         client_ref,
         "pending",
@@ -209,7 +209,7 @@ pub async fn consume_expected(
     .ok_or_else(|| {
         anyhow::anyhow!("selected attachments changed before delivery; prepare them again")
     })?;
-    let policy = load_policy_connection(&mut *transaction, binding, client_ref, "pending")
+    let policy = load_policy_connection(&mut transaction, binding, client_ref, "pending")
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!("selected attachment snapshot is incomplete; prepare it again")

@@ -71,7 +71,7 @@ function FeedbackRow({
   return (
     <div className="flex min-w-0 items-center gap-2 rounded border border-border px-2.5 py-1.5 text-xs">
       {current && (
-        <span className="shrink-0 rounded bg-primary/15 px-1.5 text-[10px] text-primary-bright">
+        <span className="shrink-0 rounded bg-primary/15 px-1.5 text-[11px] text-primary-bright">
           현재
         </span>
       )}

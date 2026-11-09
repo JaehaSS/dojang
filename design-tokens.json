@@ -48,15 +48,9 @@
     "status": {
       "running":  { "bg": { "$value": "#0c1929" }, "border": { "$value": "#1d4ed8" }, "text": { "$value": "#60a5fa" } },
       "awaiting": { "bg": { "$value": "#1c1407" }, "border": { "$value": "#b45309" }, "text": { "$value": "#fbbf24" } },
+      "question": { "bg": { "$value": "#150c1f" }, "border": { "$value": "#7e22ce" }, "text": { "$value": "#c084fc" } },
       "done":     { "bg": { "$value": "#071a0f" }, "border": { "$value": "#15803d" }, "text": { "$value": "#4ade80" } },
       "failed":   { "bg": { "$value": "#1a0a0a" }, "border": { "$value": "#b91c1c" }, "text": { "$value": "#f87171" } }
-    },
-    "role": {
-      "planner": { "$value": "#b7a47a", "$description": "Plan Board identity strip" },
-      "researcher": { "$value": "#64748b", "$description": "Explore Archive identity strip" },
-      "implementer": { "$value": "#14b8a6", "$description": "Build Pods identity strip" },
-      "tester": { "$value": "#b78aa5", "$description": "Test Bench identity strip" },
-      "reviewer": { "$value": "#8b7ad1", "$description": "Review Core identity strip" }
     }
   },
   "fontFamily": {

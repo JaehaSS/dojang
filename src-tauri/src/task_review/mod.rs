@@ -652,6 +652,7 @@ mod tests {
             max_concurrent_tasks: 1,
             execution_policy: crate::runner::config::ExecutionPolicy::RequireApproval,
             pairing_token_file: repo.join("unused"),
+            ..Default::default()
         };
         let error = crate::runner::finalize_task(
             &config,

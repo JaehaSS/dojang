@@ -47,7 +47,9 @@ describe("ProjectEditorWindow", () => {
   it("toggles the project terminal from its header", async () => {
     await act(async () => { root.render(<ProjectEditorWindow />); await Promise.resolve(); await Promise.resolve(); });
     const button = host.querySelector<HTMLButtonElement>('[aria-label="터미널 열기"]');
-    expect(button?.title).toBe("터미널 열기 (⌃`)");
+    // 단축키는 네이티브 title이 아니라 공용 툴팁이 싣는다 — 키보드 포커스에 바로 뜬다.
+    act(() => button?.focus());
+    expect(document.body.querySelector('[role="tooltip"]')?.textContent).toBe("터미널 열기 (⌃`)");
 
     await act(async () => button?.click());
 

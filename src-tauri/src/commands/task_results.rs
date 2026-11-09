@@ -1,5 +1,26 @@
-use super::{pool_of, require_notification_window, AppState};
+use super::{pool_of, require_main_notification_window, require_notification_window, AppState};
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
+
+#[tauri::command]
+pub async fn task_pr_status_get(
+    state: State<'_, AppState>,
+    window: WebviewWindow,
+    id: i64,
+) -> Result<crate::github::pr_status::PrStatusSnapshot, String> {
+    require_main_notification_window(&window)?;
+    let task = crate::db::get_task(&pool_of(&state)?, id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "작업을 찾을 수 없습니다".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::github::pr_status::snapshot(
+            std::path::Path::new(&task.worktree_path),
+            &task.branch,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
 
 #[tauri::command]
 pub async fn task_result_get(
@@ -9,6 +30,38 @@ pub async fn task_result_get(
 ) -> Result<crate::task_results::TaskResultSnapshot, String> {
     require_notification_window(&window)?;
     crate::task_results::snapshot(&pool_of(&state)?, id).await
+}
+#[tauri::command]
+pub async fn review_artifact_list(
+    state: State<'_, AppState>,
+    window: WebviewWindow,
+    id: i64,
+) -> Result<Vec<crate::task_results::artifacts::ArtifactVersion>, String> {
+    require_main_notification_window(&window)?;
+    crate::task_results::artifacts::list(&pool_of(&state)?, id).await
+}
+#[tauri::command]
+pub async fn review_artifact_get(
+    state: State<'_, AppState>,
+    window: WebviewWindow,
+    id: i64,
+    artifact_id: i64,
+) -> Result<crate::task_results::artifacts::ArtifactSnapshot, String> {
+    require_main_notification_window(&window)?;
+    crate::task_results::artifacts::get(&pool_of(&state)?, id, artifact_id).await
+}
+#[tauri::command]
+pub async fn review_artifact_save(
+    state: State<'_, AppState>,
+    window: WebviewWindow,
+    app: AppHandle,
+    id: i64,
+    input: crate::task_results::artifacts::ArtifactSaveInput,
+) -> Result<crate::task_results::artifacts::ArtifactSnapshot, String> {
+    require_main_notification_window(&window)?;
+    let artifact = crate::task_results::artifacts::save(&pool_of(&state)?, id, input).await?;
+    let _ = app.emit("task-result://changed", id);
+    Ok(artifact)
 }
 #[tauri::command]
 pub async fn task_result_reference(

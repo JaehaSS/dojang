@@ -274,7 +274,7 @@ async fn java_navigation_definition_references_and_semantic_tokens() {
         let tokens = pool.semantic_tokens(91, &root, &rel, &text).await?;
         if tokens
             .as_ref()
-            .map_or(true, |tokens| tokens.data.is_empty())
+            .is_none_or(|tokens| tokens.data.is_empty())
         {
             return Err("jdtls 의미 토큰이 비었습니다".into());
         }

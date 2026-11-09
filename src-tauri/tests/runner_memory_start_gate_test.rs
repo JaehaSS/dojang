@@ -38,6 +38,7 @@ async fn pending_approval_proceeds_even_when_the_block_was_edited() {
         max_concurrent_tasks: 1,
         execution_policy: ExecutionPolicy::RequireApproval,
         pairing_token_file: temp_root::dir().join("unused-runner-token"),
+        ..Default::default()
     };
     let worktree_locks = praxis_lib::runner::worktree_lock::WorktreeLocks::default();
     let task = runner::create_queued_task(

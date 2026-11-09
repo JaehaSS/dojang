@@ -10,6 +10,7 @@ import { useEditorActions } from "./useEditorActions";
 import { EditorSplitView } from "./EditorSplitView";
 import { FileTree } from "./FileTree";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 import { ProjectTerminal, restartProjectShell } from "./ProjectTerminal";
 import { PROJECT_EDITOR_READY_EVENT } from "../../lib/editor-window-events";
 import { useTheme } from "../../lib/use-theme";
@@ -136,14 +137,15 @@ export function ProjectEditorWindow() {
   return <div className="h-screen flex flex-col bg-bg text-text">
     <header className="h-9 shrink-0 flex items-center gap-2 px-3 border-b border-border text-xs text-text-muted">
       <Icon name="folder" size={14} /><span className="truncate">{info.root}</span>
-      <button className="ml-auto p-1 hover:text-text" onClick={toggleTerminal} aria-label={terminalOpen ? "터미널 닫기" : "터미널 열기"} aria-pressed={terminalOpen} title={terminalOpen ? "터미널 닫기 (⌃`)" : "터미널 열기 (⌃`)"}><Icon name="terminal" size={14} /></button>
+      <IconButton size="sm" className="ml-auto" onClick={toggleTerminal} label={terminalOpen ? "터미널 닫기" : "터미널 열기"} pressed={terminalOpen} title={terminalOpen ? "터미널 닫기 (⌃`)" : "터미널 열기 (⌃`)"}><Icon name="terminal" size={14} /></IconButton>
     </header>
     <div className="flex flex-1 min-h-0">
       <aside className={`w-64 shrink-0 border-r border-border flex-col ${treeOpen ? "flex" : "hidden"}`}>
-        <div className="h-8 px-2 flex items-center text-xs text-text-muted">파일<button className="ml-auto p-1 hover:text-text" onClick={() => files.refreshTree()} aria-label="파일 트리 새로고침"><Icon name="refresh" size={13} /></button><button className="p-1 hover:text-text" onClick={() => setTreeOpen(false)} aria-label="파일 트리 닫기"><Icon name="x" size={13} /></button></div>
+        <div className="h-8 px-2 flex items-center text-xs text-text-muted">파일<IconButton size="sm" className="ml-auto" onClick={() => files.refreshTree()} label="파일 트리 새로고침"><Icon name="refresh" size={14} /></IconButton><IconButton size="sm" onClick={() => setTreeOpen(false)} label="파일 트리 닫기"><Icon name="x" size={14} /></IconButton></div>
         <div className="flex-1 overflow-auto"><FileTree nodes={files.tree} activePath={files.activeFile?.path ?? null} onOpen={(path) => void files.openFile(path, { preview: true, tree: true })} onPin={(path) => files.pinTab(fileTabKey(path))} /></div>
       </aside>
-      {!treeOpen && <button className="w-8 shrink-0 border-r border-border" onClick={() => setTreeOpen(true)} aria-label="파일 트리 열기"><Icon name="folder" size={14} /></button>}
+      {/* 접힌 트리 레일 — 세션 에디터 창(EditorWindow)과 같은 모양: 얇은 열 위쪽에 아이콘 버튼 하나. */}
+      {!treeOpen && <div className="w-8 shrink-0 border-r border-border flex flex-col items-center pt-1"><IconButton size="sm" onClick={() => setTreeOpen(true)} label="파일 트리 열기"><Icon name="folder" size={14} /></IconButton></div>}
       <div className="flex min-w-0 min-h-0 flex-1 flex-col">
         <EditorSplitView taskId={null} readHtmlAsset={source?.read} lspScopeKey={`project:${info.root}`} onGoto={actions.gotoSymbol} onLspStatus={actions.askLspStatus} onSemanticTokens={actions.askSemanticTokens} onOpenTarget={actions.openLspTarget} onNavigationError={setError} host={LOCAL_HOST} rootPath={info.root} windowId={info.label} ownsWindow files={files.openFiles} activeKey={files.activeKey} treeOpen={files.treeOpen} onTreeOpenHandled={files.consumeTreeOpen} dark={theme.kind !== "light"} onSelect={files.setActiveKey} onClose={files.closeTab} onBeforeClose={beforeCloseTab} onOpenFile={files.openFile} readFile={files.readFile} onChange={files.changeFile} onSave={(path, content) => void files.saveFile(path, content)} onReload={(path) => void files.reloadFile(path)} onOpenPath={(path) => void projectEditorOpenPath(path).catch((cause) => setError(String(cause)))} onRevealPath={(path) => void projectEditorResolvePath(path).then(revealItemInDir).catch((cause) => setError(String(cause)))} onPinTab={files.pinTab} codeFontFamily={fontSettings ? codeFontStack(fontSettings.code_family) : undefined} codeFontSize={fontSettings?.code_size} editorSettings={editorSettings} />
         {terminalStarted && <section className={`h-64 shrink-0 border-t border-border flex flex-col ${terminalOpen ? "" : "hidden"}`}><div className="h-8 px-3 flex items-center gap-2 text-xs text-text-muted">터미널{terminalExited && <button className="ml-auto text-primary-bright" onClick={() => void restartShell()}>재시작</button>}</div><ProjectTerminal hidden={!terminalOpen} restart={restart} onSession={setShellSession} onExit={setTerminalExited} onError={setError} /></section>}

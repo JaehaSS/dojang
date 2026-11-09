@@ -47,7 +47,12 @@ type Name =
   | "popout"
   | "panelRight"
   | "splitRight"
-  | "splitDown";
+  | "splitDown"
+  | "alert"
+  | "circle"
+  | "pencil"
+  | "download"
+  | "link";
 
 // 각 아이콘은 서브패스 배열 — 문자열 split 파서 없이 그대로 <path>로 렌더.
 const PATHS: Record<Name, string[]> = {
@@ -136,9 +141,23 @@ const PATHS: Record<Name, string[]> = {
   // 에디터 분할 — 나뉜 자리를 그대로 보여 준다(layout-columns / layout-rows).
   splitRight: ["M4 5h16v14H4z", "M12 5v14"],
   splitDown: ["M4 5h16v14H4z", "M4 12h16"],
+  // 경고(alert-triangle) — ⚠ 글리프 대체. 상태색과 함께 쓰되 문구를 항상 병기한다.
+  alert: ["M12 4 3 19h18z", "M12 10v4", "M12 17h.01"],
+  // 빈 원 — 미완료 표시(체크와 짝).
+  circle: ["M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z"],
+  pencil: ["M4 20h4L19 9l-4-4L4 16z", "M13.5 6.5l4 4"],
+  download: ["M12 4v11", "M7 10l5 5 5-5", "M5 20h14"],
+  link: ["M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1", "M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"],
 };
 
-export function Icon({ name, size = 18 }: { name: Name; size?: number }) {
+/**
+ * 아이콘 크기는 이 다섯 단계뿐이다(DESIGN.md `iconography`). 12 글줄 안 메타·칩 닫기,
+ * 14 sm 컨트롤(h-6), 16 md 컨트롤·기본, 20 카드 머리·빈 상태 보조, 40 빈 상태 대표.
+ * 숫자를 자유롭게 열어 두었더니 11·13·15·18·22가 섞여 같은 행의 아이콘 크기가 달라졌다.
+ */
+export type IconSize = 12 | 14 | 16 | 20 | 40;
+
+export function Icon({ name, size = 16 }: { name: Name; size?: IconSize }) {
   return (
     <svg
       width={size}

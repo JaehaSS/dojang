@@ -129,7 +129,7 @@ export function FileContextMenu({ menu, block, readOnly, clipboard, onAction, on
   return (
     <div
       ref={ref}
-      className="fixed z-50 min-w-[168px] max-w-[240px] rounded-md border border-border-strong bg-raised py-1 shadow-xl"
+      className="fixed z-50 min-w-[168px] max-w-[240px] rounded-md border border-border-strong bg-raised py-1 shadow-e2"
       style={{ top: pos.top, left: pos.left }}
       onMouseDown={(e) => e.stopPropagation()}
       role="menu"

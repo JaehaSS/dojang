@@ -9,6 +9,7 @@ export type TaskTab = (typeof TASK_TABS)[number];
 
 export type Route =
   | { name: "home" }
+  | { name: "assistant" }
   /**
    * `tab: null`은 "탭을 지정하지 않았다"는 뜻이다. 어느 탭을 열지는 작업의 mode가 정한다 —
    * 대화 작업을 열었는데 diff가 먼저 뜨면 들어온 목적과 어긋난다.
@@ -44,6 +45,8 @@ export function matchRoute(pathname: string): Route {
   if (segments.length === 0) return { name: "home" };
 
   switch (segments[0]) {
+    case "assistant":
+      return segments.length === 1 ? { name: "assistant" } : { name: "notfound", path: pathname };
     case "new":
       return segments.length === 1 ? { name: "new" } : { name: "notfound", path: pathname };
     case "schedules":
@@ -70,6 +73,8 @@ export function hrefFor(route: Route): string {
   switch (route.name) {
     case "home":
       return `${BASE}/`;
+    case "assistant":
+      return `${BASE}/assistant`;
     case "new":
       return `${BASE}/new`;
     case "schedules":

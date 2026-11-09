@@ -55,7 +55,7 @@ function CandidateMetricCard({
         <span className="ml-auto text-text-muted">{candidate.state}</span>
       </div>
       {identity.requested && (
-        <div className="mt-0.5 truncate pl-0.5 text-[10px] text-text-muted">
+        <div className="mt-0.5 truncate pl-0.5 text-[11px] text-text-muted">
           {identity.requested}
         </div>
       )}

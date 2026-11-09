@@ -73,8 +73,9 @@ export interface EditorRevealPayload {
   /** `src/App.tsx:1187` 표기로 온 링크의 착지 줄. null이면 파일만 연다. */
   line: number | null;
   column: number | null;
-  /** `"diff"`면 그 경로의 diff 탭을 연다 — 변경 목록의 행이 보내는 링크. 없으면 파일 탭이다. */
-  kind?: "diff";
+  /** `"diff"`면 그 경로의 diff 탭을 연다 — 변경 목록의 행이 보내는 링크. 없으면 파일 탭이다.
+   *  `"changes"`면 트리 열을 변경 렌즈로 연다 — 메인 창의 변경 칩이 보낸다. `path`는 쓰지 않는다. */
+  kind?: "diff" | "changes";
 }
 
 /** 버블이 보내는 질문. 선택 코드와 질문 텍스트를 함께 싣는다. */

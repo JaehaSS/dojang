@@ -48,13 +48,13 @@ export function EffortPicker({ agent, model, effort, onChange }: Props) {
             : "Reasoning effort: 기본값 — CLI 설정을 따름"
         }
       >
-        <Icon name="chart" size={13} />
+        <Icon name="chart" size={14} />
         <span className="max-w-[120px] truncate">{chipLabel}</span>
         <Icon name="chevronDown" size={12} />
       </button>
 
       {open && (
-        <div className="absolute bottom-full left-0 mb-1 z-20 w-48 rounded-lg border border-border-strong bg-raised py-1 shadow-xl">
+        <div className="absolute bottom-full left-0 mb-1 z-20 w-48 rounded-lg border border-border-strong bg-raised py-1 shadow-e2">
           <div className="px-3 py-1 text-xs text-text-muted">
             Effort <span className="text-text-secondary">— 이 세션에만 적용</span>
           </div>
@@ -66,7 +66,7 @@ export function EffortPicker({ agent, model, effort, onChange }: Props) {
             title="CLI 설정의 기본 reasoning effort를 따름"
           >
             <span className={`shrink-0 w-4 ${!overridden ? "text-primary-bright" : "text-text-muted"}`}>
-              <Icon name={!overridden ? "check" : "chart"} size={13} />
+              <Icon name={!overridden ? "check" : "chart"} size={14} />
             </span>
             <span className="truncate flex-1">기본 (설정값)</span>
           </button>
@@ -81,7 +81,7 @@ export function EffortPicker({ agent, model, effort, onChange }: Props) {
                 onClick={() => pick(option)}
               >
                 <span className={`shrink-0 w-4 ${on ? "text-primary-bright" : "text-text-muted"}`}>
-                  <Icon name={on ? "check" : "chart"} size={13} />
+                  <Icon name={on ? "check" : "chart"} size={14} />
                 </span>
                 <span className="truncate flex-1">{option}</span>
               </button>

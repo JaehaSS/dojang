@@ -120,7 +120,7 @@ function ChangeRow({
         onClick={onOpen}
       >
         <span
-          className={`w-3 shrink-0 font-code text-[10px] ${statusColor[file.status] ?? "text-text-muted"}`}
+          className={`w-3 shrink-0 font-code text-[11px] ${statusColor[file.status] ?? "text-text-muted"}`}
         >
           {file.status}
         </span>
@@ -128,9 +128,9 @@ function ChangeRow({
             정작 필요한 파일명이 사라진다. 자리가 모자라면 긴 쪽(디렉터리)이 먼저 줄어든다. */}
         <span className="flex min-w-0 flex-1 items-baseline gap-1 overflow-hidden">
           <span className="truncate font-code text-text-secondary">{name}</span>
-          {dir && <span className="truncate font-code text-[10px] text-text-muted">{dir}</span>}
+          {dir && <span className="truncate font-code text-[11px] text-text-muted">{dir}</span>}
         </span>
-        <span className="shrink-0 font-code text-[10px] tabular-nums">
+        <span className="shrink-0 font-code text-[11px] tabular-nums">
           <span className="text-status-done">+{summary.additions}</span>{" "}
           <span className="text-status-failed">−{summary.deletions}</span>
         </span>

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ACTIVE_STATES, type Task } from "../../lib/ipc";
+import { canArchiveTask, isTaskArchived } from "../../lib/task-archive";
 import { PROJECT_GROUP_COLORS, type ProjectGroupColorId } from "../../lib/project-group-colors";
 import type { ProjectGroup } from "../../lib/project-groups";
 import { groupPath } from "../../lib/project-group-tree";
@@ -44,6 +45,10 @@ interface Props extends GroupActions {
    * 안 넘기면 항목이 그려지지 않는다.
    */
   onMergeTask?: (task: Task) => void;
+  /** 로컬 종료 작업을 기록·워크트리 유지 상태로 목록에서 보관한다. */
+  onArchiveTask?: (task: Task) => void;
+  /** 보관 목록에서만 다시 보이게 한다. 워크트리는 다시 만들지 않는다. */
+  onRestoreTask?: (task: Task) => void;
   onRemoveProject: (repo: string) => void;
 }
 
@@ -84,7 +89,7 @@ function MenuBox({
   const menu = (
     <div
       ref={ref}
-      className="fixed z-50 max-h-[calc(100vh-16px)] min-w-[168px] max-w-[240px] overflow-y-auto rounded-md border border-border-strong bg-raised py-1 shadow-xl"
+      className="fixed z-50 max-h-[calc(100vh-16px)] min-w-[168px] max-w-[240px] overflow-y-auto rounded-md border border-border-strong bg-raised py-1 shadow-e2"
       style={position}
       onMouseDown={(event) => event.stopPropagation()}
       role="menu"
@@ -118,7 +123,7 @@ function GroupColorPage({
       onClose();
     }}>
       <button className={ITEM} onClick={onBack}>
-        <Icon name="chevronLeft" size={13} /> 그룹 색상
+        <Icon name="chevronLeft" size={14} /> 그룹 색상
       </button>
       <Divider />
       {PROJECT_GROUP_COLORS.map((color, index) => (
@@ -135,7 +140,7 @@ function GroupColorPage({
         >
           <span className="h-3 w-3 rounded-full" style={{ backgroundColor: color.accent }} />
           <span>{color.label}</span>
-          {group.color === color.id && <Icon name="check" size={13} />}
+          {group.color === color.id && <Icon name="check" size={14} />}
         </button>
       ))}
       <Divider />
@@ -149,7 +154,7 @@ function GroupColorPage({
         }}
       >
         기본값으로 되돌리기
-        {group.color === undefined && <Icon name="check" size={13} />}
+        {group.color === undefined && <Icon name="check" size={14} />}
       </button>
     </div>
   );
@@ -159,16 +164,20 @@ const Divider = () => <div className="my-1 border-t border-border" />;
 
 /** 머지는 워크트리 작업에만 뜻이 있다 — 직접 실행은 이미 체크아웃된 브랜치에서 돌았다. */
 const canMerge = (task: Task): boolean =>
-  task.state === "AwaitingReview" && !task.stale && !isDirectRun(task);
+  !isTaskArchived(task) && task.state === "AwaitingReview" && !task.stale && !isDirectRun(task);
 
 function TaskMenu({
   task,
   onRun,
   onMerge,
+  onArchive,
+  onRestore,
 }: {
   task: Task;
   onRun: () => void;
   onMerge?: () => void;
+  onArchive?: () => void;
+  onRestore?: () => void;
 }) {
   return (
     <>
@@ -184,16 +193,34 @@ function TaskMenu({
       <Divider />
       {onMerge && canMerge(task) && (
         <button className={ITEM} onClick={onMerge} title={`${task.branch} → ${task.base}`}>
-          <Icon name="check" size={13} />
+          <Icon name="check" size={14} />
           <span className="min-w-0 truncate">{task.base}</span>
           <span className="shrink-0">에 머지</span>
+        </button>
+      )}
+      {onArchive && canArchiveTask(task) && (
+        <button
+          className={ITEM}
+          onClick={onArchive}
+          title="세션 기록과 워크트리는 유지한 채 활성 목록에서 보관합니다."
+        >
+          <Icon name="folder" size={14} /> 보관 (기록·폴더 유지)
+        </button>
+      )}
+      {onRestore && isTaskArchived(task) && (
+        <button
+          className={ITEM}
+          onClick={onRestore}
+          title="목록에만 다시 표시합니다. 워크트리를 다시 만들지 않습니다."
+        >
+          <Icon name="refresh" size={14} /> 복원 (목록만)
         </button>
       )}
       <button
         className="w-full text-left flex items-center gap-2 px-3 py-1.5 text-sm text-status-failed hover:bg-surface"
         onClick={onRun}
       >
-        <Icon name="x" size={13} />
+        <Icon name="x" size={14} />
         {task.state === "AwaitingReview"
           ? "버리기 (워크트리 정리)"
           : ACTIVE_STATES.includes(task.state)
@@ -221,7 +248,7 @@ function MoveToGroupPage({
   return (
     <>
       <button className={`${ITEM} text-text-muted`} onClick={onBack}>
-        <Icon name="chevronLeft" size={13} /> 그룹으로 이동
+        <Icon name="chevronLeft" size={14} /> 그룹으로 이동
       </button>
       <Divider />
       {(actions.groups ?? []).map((group) => (
@@ -234,7 +261,7 @@ function MoveToGroupPage({
           }}
         >
           <span className="truncate" title={groupPath(actions.groups ?? [], group.id)}>{groupPath(actions.groups ?? [], group.id)}</span>
-          {current === group.id && <Icon name="check" size={13} />}
+          {current === group.id && <Icon name="check" size={14} />}
         </button>
       ))}
       <button
@@ -244,7 +271,7 @@ function MoveToGroupPage({
           actions.onMoveToNewGroup?.(repo);
         }}
       >
-        <Icon name="plus" size={13} /> 새 그룹…
+        <Icon name="plus" size={14} /> 새 그룹…
       </button>
     </>
   );
@@ -261,7 +288,7 @@ function GroupMovePage({ groupId, actions, onBack, onClose }: {
   return (
     <>
       <button className={`${ITEM} text-text-muted`} onClick={onBack}>
-        <Icon name="chevronLeft" size={13} /> 그룹으로 이동
+        <Icon name="chevronLeft" size={14} /> 그룹으로 이동
       </button>
       <Divider />
       {groups.filter((group) => group.id !== groupId && actions.canMoveGroup?.(groupId, group.id) !== false).map((group) => (
@@ -275,7 +302,7 @@ function GroupMovePage({ groupId, actions, onBack, onClose }: {
           }}
         >
           <span className="truncate" title={groupPath(groups, group.id)}>{groupPath(groups, group.id)}</span>
-          {current === group.id && <Icon name="check" size={13} />}
+          {current === group.id && <Icon name="check" size={14} />}
         </button>
       ))}
     </>
@@ -314,9 +341,9 @@ function ProjectMenu({
       <Divider />
       {actions.onMoveToGroup && (
         <button className={ITEM} onClick={() => setPage("move")}>
-          <Icon name="folder" size={13} />
+          <Icon name="folder" size={14} />
           <span className="truncate">그룹으로 이동</span>
-          <Icon name="chevronRight" size={13} />
+          <Icon name="chevronRight" size={14} />
         </button>
       )}
       {current !== null && (
@@ -339,7 +366,7 @@ function ProjectMenu({
           onRemoveProject(repo);
         }}
       >
-        <Icon name="x" size={13} /> 프로젝트 제거
+        <Icon name="x" size={14} /> 프로젝트 제거
       </button>
     </>
   );
@@ -409,7 +436,7 @@ function GroupMenu({
         이름 바꾸기
       </button>
       <button className={ITEM} onClick={() => setPage("move")}>
-        <Icon name="folder" size={13} /> 그룹으로 이동 <Icon name="chevronRight" size={13} />
+        <Icon name="folder" size={14} /> 그룹으로 이동 <Icon name="chevronRight" size={14} />
       </button>
       <button
         disabled={parentId === null}
@@ -429,7 +456,7 @@ function GroupMenu({
         }}
       >
         그룹 색상
-        <Icon name="chevronRight" size={13} />
+        <Icon name="chevronRight" size={14} />
       </button>
       <button
         className={ITEM}
@@ -450,6 +477,8 @@ export function TaskNavigationMenu({
   onClose,
   onDeleteTask,
   onMergeTask,
+  onArchiveTask,
+  onRestoreTask,
   onRemoveProject,
   ...actions
 }: Props) {
@@ -499,6 +528,20 @@ export function TaskNavigationMenu({
               onMergeTask(menu.task);
             })
           }
+          onArchive={
+            onArchiveTask &&
+            (() => {
+              onClose();
+              onArchiveTask(menu.task);
+            })
+          }
+          onRestore={
+            onRestoreTask &&
+            (() => {
+              onClose();
+              onRestoreTask(menu.task);
+            })
+          }
         />
       )}
       {menu.kind === "project" && (
@@ -519,7 +562,7 @@ export function TaskNavigationMenu({
             actions.onCreateGroup?.();
           }}
         >
-          <Icon name="plus" size={13} /> 새 그룹 만들기
+          <Icon name="plus" size={14} /> 새 그룹 만들기
         </button>
       )}
       {menu.kind === "group" && (

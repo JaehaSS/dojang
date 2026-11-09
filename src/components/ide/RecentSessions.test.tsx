@@ -52,7 +52,7 @@ describe("RecentSessions", () => {
     const html = render([task()]);
 
     expect(html.indexOf("praxis")).toBeLessThan(html.indexOf("사이드바 정리"));
-    expect(html).toContain('<span class="shrink-0 font-medium">praxis</span>');
+    expect(html).toMatch(/<span class="shrink-0 font-medium"[^>]*>praxis<\/span>/);
   });
 
   it("instruction이 비면 브랜치명을 대신 적는다", () => {
@@ -68,10 +68,12 @@ describe("RecentSessions", () => {
     expect(local).not.toContain("원격 호스트");
   });
 
-  it("선택된 행은 트리 카드와 같은 선택 스타일을 쓴다", () => {
+  it("선택된 행은 트리 행과 같은 선택 스타일을 쓴다", () => {
     const html = render([task({ id: 4 }), task({ id: 5, updated_at: NOW - 120 })], "local:4");
 
-    expect(html).toContain("bg-raised border-primary");
+    expect(html).toContain('aria-current="true"');
+    expect(html).toContain("bg-raised text-text");
+    expect(html).not.toContain("border-primary");
     expect(html).toContain('data-task-key="local:4"');
   });
 

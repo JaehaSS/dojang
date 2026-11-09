@@ -8,6 +8,7 @@ import {
   type MobileConvoItem,
 } from "./convo";
 import { Empty, Spinner } from "./primitives";
+import { Icon } from "../components/ide/icons";
 
 // 대화 탭 — 스트림 표시 + 후속 지시 전송. (설계 0013 §10 M2)
 // 마크다운은 렌더하지 않는다. 번들에 react-markdown을 끌어오는 값에 비해 폰에서 얻는
@@ -34,8 +35,9 @@ function Bubble({ item }: { item: MobileConvoItem }) {
       );
     case "result":
       return (
-        <div className={`font-code text-xs ${item.error ? "text-status-failed" : "text-text-muted"}`}>
-          {item.error ? "×" : "✓"} {item.summary}
+        <div className={`flex items-start gap-1 font-code text-xs ${item.error ? "text-status-failed" : "text-text-muted"}`}>
+          <span className="mt-0.5 inline-flex shrink-0"><Icon name={item.error ? "x" : "check"} size={12} /></span>
+          <span className="min-w-0">{item.summary}</span>
         </div>
       );
     case "error":

@@ -5,6 +5,7 @@ import type { MobilePairing, MobileSession } from "../../lib/ipc";
 import type { RunnerTransport } from "../../lib/transport/runner";
 import { ago } from "../../lib/fmt";
 import { Icon } from "./icons";
+import { IconButton } from "../ui";
 
 interface Props {
   /** 작업 소스인 Runner. 원격에 붙어 있지 않으면 null — 모바일 세션은 Runner에만 있다. */
@@ -284,14 +285,9 @@ export function MobilePairingCard({ transport }: Props) {
       <div>
         <div className="mb-1 flex items-center justify-between">
           <span className="text-xs text-text-secondary">연결된 기기</span>
-          <button
-            className="text-text-muted hover:text-text"
-            onClick={() => void refreshSessions()}
-            aria-label="기기 목록 새로고침"
-            title="새로고침"
-          >
-            <Icon name="refresh" size={13} />
-          </button>
+          <IconButton size="sm" label="기기 목록 새로고침" onClick={() => void refreshSessions()}>
+            <Icon name="refresh" size={14} />
+          </IconButton>
         </div>
         {sessions.length === 0 ? (
           <div className="text-xs text-text-muted">아직 연결된 기기가 없습니다.</div>

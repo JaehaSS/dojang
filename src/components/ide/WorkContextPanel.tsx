@@ -1,9 +1,11 @@
 import { useEffect, useId, useState, type ReactElement, type ReactNode } from "react";
 import { ago, stamp } from "../../lib/fmt";
 import { taskToolCost, type Task, type ToolCostReport } from "../../lib/ipc";
-import { lastRunLabel, taskStatusLabel, taskTextClass } from "../../lib/task-status";
+import { lastRunLabel, taskStatusLabel, taskTone } from "../../lib/task-status";
+import { Badge } from "../ui";
 import { Icon, type IconName } from "./icons";
 import { AmbiguityBadge } from "./InterviewPanel";
+import { IconButton } from "../ui";
 
 export type WorkContextDiff =
   | { state: "loading" }
@@ -225,7 +227,6 @@ function DiffSummary({ diff }: { diff: WorkContextDiff }): ReactElement {
   );
 }
 
-const stateColor = (task: Pick<Task, "state" | "awaiting_kind">): string => taskTextClass(task);
 
 /** 절대 시각과 경과를 함께 — "12m 전"만으로는 어제인지 지난주인지 알 수 없고, 시각만으로는 감이 없다. */
 function TimeMark({ label, at }: { label: string; at: number }): ReactElement {
@@ -306,28 +307,22 @@ export function WorkContextPanel({ task, runtime, diff, onRefresh, onCollapse }:
     <section className="border-b border-border px-3 pb-3" aria-label="작업 환경">
       <div className="flex h-10 items-center text-xs">
         <h2 className="font-medium text-text-secondary">환경</h2>
-        <button
-          type="button"
-          className="ml-auto p-1 text-text-muted hover:text-text"
+        <IconButton
+          size="sm"
+          className="ml-auto"
+          label="변경 사항 새로고침"
+          title="변경 사항과 툴 비용 새로고침"
           onClick={() => {
             onRefresh();
             reloadToolCost();
           }}
-          aria-label="변경 사항 새로고침"
-          title="변경 사항과 툴 비용 새로고침"
         >
-          <Icon name="refresh" size={15} />
-        </button>
+          <Icon name="refresh" size={14} />
+        </IconButton>
         {onCollapse && (
-          <button
-            type="button"
-            className="p-1 text-text-muted hover:text-text"
-            onClick={onCollapse}
-            aria-label="작업정보 접기"
-            title="작업정보 접기 — 우상단 핸들로 다시 연다"
-          >
-            <Icon name="x" size={15} />
-          </button>
+          <IconButton size="sm" label="작업정보 접기" title="작업정보 접기 — 우상단 핸들로 다시 연다" onClick={onCollapse}>
+            <Icon name="x" size={14} />
+          </IconButton>
         )}
       </div>
 
@@ -349,8 +344,7 @@ export function WorkContextPanel({ task, runtime, diff, onRefresh, onCollapse }:
           <span className="font-code">{pathLeaf(task.worktree_path)}</span>
         </ContextRow>
         <ContextRow icon="clock" label="작업 상태">
-          <span className={stateColor(task)}>●</span>{" "}
-          <span>{taskStatusLabel(task)}</span>
+          <Badge tone={taskTone(task)}>{taskStatusLabel(task)}</Badge>
         </ContextRow>
         <dt className="sr-only">세션 기록</dt>
         <dd>

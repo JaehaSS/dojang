@@ -4,6 +4,7 @@
 //! 순수 로직(PATH 비의존): bin **이름**만 반환하고, 절대경로 해석은 호출측(`reviewer::which`)이 한다
 //! (portable_pty가 프로그램명을 PATH로 해석하지 않으므로 스폰 시 절대경로가 필요).
 
+pub mod model_catalog;
 mod reasoning_effort;
 pub mod service_tier;
 mod role;

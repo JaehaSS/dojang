@@ -49,14 +49,14 @@ export function IsolationPicker({ choice, globalDefault, onPick }: Props) {
         onClick={() => setOpen((v) => !v)}
         title={current.caption}
       >
-        <Icon name={isolated ? "branch" : "folder"} size={13} />
+        <Icon name={isolated ? "branch" : "folder"} size={14} />
         <span className="max-w-[160px] truncate">{isolated ? "워크트리" : "직접 실행"}</span>
         {pinned && <span className="text-text-muted">· 이 프로젝트</span>}
         <Icon name="chevronDown" size={12} />
       </button>
 
       {open && (
-        <div className="absolute bottom-full left-0 mb-1 z-20 w-80 rounded-lg border border-border-strong bg-raised py-1 shadow-xl">
+        <div className="absolute bottom-full left-0 mb-1 z-20 w-80 rounded-lg border border-border-strong bg-raised py-1 shadow-e2">
           <div className="px-3 py-1 text-xs text-text-muted">
             격리 방식 <span className="text-text-secondary">— 새 작업에 적용</span>
           </div>
@@ -78,7 +78,7 @@ export function IsolationPicker({ choice, globalDefault, onPick }: Props) {
                 >
                   <Icon
                     name={on ? "check" : o.choice === "pinned-off" ? "folder" : "branch"}
-                    size={13}
+                    size={14}
                   />
                 </span>
                 <span className="flex-1 min-w-0">

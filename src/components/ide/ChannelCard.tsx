@@ -2,7 +2,7 @@ import type { ReactElement, ReactNode } from "react";
 
 /** 플로팅 채널 카드의 공통 외피 — 채널이 둘 이상이 되면서 스타일을 한 곳에 모았다. */
 const SHELL =
-  "side-panel-scrollbars-hidden pointer-events-auto flex flex-col overflow-y-auto rounded-xl border border-border-strong bg-raised shadow-[0_8px_32px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.05)]";
+  "side-panel-scrollbars-hidden pointer-events-auto flex flex-col overflow-y-auto rounded-xl border border-border-strong bg-raised shadow-e3";
 
 /**
  * 세션 위에 떠 있는 채널 한 장.

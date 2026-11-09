@@ -3,6 +3,9 @@ pub mod agenthealth;
 pub mod annotations;
 pub mod approval;
 pub mod task_results;
+pub mod task_specs;
+pub mod task_archive;
+pub mod task_observation;
 pub mod pipeline;
 pub mod project_plan;
 pub(crate) mod project_paths;
@@ -214,6 +217,15 @@ pub fn run() {
 
     // GUI(.app)는 최소 PATH만 받으므로, 모든 셸아웃(claude/git/build 등) 전에 PATH 보강.
     envpath::augment_path();
+    let mut context = tauri::generate_context!();
+    if commands::thinkrail_probe::enabled() {
+        for window in &mut context.config_mut().app.windows { window.incognito = true; }
+        if let Ok(url) = std::env::var("DOJANG_NATIVE_PROBE_URL") {
+            let url = tauri::Url::parse(&url).expect("native probe URL");
+            assert!(matches!(url.host_str(), Some("127.0.0.1") | Some("localhost")) && url.scheme()=="http", "native probe must stay local");
+            context.config_mut().build.dev_url = Some(url);
+        }
+    }
     let state = AppState::default();
     let preview_bridge = state.preview_bridge.clone();
     tauri::Builder::default()
@@ -228,7 +240,14 @@ pub fn run() {
         .manage(voice::VoiceManaged::default())
         .manage(voice::server::ServerManaged::default())
         .manage(mobile_surface::MobileSurface::default())
+        .on_page_load(|window, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                if let Some(main) = window.app_handle().get_webview_window(window.label()) { commands::thinkrail_probe::page_loaded(&main); }
+            }
+        })
         .setup(|app| {
+            if commands::thinkrail_probe::enabled() { return commands::thinkrail_probe::start(app).map_err(Into::into); }
+
             if let Some(url) = std::env::var_os("PRAXIS_PREVIEW_AUTO_OPEN_PROBE_URL") {
                 let root = std::env::var_os("PRAXIS_PREVIEW_AUTO_OPEN_PROBE_DIR")
                     .ok_or("PRAXIS_PREVIEW_AUTO_OPEN_PROBE_DIR is required")?;
@@ -646,7 +665,17 @@ pub fn run() {
                 commands::purpose_get,
                 commands::purpose_request_refresh,
                 commands::task_result_get,
+                commands::task_pr_status_get,
+                commands::task_spec_search,
+                commands::task_spec_read,
+                commands::task_spec_save,
+                commands::task_spec_list,
+                commands::task_spec_get,
+                commands::task_spec_validate_links,
                 commands::task_result_reference,
+                commands::review_artifact_list,
+                commands::review_artifact_get,
+                commands::review_artifact_save,
                 commands::task_review_get,
                 commands::task_review_decide,
                 commands::task_review_deliver,
@@ -659,6 +688,12 @@ pub fn run() {
                 commands::task_discard,
                 commands::tasks_discard_orphans,
                 commands::task_list,
+                commands::task_archive,
+                commands::task_restore,
+                commands::task_observation_get,
+                commands::thinkrail_probe_finish,
+                commands::task_pr_preview,
+                commands::task_pr_execute,
                 commands::quickopen_search,
                 commands::task_write,
                 commands::knowledge_vault_local_composer_send,
@@ -756,6 +791,7 @@ pub fn run() {
                 commands::theme_export,
                 commands::theme_import,
                 commands::agent_models_get,
+                commands::agent_available_models,
                 commands::agent_model_set,
                 commands::task_model_set,
                 commands::service_tier::codex_speed_models,
@@ -953,7 +989,7 @@ pub fn run() {
                 side_question::shutdown_all();
             }
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building praxis")
         .run(|app,event| {
             if let tauri::RunEvent::ExitRequested {api,..}=event {

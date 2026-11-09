@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyStateOverrides, noteStateOverride, type StateOverrides } from "./task-state-overlay";
+import { applyStateOverrides, archivedStateRaces, noteStateOverride, type StateOverrides } from "./task-state-overlay";
 import type { Task } from "./ipc";
 import { LOCAL_HOST } from "./transport";
 
@@ -124,4 +124,19 @@ describe("applyStateOverrides", () => {
 
     expect(applyStateOverrides(snapshot, overrides, 100)[0]).toBe(snapshot[0]);
   });
+  it("보관 스냅샷과 상태 이벤트가 경합하면 표지를 임의로 지우지 않고 재조회 대상을 반환한다", () => {
+    const archive = { archived_at: 1, branch: "task-1", head_revision: null, worktree_path: "/wt/1", worktree_exists: true, result_path: null, pr_url: null };
+    const overrides: StateOverrides = new Map();
+    noteStateOverride(overrides, 1, "Running", null, 150);
+    noteStateOverride(overrides, 1, "AwaitingReview", null, 160);
+    const local = { ...task(LOCAL_HOST, 1, "AwaitingReview"), archive };
+    const remote = { ...task("mini1", 1, "AwaitingReview"), archive };
+    const merged = applyStateOverrides([local, remote], overrides, 100);
+    expect(merged[0].archive).toBe(archive);
+    expect(archivedStateRaces([local, remote], overrides, 100)).toEqual([1]);
+    expect(merged[0].state).toBe("AwaitingReview");
+    expect(merged[1]).toBe(remote);
+    expect(local.archive).toBe(archive);
+  });
+
 });

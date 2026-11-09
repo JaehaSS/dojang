@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { validateName } from "../../lib/file-ops";
+import { Button, Dialog } from "../ui";
 
 interface Props {
   open: boolean;
@@ -58,48 +59,34 @@ export function FilePromptDialog({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-      onMouseDown={onCancel}
-    >
-      <div
-        className="w-80 rounded-lg border border-border-strong bg-raised p-4 shadow-xl"
-        onMouseDown={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-label={title}
-      >
-        <div className="text-sm text-text">{title}</div>
-        <div className="text-xs text-text-muted truncate mb-2" title={subtitle}>
-          {subtitle}
-        </div>
-        <input
-          ref={inputRef}
-          className="w-full h-8 px-2 rounded-md bg-surface border border-border text-sm text-text"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
-            if (e.key === "Escape") onCancel();
-          }}
-          aria-label={title}
-          aria-invalid={error !== null}
-        />
-        <div className="min-h-5 text-xs text-status-failed">
-          {value.trim() ? (error ?? serverError ?? "") : (serverError ?? "")}
-        </div>
-        <div className="flex justify-end gap-2 mt-1">
-          <button className="px-3 py-1 text-sm text-text-muted hover:text-text" onClick={onCancel}>
-            취소
-          </button>
-          <button
-            className="px-3 py-1 text-sm rounded-md bg-primary text-bg disabled:opacity-40"
-            disabled={error !== null}
-            onClick={submit}
-          >
-            {confirmLabel}
-          </button>
-        </div>
+    <Dialog label={title} onClose={onCancel} className="w-80 p-4">
+      <div className="text-sm text-text">{title}</div>
+      <div className="text-xs text-text-muted truncate mb-2" title={subtitle}>
+        {subtitle}
       </div>
-    </div>
+      <input
+        ref={inputRef}
+        className="w-full h-8 px-2 rounded-md bg-surface border border-border text-sm text-text"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          // Esc는 Dialog가 닫는다 — 여기서도 잡으면 onCancel이 두 번 불린다.
+          if (e.key === "Enter") submit();
+        }}
+        aria-label={title}
+        aria-invalid={error !== null}
+      />
+      <div className="min-h-5 text-xs text-status-failed">
+        {value.trim() ? (error ?? serverError ?? "") : (serverError ?? "")}
+      </div>
+      <div className="flex justify-end gap-2 mt-1">
+        <Button variant="ghost" size="sm" onClick={onCancel}>
+          취소
+        </Button>
+        <Button variant="primary" size="sm" disabled={error !== null} onClick={submit}>
+          {confirmLabel}
+        </Button>
+      </div>
+    </Dialog>
   );
 }

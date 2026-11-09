@@ -1,9 +1,10 @@
 import { useEffect, useState, type MouseEvent } from "react";
 import type { Task } from "../../lib/ipc";
 import { LOCAL_HOST, taskKey } from "../../lib/transport";
-import { taskDotColor, taskStatusLabel } from "../../lib/task-status";
+import { taskStatusLabel, taskTone } from "../../lib/task-status";
 import { recentSessions } from "../../lib/recent-sessions";
-import { repoBase } from "./SessionTaskProject";
+import { compactAge, repoBase } from "./SessionTaskProject";
+import { TaskStatusIcon } from "./TaskStatusIcon";
 import type { TaskNavigationMenuState } from "./TaskNavigationMenu";
 
 export interface RecentSessionsProps {
@@ -81,35 +82,31 @@ export function RecentSessions({
           <div
             key={taskKey(task)}
             data-task-key={taskKey(task)}
+            aria-current={selected ? "true" : undefined}
             onClick={() => onOpenTask(task)}
             onContextMenu={(event) => openMenu(event, task)}
-            className={`mx-1 mb-0.5 flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs cursor-pointer transition-all ${
-              selected
-                ? "bg-raised border-primary text-text"
-                : "bg-surface border-border text-text-secondary hover:border-border-strong hover:text-text"
+            // 아래 트리 행과 같은 모양이다 — 테두리 없이 선택은 배경으로만 드러낸다(2026-11-09 Orca 차용).
+            className={`mx-1 flex items-center gap-1.5 rounded-md px-2 py-1 text-sm cursor-pointer transition-colors ${
+              selected ? "bg-raised text-text" : "text-text-secondary hover:bg-raised/50 hover:text-text"
             }`}
           >
-            <span
-              className="w-2 h-2 rounded-full shrink-0"
-              style={{ background: taskDotColor(task, pendingQuestion) }}
-              role="img"
-              aria-label={`작업 상태: ${taskStatusLabel(task, pendingQuestion)}`}
-              title={taskStatusLabel(task, pendingQuestion)}
-            />
+            <TaskStatusIcon tone={taskTone(task, pendingQuestion)} label={taskStatusLabel(task, pendingQuestion)} />
             {/* 프로젝트명이 먼저다 — 찾고 있는 것이 "어느 프로젝트의 세션인가"이므로, 제목보다
                 프로젝트가 앞에 와야 눈이 한 열만 훑고 끝난다. */}
             <span className="shrink-0 font-medium">{repoBase(task.repo)}</span>
             <span className="shrink-0 text-text-muted">·</span>
-            <span className="truncate min-w-0">{task.instruction || task.branch}</span>
-            {/* 원격 세션만 호스트를 단다 — 로컬이 기본이라 거기 이름표를 붙이면 목록이 소음이 된다. */}
+            <span className="truncate min-w-0 flex-1">{task.instruction || task.branch}</span>
+            {/* 원격 세션만 호스트를 단다 — 로컬이 기본이라 거기 이름표를 붙이면 목록이 소음이 된다.
+                teal은 행동·포커스 색이라 메타 이름표에는 쓰지 않는다(DESIGN.md Do #4). */}
             {task.host !== LOCAL_HOST && (
               <span
-                className="ml-auto shrink-0 rounded bg-raised px-1 text-[10px] font-code text-primary-bright"
+                className="shrink-0 rounded bg-raised px-1 text-[11px] font-code text-text-secondary"
                 title={`원격 호스트: ${task.host}`}
               >
                 {task.host}
               </span>
             )}
+            <span className="shrink-0 text-xs text-text-muted">{compactAge(task.updated_at, now * 1000)}</span>
           </div>
         );
       })}

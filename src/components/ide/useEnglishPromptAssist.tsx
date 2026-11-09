@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { hasHangul, studyExpressionsOn, translateText, useTranslateSettings } from "../../lib/translate";
 import { ExpressionList, HighlightedText, useExpressions } from "./ExpressionStudy";
+import { Icon } from "./icons";
 
 /** 입력창 ⌘J — 한글 IME 중에는 `e.key`가 자모로 오므로 물리 키(`e.code`)로 본다. */
 export const isPromptAssistShortcut = (e: { metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; code: string }) =>
@@ -115,10 +116,10 @@ export function EnglishPromptAssistPanel({ state, onDismiss }: { state: PromptAs
     <button
       type="button"
       aria-label="닫기"
-      className="shrink-0 rounded px-1 text-text-muted hover:bg-raised hover:text-text"
+      className="inline-flex shrink-0 items-center rounded px-1 text-text-muted hover:bg-raised hover:text-text"
       onClick={onDismiss}
     >
-      ✕
+      <Icon name="x" size={12} />
     </button>
   );
   if (state.kind === "pending") {

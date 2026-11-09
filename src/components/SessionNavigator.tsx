@@ -163,7 +163,7 @@ export function SessionNavigator({ open, tasks, projects, groups, onClose, onOpe
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 pt-24" onMouseDown={close}>
       <div
-        className="flex max-h-[70vh] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-border-strong bg-raised shadow-xl"
+        className="flex max-h-[70vh] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-border-strong bg-raised shadow-e3"
         role="dialog"
         aria-modal="true"
         aria-label="세션 탐색"

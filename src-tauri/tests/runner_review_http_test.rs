@@ -198,6 +198,7 @@ async fn fixture() -> Fixture {
         max_concurrent_tasks: 2,
         execution_policy: ExecutionPolicy::AlwaysApprove,
         pairing_token_file: token_path.clone(),
+        ..Default::default()
     };
     Fixture {
         state: RunnerHttpState {

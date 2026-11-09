@@ -148,6 +148,40 @@ export interface TaskDiffResult {
   review?: { hunks: DiffHunk[]; annotations: RematchedAnnotation[]; warning?: string };
 }
 
+export interface AssistantApproval {
+  id: number;
+  assistant_task_id: number;
+  target_task_id: number | null;
+  action_kind: "approve_task" | "discard_task" | "run_pending_task" | "custom_command" | string;
+  summary: string;
+  payload_json: string;
+  status: "pending" | "approved" | "rejected" | "executed" | "failed" | string;
+  created_at: number;
+  resolved_at: number | null;
+  error: string | null;
+}
+
+export interface OrchestratorOverview {
+  running_count: number;
+  queued_count: number;
+  awaiting_review_count: number;
+  question_count: number;
+  pending_approval_count: number;
+  failed_count: number;
+}
+
+export interface AssistantSnapshot {
+  task: Task;
+  pending_approvals: AssistantApproval[];
+  overview: OrchestratorOverview;
+}
+
+export interface AssistantConfigUpdate {
+  agent: string;
+  model?: string | null;
+  reasoning_effort?: string | null;
+}
+
 export interface PraxisTransport {
   kind: TransportKind;
   /** 이 transport가 대표하는 호스트. 레지스트리의 키이자 `taskList()`가 행에 주입하는 값. */
@@ -270,6 +304,20 @@ export interface PraxisTransport {
   ): Promise<GrillNote>;
   /** 노트 파일 저장 — 로컬 전용. LLM 호출이 아니라 파일시스템 쓰기다. */
   grillSaveNote(repo: string, slug: string, markdown: string, date: string): Promise<string>;
+  /** 상시 비서 스냅샷(단일 비서 세션 + 승인 대기 목록 + 관제 요약) 조회. */
+  assistantGet?(): Promise<AssistantSnapshot>;
+  /** 상시 비서에 대화 메시지 전송. */
+  assistantMessage?(message: string): Promise<Task>;
+  /** 상시 비서 현재 진행 중 턴 취소. */
+  assistantCancel?(): Promise<void>;
+  /** 상시 비서 벤더·모델·추론 강도 전환. */
+  assistantUpdateConfig?(update: AssistantConfigUpdate): Promise<Task>;
+  /** 상시 비서 인라인 승인 요청 목록 조회. */
+  assistantApprovals?(status?: string): Promise<AssistantApproval[]>;
+  /** 상시 비서 인라인 승인 카드 승인 실행. */
+  assistantApprove?(approvalId: number): Promise<AssistantApproval>;
+  /** 상시 비서 인라인 승인 카드 거절. */
+  assistantReject?(approvalId: number, reason?: string): Promise<AssistantApproval>;
 }
 
 /** 새 작업 화면이 local Tauri와 Runner에 넘기는 공통 생성 입력. */

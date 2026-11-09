@@ -50,6 +50,23 @@ describe("recentSessions", () => {
     expect(recentSessions(tasks, NOW).map((t) => t.id)).toEqual([3]);
   });
 
+  it("보관된 작업은 같은 id의 원격 작업과 무관하게 최근 목록에서 제외한다", () => {
+    const tasks = [
+      task({ id: 3, host: "local", archive: {
+        archived_at: NOW,
+        branch: "feature/local",
+        head_revision: null,
+        worktree_path: "/workspace/praxis/.dojang/worktrees/task-3",
+        worktree_exists: true,
+        result_path: null,
+        pr_url: null,
+      } }),
+      task({ id: 3, host: "runner-1" }),
+    ];
+
+    expect(recentSessions(tasks, NOW).map(taskKey)).toEqual(["runner-1:3"]);
+  });
+
   it("updated_at 내림차순, 같으면 id 내림차순으로 정렬한다", () => {
     const tasks = [
       task({ id: 1, updated_at: NOW - 100 }),

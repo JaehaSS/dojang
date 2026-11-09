@@ -22,6 +22,7 @@ import { EnsembleCompare } from "./EnsembleCompare";
 import { EnsembleFeedback } from "./EnsembleFeedback";
 import { EnsembleMetrics } from "./EnsembleMetrics";
 import { useExperimentalFeatures } from "../../lib/experimental-features";
+import { IconButton } from "../ui";
 
 interface Props {
   ensemble: string;
@@ -140,9 +141,9 @@ export function EnsembleView({ ensemble, onOpenTask, onApprove, onHome }: Props)
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <header className="h-11 border-b border-border flex items-center gap-2 px-3 shrink-0">
-        <button className="text-text-muted hover:text-text shrink-0" onClick={onHome} title="홈" aria-label="홈">
+        <IconButton label="홈" onClick={onHome}>
           <Icon name="home" size={16} />
-        </button>
+        </IconButton>
         <Icon name="scale" size={16} />
         <span className="font-medium truncate max-w-[38%]" title={instruction}>
           {instruction || "비교 실행"}
@@ -288,8 +289,8 @@ export function EnsembleView({ ensemble, onOpenTask, onApprove, onHome }: Props)
                 </pre>
               )}
               {concernsFor(label) && (
-                <div className="text-xs mt-2" style={{ color: "var(--c-awaiting)" }}>
-                  ⚠ {concernsFor(label)}
+                <div className="text-xs mt-2 flex items-start gap-1" style={{ color: "var(--c-awaiting)" }}>
+                  <span className="mt-px shrink-0"><Icon name="alert" size={12} /></span>{concernsFor(label)}
                 </div>
               )}
               <div className="flex gap-1.5 mt-2">

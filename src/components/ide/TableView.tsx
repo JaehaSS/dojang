@@ -75,7 +75,7 @@ export function TableView({
   return (
     <div className="flex-1 min-h-0 flex flex-col" data-testid="table-view">
       <div className="h-8 shrink-0 flex items-center gap-2 px-3 border-b border-border text-xs text-text-muted">
-        <Icon name="chart" size={13} />
+        <Icon name="chart" size={14} />
         <span className="truncate text-text-secondary">{name}</span>
         <span className="uppercase tracking-wide opacity-70">{table.format}</span>
         <span className="truncate">· {summary}</span>
@@ -109,7 +109,7 @@ export function TableView({
                   title={c.type}
                 >
                   <div className="text-text">{c.name}</div>
-                  <div className="text-[10px] font-normal text-text-muted">{c.type}</div>
+                  <div className="text-[11px] font-normal text-text-muted">{c.type}</div>
                 </th>
               ))}
             </tr>

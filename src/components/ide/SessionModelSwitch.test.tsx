@@ -337,7 +337,8 @@ describe("SessionModelSwitch", () => {
   it.each(["Queued", "Running", "Done", "Failed", "Discarded"])("%s 상태는 에이전트 전환을 막고 이유를 보인다", async (state) => {
     await render(<SessionModelSwitch task={task({ state })} onChanged={() => undefined} />);
     expect(container?.querySelector('button[title*="검토 대기"]')?.hasAttribute("disabled")).toBe(true);
-    expect(container?.textContent).toContain("대화 작업 검토 대기에서 전환 가능");
+    // 상태가 바뀌면 풀리는 일시적 잠금은 컴포저 줄을 채우지 않고 툴팁으로만 말한다.
+    expect(container?.textContent).not.toContain("대화 작업 검토 대기에서 전환 가능");
   });
 
   it("턴이 끝나 검토 대기로 갱신되면 에이전트 선택이 활성화된다", async () => {

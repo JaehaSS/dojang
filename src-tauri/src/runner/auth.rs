@@ -135,6 +135,7 @@ pub fn mobile_scope_denies(method: &Method, path: &str) -> bool {
         // 기기 관리는 Desktop 전용. 폰이 새 페어링 코드를 찍어낼 수 있으면 회수가 무의미해지고,
         // 탈취된 세션 하나가 스스로 기기를 늘리는 권한 상승이 된다.
         || path.starts_with("/v1/mobile/")
+        || path == "/v1/mcp/orchestrator"
         // 세션홈 목록은 페어링 자격 전용이다(설계 2026-09-17 제약 5) — 승계(POST /v1/tasks의
         // resume_session)는 본문을 봐야 하므로 여기서 못 막는다. `task_create` 핸들러가 대신 막는다.
         || (method == Method::GET && (path == "/v1/sessions" || path.starts_with("/v1/sessions/")))
